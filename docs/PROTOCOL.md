@@ -90,3 +90,10 @@ watcher polls locally. This file-based control channel works across macOS,
 Linux, and Windows and does not require a Unix socket or loopback port. Stale
 state is ignored, and an unresponsive authenticated watcher is terminated when
 the user explicitly requests `unwatch`.
+
+Each active watcher also joins a per-machine PeerPigeon index session. The
+machine directory is stored as an encrypted `public`-space record; `public`
+describes its ACL inside that session, while PeerPigeon's `syncSecret` encrypts
+the entire synchronization envelope. The first `init` transfers that index
+capability to `gitpigeon.dev` in a URL fragment, which is never sent to the web
+server. No HTTP listener or loopback bridge participates in discovery.

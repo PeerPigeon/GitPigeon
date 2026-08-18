@@ -10,15 +10,23 @@ export {
   watchDaemonStatus,
 } from './daemon.js';
 export {
-  BROWSER_BRIDGE_HOST,
-  BROWSER_BRIDGE_PORT,
-  ensureBrowserBridgeService,
-  listBrowserBridgeRegistrations,
-  registerBrowserBridge,
-  runBrowserBridgeService,
-  startBrowserBridgeService,
-  stopBrowserBridgeService,
-} from './browser-bridge.js';
+  INDEX_HEARTBEAT_MS,
+  INDEX_NETWORK_ID,
+  INDEX_PROTOCOL,
+  INDEX_STALE_MS,
+  claimPairingUrl,
+  clearMachinePigeons,
+  connectMachineIndex,
+  directoryKey,
+  directoryValue,
+  listMachinePigeons,
+  loadMachineIndex,
+  machineIndexRoot,
+  openDashboard,
+  pairingUrl,
+  registerMachinePigeon,
+  unregisterMachinePigeon,
+} from './machine-index.js';
 export { connectPeerPigeon } from './peerpigeon.js';
 export { installNativeWebRTC } from './webrtc.js';
 export { createIdentity, loadConfig, saveConfig, validateConfig } from './config.js';

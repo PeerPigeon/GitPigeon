@@ -13,10 +13,13 @@ import {
 import { GitRepository } from './git.js';
 import { createInvite, parseInvite } from './invite.js';
 import {
-  listBrowserBridgeRegistrations,
-  registerBrowserBridge,
-  stopBrowserBridgeService,
-} from './browser-bridge.js';
+  claimPairingUrl,
+  clearMachinePigeons,
+  connectMachineIndex,
+  listMachinePigeons,
+  openDashboard,
+  unregisterMachinePigeon,
+} from './machine-index.js';
 import { connectPeerPigeon } from './peerpigeon.js';
 import { RepositorySynchronizer } from './protocol.js';
 import { WorkspaceFiles } from './workspace.js';
@@ -95,6 +98,16 @@ async function openNetwork(repository, config, log) {
   return { runtime, synchronizer };
 }
 
+async function startIndexedWatchDaemon(repository, options = {}) {
+  const current = await watchDaemonStatus(repository.gitDir);
+  if (current.running) {
+    const registered = (await listMachinePigeons({ activeOnly: false }))
+      .some((entry) => entry.repository === repository.root && entry.pid === current.pid);
+    if (!registered) await stopWatchDaemon(repository);
+  }
+  return await startWatchDaemon(repository, options);
+}
+
 async function discoverOrInitialize(cwd, directory) {
   if (directory) {
     const target = path.resolve(cwd, directory);
@@ -140,7 +153,18 @@ async function commandInit(args, cwd, verbose) {
   }
   const workspace = new WorkspaceFiles(repository);
   await workspace.init();
-  const watcher = await startWatchDaemon(repository, { verbose });
+  const watcher = await startIndexedWatchDaemon(repository, { verbose });
+  const dashboardPairing = await claimPairingUrl({ baseUrl: process.env.GITPIGEON_DASHBOARD_URL });
+  if (dashboardPairing) {
+    try {
+      const opened = openDashboard(dashboardPairing);
+      if (opened) console.log('Paired this machine with the GitPigeon dashboard through PeerPigeon.');
+      else console.log(`Open this one-time pairing URL:\n${dashboardPairing}`);
+    } catch (error) {
+      console.warn(`Could not open the GitPigeon dashboard automatically: ${error.message}`);
+      console.log(`Open this one-time pairing URL:\n${dashboardPairing}`);
+    }
+  }
 
   if (created && !invite) {
     console.log('GitPigeon initialized and watching in the background.');
@@ -153,7 +177,7 @@ async function commandInit(args, cwd, verbose) {
   }
   const discovered = await workspace.list();
   if (discovered.length) console.log(`Private files: ${discovered.length} automatically protected from Git.`);
-  console.log('Remove this repository from the local index with `git pigeon unwatch`.');
+  console.log('Remove this repository from the encrypted Pigeon index with `git pigeon unwatch`.');
   console.log('Stop every local watcher with `git pigeon stop`.');
 }
 
@@ -225,7 +249,7 @@ async function commandWatch(args, cwd, verbose) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const { repository, config } = await configuredRepository(cwd);
   if (!foreground && !daemonToken) {
-    const result = await startWatchDaemon(repository, { pollMs, verbose });
+    const result = await startIndexedWatchDaemon(repository, { pollMs, verbose });
     console.log(result.started ? 'GitPigeon is now watching in the background.' : 'GitPigeon is already watching.');
     return;
   }
@@ -235,7 +259,7 @@ async function commandWatch(args, cwd, verbose) {
   let synchronizer;
   let timer;
   let control;
-  let browserBridge;
+  let machineIndex;
   let resolveStop;
   const stopped = new Promise((resolve) => { resolveStop = resolve; });
   let stopping = false;
@@ -247,14 +271,10 @@ async function commandWatch(args, cwd, verbose) {
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   try {
-    if (daemonToken) control = await createWatchControl(repository, daemonToken, stop);
-    try {
-      browserBridge = await registerBrowserBridge(repository, config);
-    } catch (error) {
-      log.warn(`Browser index unavailable: ${error.message}`);
-    }
+    machineIndex = await connectMachineIndex(repository, config, log);
     ({ runtime, synchronizer } = await openNetwork(repository, config, log));
     await synchronizer.start();
+    if (daemonToken) control = await createWatchControl(repository, daemonToken, stop);
     let previousDigest = await synchronizer.localDigest();
     let publishing = false;
     const check = async () => {
@@ -284,7 +304,7 @@ async function commandWatch(args, cwd, verbose) {
     if (timer) clearInterval(timer);
     if (synchronizer) await synchronizer.stop();
     if (runtime) await runtime.close();
-    if (browserBridge) await browserBridge.close();
+    if (machineIndex) await machineIndex.close();
     if (control) await control.close();
   }
 }
@@ -296,10 +316,6 @@ function processIsRunning(pid) {
   } catch {
     return false;
   }
-}
-
-function browserIndexUnavailable(error) {
-  return ['ECONNREFUSED', 'ECONNRESET', 'EPIPE'].includes(error?.code);
 }
 
 function watchedRepositories(registrations) {
@@ -321,13 +337,7 @@ function watchedRepositories(registrations) {
 
 async function commandList(args) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
-  let registrations;
-  try {
-    registrations = await listBrowserBridgeRegistrations();
-  } catch (error) {
-    if (!browserIndexUnavailable(error)) throw error;
-    registrations = [];
-  }
+  const registrations = await listMachinePigeons();
   const repositories = watchedRepositories(registrations);
   if (!repositories.length) {
     console.log('No repositories are being watched.');
@@ -360,28 +370,17 @@ async function commandUnwatch(args, cwd) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   if (!name) {
     const { repository } = await configuredRepository(cwd);
-    let registrations = [];
-    try {
-      registrations = (await listBrowserBridgeRegistrations())
-        .filter((registration) => registration.repository === repository.root);
-    } catch (error) {
-      if (!browserIndexUnavailable(error)) throw error;
-    }
+    const registrations = (await listMachinePigeons())
+      .filter((registration) => registration.repository === repository.root);
+    await unregisterMachinePigeon(repository);
     const stopped = await stopRepository(repository, registrations);
-    if (stopped) console.log('Stopped watching this repository and removed it from the local index.');
+    if (stopped) console.log('Stopped watching this repository and removed it from the encrypted PeerPigeon index.');
     else console.log('This repository was not being watched.');
     return;
   }
 
-  let registrations;
-  try {
-    registrations = await listBrowserBridgeRegistrations();
-  } catch (error) {
-    if (browserIndexUnavailable(error)) {
-      throw new Error('No repositories are being watched. Run `git pigeon init` in a repository first.');
-    }
-    throw error;
-  }
+  const registrations = await listMachinePigeons();
+  if (!registrations.length) throw new Error('No repositories are being watched. Run `git pigeon init` in a repository first.');
   const matches = watchedRepositories(registrations)
     .filter((repository) => repository.name.toLocaleLowerCase() === name.toLocaleLowerCase());
   if (!matches.length) throw new Error(`No watched repository is named "${name}". Run \`git pigeon list\` to see the current names.`);
@@ -390,25 +389,17 @@ async function commandUnwatch(args, cwd) {
   }
   const match = matches[0];
   const repository = await GitRepository.discover(match.root);
+  await unregisterMachinePigeon(repository);
   await stopRepository(repository, match.registrations);
-  console.log(`Stopped watching ${match.name} and removed it from the local index.`);
+  console.log(`Stopped watching ${match.name} and removed it from the encrypted PeerPigeon index.`);
 }
 
 async function commandStop(args) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
-  let registrations;
-  try {
-    registrations = await listBrowserBridgeRegistrations();
-  } catch (error) {
-    if (browserIndexUnavailable(error)) {
-      console.log('The local GitPigeon index is already stopped.');
-      return;
-    }
-    throw error;
-  }
+  const registrations = await listMachinePigeons();
   if (!registrations.length) {
-    await stopBrowserBridgeService();
-    console.log('Stopped the empty local GitPigeon index.');
+    await clearMachinePigeons();
+    console.log('The encrypted GitPigeon index is already empty.');
     return;
   }
 
@@ -436,8 +427,8 @@ async function commandStop(args) {
   while (Date.now() < deadline && pids.some(processIsRunning)) await sleep(50);
   const remaining = pids.filter(processIsRunning);
   if (remaining.length) throw new Error(`Could not stop ${remaining.length} local GitPigeon watcher${remaining.length === 1 ? '' : 's'}`);
-  await stopBrowserBridgeService();
-  console.log(`Stopped ${repositories.size} watched repositor${repositories.size === 1 ? 'y' : 'ies'} and the entire local index.`);
+  await clearMachinePigeons();
+  console.log(`Stopped ${repositories.size} watched repositor${repositories.size === 1 ? 'y' : 'ies'} and cleared the encrypted PeerPigeon index.`);
 }
 
 async function ensureCloneDirectory(target) {
