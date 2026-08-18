@@ -9,12 +9,16 @@ import { GitRepository } from './git.js';
 import { createInvite, parseInvite } from './invite.js';
 import { connectPeerPigeon } from './peerpigeon.js';
 import { RepositorySynchronizer } from './protocol.js';
+import { WorkspaceFiles } from './workspace.js';
 
 const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
 
 Usage:
   git pigeon init [--repo-id ID] [--secret KEY] [--signal WSS_URL]
   git pigeon invite
+  git pigeon track FILE...
+  git pigeon untrack FILE...
+  git pigeon tracked
   git pigeon sync [--wait DURATION] [--force]
   git pigeon watch [--poll DURATION]
   git pigeon clone INVITE [DIRECTORY] [--wait DURATION]
@@ -104,6 +108,36 @@ async function commandInvite(args, cwd) {
   console.log(createInvite(config));
 }
 
+async function commandTrack(args, cwd) {
+  if (!args.length) throw new Error('track requires at least one file path');
+  const { repository } = await configuredRepository(cwd);
+  const workspace = new WorkspaceFiles(repository);
+  const added = await workspace.track(args);
+  for (const file of added) console.log(`Tracking privately: ${file}`);
+  console.log('These files are excluded from Git and will sync through PeerPigeon.');
+}
+
+async function commandUntrack(args, cwd) {
+  if (!args.length) throw new Error('untrack requires at least one file path');
+  const { repository } = await configuredRepository(cwd);
+  const workspace = new WorkspaceFiles(repository);
+  const removed = await workspace.untrack(args);
+  for (const file of removed) console.log(`No longer tracking privately: ${file}`);
+  if (!removed.length) console.log('No matching private files were tracked.');
+  else console.log('These paths are no longer excluded from Git on this device.');
+}
+
+async function commandTracked(args, cwd) {
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  const { repository } = await configuredRepository(cwd);
+  const files = await new WorkspaceFiles(repository).list();
+  if (!files.length) {
+    console.log('No private workspace files are tracked.');
+    return;
+  }
+  for (const file of files) console.log(file);
+}
+
 async function commandSync(args, cwd, verbose) {
   const waitMs = duration(takeOption(args, '--wait'), DEFAULT_SYNC_WAIT_MS);
   const force = takeFlag(args, '--force');
@@ -133,14 +167,14 @@ async function commandWatch(args, cwd, verbose) {
   let timer;
   try {
     await synchronizer.start();
-    let previousDigest = await repository.refsDigest();
+    let previousDigest = await synchronizer.localDigest();
     let publishing = false;
     const check = async () => {
       if (publishing) return;
       publishing = true;
       try {
-        const nextDigest = await repository.refsDigest();
-        if (nextDigest && nextDigest !== previousDigest) {
+        const nextDigest = await synchronizer.localDigest();
+        if (nextDigest !== previousDigest) {
           previousDigest = nextDigest;
           await synchronizer.publishLocal();
         }
@@ -215,6 +249,7 @@ async function commandStatus(args, cwd) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const { repository, config } = await configuredRepository(cwd);
   const cache = new RepositoryCache(repository.gitDir);
+  const trackedFiles = await new WorkspaceFiles(repository, cache).list();
   const state = await cache.loadState();
   const value = {
     repository: repository.root,
@@ -224,6 +259,7 @@ async function commandStatus(args, cwd) {
     refsDigest: await repository.refsDigest(),
     knownDevices: Object.keys(state.heads ?? {}).sort(),
     importedSnapshots: state.imported ?? {},
+    trackedFiles,
   };
   if (json) console.log(JSON.stringify(value, null, 2));
   else {
@@ -233,6 +269,8 @@ async function commandStatus(args, cwd) {
     console.log(`Signaling:        ${value.signalingServer}`);
     console.log(`Known devices:    ${value.knownDevices.length}`);
     console.log(`Local refs digest:${value.refsDigest ? ` ${value.refsDigest}` : ' no commits yet'}`);
+    console.log(`Private files:     ${value.trackedFiles.length}`);
+    for (const file of value.trackedFiles) console.log(`  ${file}`);
   }
 }
 
@@ -262,6 +300,9 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   }
   if (command === 'init') return await commandInit(args, cwd);
   if (command === 'invite') return await commandInvite(args, cwd);
+  if (command === 'track') return await commandTrack(args, cwd);
+  if (command === 'untrack') return await commandUntrack(args, cwd);
+  if (command === 'tracked') return await commandTracked(args, cwd);
   if (command === 'sync') return await commandSync(args, cwd, verbose);
   if (command === 'watch') return await commandWatch(args, cwd, verbose);
   if (command === 'clone') return await commandClone(args, cwd, verbose);

@@ -11,7 +11,7 @@ For repository `R` and device `D`:
 ```text
 public gitpigeon/v1/R/registry
 public gitpigeon/v1/R/head/D
-frozen gitpigeon/v1/R/manifest/<bundle-sha256>
+frozen gitpigeon/v1/R/manifest/<snapshot-sha256>
 frozen gitpigeon/v1/R/chunk/<chunk-sha256>
 ```
 
@@ -22,16 +22,31 @@ another's reachable history.
 
 ## Publication order
 
-1. Run `git bundle create --branches --tags`.
-2. Split the resulting bytes into 16 KiB chunks.
-3. Store chunks in PeerPigeon `frozen` space by SHA-256.
-4. Store the manifest in `frozen` space by the bundle SHA-256.
-5. Update the publishing device's `public` head.
+1. Read branches, tags, and the exact private paths registered in
+   `.git/gitpigeon/tracked-files.json`.
+2. Run `git bundle create --branches --tags` when Git refs exist.
+3. Split bundle and private-file bytes into 16 KiB chunks.
+4. Store chunks in PeerPigeon `frozen` space by SHA-256.
+5. Store a manifest containing the bundle descriptor, private-file descriptors,
+   and deletion tombstones in `frozen` space by the composite snapshot SHA-256.
+6. Update the publishing device's `public` head.
 
 Consumers subscribe to the registry and known head keys. After receiving a new
 head, they explicitly retrieve the manifest and each missing chunk. Every chunk,
-the total bundle size, and the final bundle digest are verified before Git sees
-the bundle.
+the total bundle size, bundle digest, private-file size, and private-file digest
+are verified before anything is applied. PeerPigeon's storage session encrypts
+the synchronized envelopes with the invite secret.
+
+Persistent content chunks in `.git/gitpigeon/chunks/` are independently sealed
+with AES-256-GCM using a repository-secret-derived local cache key. The content
+SHA-256 is authenticated as associated data. This prevents the cache from
+leaving a second plaintext copy of a private file outside the working tree.
+
+The composite snapshot ID binds the optional Git bundle digest and the private
+workspace digest. A separate head content digest binds Git ref object IDs and
+the workspace digest, allowing the watcher to detect a config-only change
+without generating a Git bundle on every poll. A manifest may contain only
+private files, so repositories without a first commit can still sync config.
 
 ## Import safety
 
@@ -46,3 +61,17 @@ Already-ahead branches are left alone. Divergent branches are left alone and
 reported with the corresponding remote-tracking ref. Tags are created only when
 the local tag does not already exist.
 
+## Private workspace safety
+
+Tracked private paths are exact repository-relative paths. Each device mirrors
+the path list into a managed `.git/info/exclude` section, keeping the files out
+of Git without publishing a `.gitignore` change. Manifest entries contain either
+content descriptors or deletion tombstones.
+
+For each path, the receiver records the newest peer version as a baseline. An
+incoming update is applied only when the local file is missing, identical to the
+incoming file, or still identical to that baseline. A concurrent local edit is
+never overwritten: the incoming bytes are stored under
+`.git/gitpigeon/conflicts/<device>/`, and incoming deletion is represented by a
+`.deleted-by-peer` marker. Selecting the incoming conflict copy makes that
+version the local baseline for subsequent updates.

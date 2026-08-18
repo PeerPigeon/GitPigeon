@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { RepositorySynchronizer } from '../src/protocol.js';
+import { WorkspaceFiles } from '../src/workspace.js';
 import { createRepository } from './helpers.js';
 
 class FakeNetwork {
@@ -87,6 +88,12 @@ test('publishes and retrieves a repository through PeerPigeon storage semantics'
     config: { ...common, deviceId: 'device-bbbbbbbb' },
   });
   await a.start();
+  const cachedChunks = await readdir(path.join(source.gitDir, 'gitpigeon', 'chunks'));
+  for (const chunk of cachedChunks) {
+    const cached = await readFile(path.join(source.gitDir, 'gitpigeon', 'chunks', chunk));
+    assert.equal(cached.includes(Buffer.from('TOKEN=one')), false);
+    assert.equal(cached.subarray(0, 6).toString('ascii'), 'GPCH1\0');
+  }
   await b.start({ publish: false });
   await b.refresh();
 
@@ -99,3 +106,65 @@ test('publishes and retrieves a repository through PeerPigeon storage semantics'
   await a.stop();
 });
 
+test('syncs private workspace files independently of Git and preserves concurrent edits', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-private-files-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = await createRepository(path.join(root, 'source'));
+  const target = await createRepository(path.join(root, 'target'));
+  await writeFile(path.join(source.root, '.env'), 'TOKEN=one\n');
+  await new WorkspaceFiles(source).track(['.env']);
+
+  const network = new FakeNetwork();
+  const common = {
+    version: 1,
+    repositoryId: 'fedcba9876543210',
+    secret: 'abcdefghijklmnopqrstuvwxyz_1234567890-ABCDE',
+    createdAt: new Date().toISOString(),
+  };
+  const a = new RepositorySynchronizer({
+    repository: source,
+    storage: network.store('private-a'),
+    config: { ...common, deviceId: 'device-private-a' },
+  });
+  const b = new RepositorySynchronizer({
+    repository: target,
+    storage: network.store('private-b'),
+    config: { ...common, deviceId: 'device-private-b' },
+  });
+  await a.start();
+  await b.start({ publish: false });
+  await b.refresh();
+
+  assert.equal(await readFile(path.join(target.root, '.env'), 'utf8'), 'TOKEN=one\n');
+  assert.deepEqual(await new WorkspaceFiles(target).list(), ['.env']);
+  assert.equal((await target.git(['check-ignore', '.env'])).stdout.trim(), '.env');
+
+  const refsBefore = await source.refsDigest();
+  await writeFile(path.join(source.root, '.env'), 'TOKEN=two\n');
+  await a.publishLocal();
+  await b.refresh();
+  assert.equal(await source.refsDigest(), refsBefore);
+  assert.equal(await readFile(path.join(target.root, '.env'), 'utf8'), 'TOKEN=two\n');
+
+  await writeFile(path.join(target.root, '.env'), 'TOKEN=local-target\n');
+  await writeFile(path.join(source.root, '.env'), 'TOKEN=three\n');
+  await a.publishLocal();
+  const conflictResult = await b.refresh();
+  assert.equal(await readFile(path.join(target.root, '.env'), 'utf8'), 'TOKEN=local-target\n');
+  assert.deepEqual(conflictResult.fileConflicts.map(({ path: file }) => file), ['.env']);
+  assert.equal(
+    await readFile(path.join(target.gitDir, 'gitpigeon', 'conflicts', 'device-private-a', '.env'), 'utf8'),
+    'TOKEN=three\n',
+  );
+
+  await writeFile(path.join(target.root, '.env'), 'TOKEN=three\n');
+  await b.publishLocal();
+  await a.refresh();
+  await rm(path.join(source.root, '.env'));
+  await a.publishLocal();
+  await b.refresh();
+  await assert.rejects(access(path.join(target.root, '.env')), { code: 'ENOENT' });
+
+  await b.stop();
+  await a.stop();
+});

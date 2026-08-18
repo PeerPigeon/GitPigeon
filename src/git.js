@@ -95,6 +95,14 @@ export class GitRepository {
       .digest('hex');
   }
 
+  async isTracked(filename) {
+    const result = await this.git(
+      ['ls-files', '--error-unmatch', '--', filename],
+      { allowFailure: true },
+    );
+    return result.code === 0;
+  }
+
   async createBundle() {
     const refs = await this.refs();
     if (refs.length === 0) return null;

@@ -68,12 +68,59 @@ git commit -m "Ship it"
 
 The watcher detects changed branches and tags and publishes them immediately.
 
+## Sync secrets and machine-local config without Git
+
+Use GitPigeon's private workspace channel for exact files that should appear on
+trusted devices but must not enter Git:
+
+```bash
+git pigeon track .env config/local.json .vscode/settings.json
+git pigeon tracked
+git pigeon watch
+```
+
+`track` adds each path to a managed section of `.git/info/exclude`, not the
+repository's `.gitignore`. The file therefore stays out of the Git index and
+history without changing a shared Git file. GitPigeon publishes its bytes and
+tracked-path metadata through the repository's encrypted PeerPigeon storage
+session. Changes and deletions are detected even when no branch or tag changes.
+
+Only exact regular-file paths are accepted; directories, symlinks, globs,
+`.git` paths, and paths outside the repository are rejected. GitPigeon also
+refuses a path already tracked by Git. To stop tracking a non-secret file in Git
+before moving it to the private channel:
+
+```bash
+git rm --cached -- config/local.json
+git commit -m "Keep local config out of Git"
+git pigeon track config/local.json
+```
+
+If the file contained a real secret, removing it from the index does not remove
+older copies from Git history. Rotate the credential and clean the history if
+required.
+
+When a peer update arrives, GitPigeon overwrites a private file only if its
+local version still matches the last synchronized version. If both devices
+edited it, the local file is preserved and the incoming copy is written under:
+
+```text
+.git/gitpigeon/conflicts/<device>/<path>
+```
+
+After choosing or merging the desired contents, normal watching resumes from
+that version. `git pigeon untrack PATH...` disables private syncing and removes
+the local Git exclusion for those paths on the current device.
+
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
 | `git pigeon init` | Add a new Pigeon identity to the current repository. |
 | `git pigeon invite` | Print the existing invite URL. |
+| `git pigeon track FILE...` | Exclude exact files from Git and sync them privately. |
+| `git pigeon untrack FILE...` | Stop private tracking on this device. |
+| `git pigeon tracked` | List private workspace files. |
 | `git pigeon clone INVITE [DIR]` | Create a normal Git repository and retrieve its first live snapshot. |
 | `git pigeon sync` | Publish, wait briefly for peers, retrieve, and exit. |
 | `git pigeon watch` | Keep a real-time sync process running. |
@@ -92,8 +139,9 @@ git pigeon status --json
 ## How syncing works
 
 GitPigeon creates a complete Git bundle for local branches and tags whenever
-their object IDs change. The bundle is divided into small content-addressed
-chunks suitable for WebRTC data channels.
+their object IDs change. Private workspace files are captured independently,
+so config-only changes also create snapshots. Bundle and private-file bytes are
+divided into small content-addressed chunks suitable for WebRTC data channels.
 
 - Bundle chunks and manifests use PeerPigeon's immutable `frozen` storage
   space.
@@ -102,7 +150,7 @@ chunks suitable for WebRTC data channels.
 - A mergeable device registry lets offline and newly joined devices discover
   every per-device head without forcing concurrent writers onto one ref.
 - PeerPigeon's `sessionId` and `syncSecret` encrypt all storage synchronization
-  envelopes.
+  envelopes, including private workspace files.
 - GitPigeon keeps a persistent cache in `.git/gitpigeon/` and re-seeds
   PeerPigeon's in-memory Node storage when the watcher restarts.
 
@@ -131,6 +179,13 @@ Git data travels through the PeerPigeon mesh. Storage envelopes are encrypted
 with the invite secret. Anyone who has the invite can join and read the
 repository, so rotate to a new repository identity if an invite is exposed.
 
+Private workspace files remain ordinary plaintext files in each trusted working
+directory. Persistent content chunks under `.git/gitpigeon/` are encrypted with
+the repository secret; restored files and conflict copies are owner-readable.
+The invite secret itself is stored in `.git/gitpigeon/config.json` with
+owner-only permissions where the platform supports them. Disk encryption and
+normal operating-system account protections remain important.
+
 GitPigeon is peer-to-peer rather than a hosted forge. A device holding a wanted
 snapshot must be online for a brand-new device to retrieve it. Once retrieved,
 the new device caches and re-seeds that snapshot too.
@@ -147,5 +202,6 @@ npm run check
 ```
 
 The tests exercise real local Git repositories, fast-forward and divergence
-behavior, invite validation, chunked snapshot integrity, and a two-device
-simulation of PeerPigeon's exact-key storage subscriptions.
+behavior, invite validation, chunked snapshot integrity, exact Git exclusion,
+config-only private sync, deletion and concurrent-secret conflict safety, and a
+two-device simulation of PeerPigeon's exact-key storage subscriptions.
