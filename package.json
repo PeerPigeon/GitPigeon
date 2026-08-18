@@ -1,0 +1,39 @@
+{
+  "name": "gitpigeon",
+  "version": "0.1.0",
+  "description": "Real-time, peer-to-peer synchronization for native Git repositories",
+  "type": "module",
+  "bin": {
+    "git-pigeon": "./bin/git-pigeon.js"
+  },
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "PEERPIGEON.lock.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "check": "node --check bin/git-pigeon.js && node --test"
+  },
+  "engines": {
+    "node": ">=20.12"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "peerpigeon": "git+https://github.com/PeerPigeon/PeerPigeon.git#ee07a5934bda5d05cf9b0f364a13456ba3438a1c"
+  },
+  "overrides": {
+    "freertc": "git+https://github.com/draeder/freertc.git#614254cf4b5185da917dca714ba7f65581191aae"
+  }
+}

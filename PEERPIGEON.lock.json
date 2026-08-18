@@ -1,0 +1,14 @@
+{
+  "repository": "https://github.com/PeerPigeon/PeerPigeon",
+  "commit": "ee07a5934bda5d05cf9b0f364a13456ba3438a1c",
+  "committedAt": "2026-08-17T04:03:11Z",
+  "commitMessage": "Coordinate capacity edge teardown",
+  "packageVersion": "1.0.0",
+  "transitivePins": {
+    "freertc": {
+      "repository": "https://github.com/draeder/freertc",
+      "commit": "614254cf4b5185da917dca714ba7f65581191aae"
+    }
+  },
+  "resolvedAt": "2026-08-18T00:00:00Z"
+}
