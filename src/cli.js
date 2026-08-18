@@ -1,10 +1,15 @@
-import { randomBytes } from 'node:crypto';
 import { mkdir, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { DEFAULT_POLL_MS, DEFAULT_SYNC_WAIT_MS } from './constants.js';
 import { RepositoryCache } from './cache.js';
 import { createIdentity, loadConfig, saveConfig } from './config.js';
+import {
+  createWatchControl,
+  startWatchDaemon,
+  stopWatchDaemon,
+  watchDaemonStatus,
+} from './daemon.js';
 import { GitRepository } from './git.js';
 import { createInvite, parseInvite } from './invite.js';
 import { connectPeerPigeon } from './peerpigeon.js';
@@ -14,14 +19,14 @@ import { WorkspaceFiles } from './workspace.js';
 const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
 
 Usage:
-  git pigeon init [--repo-id ID] [--secret KEY] [--signal WSS_URL]
+  git pigeon init [INVITE] [DIRECTORY]
+  git pigeon unwatch
+  git pigeon watch [off|--foreground] [--poll DURATION]
   git pigeon invite
   git pigeon track FILE...
   git pigeon untrack FILE...
   git pigeon tracked
   git pigeon sync [--wait DURATION] [--force]
-  git pigeon watch [--poll DURATION]
-  git pigeon clone INVITE [DIRECTORY] [--wait DURATION]
   git pigeon status [--json]
   git pigeon doctor
 
@@ -83,23 +88,65 @@ async function openNetwork(repository, config, log) {
   return { runtime, synchronizer };
 }
 
-async function commandInit(args, cwd) {
+async function discoverOrInitialize(cwd, directory) {
+  if (directory) {
+    const target = path.resolve(cwd, directory);
+    await ensureCloneDirectory(target);
+    return await GitRepository.init(target);
+  }
+  try {
+    return await GitRepository.discover(cwd);
+  } catch (error) {
+    if (!String(error.message).includes('Not a Git repository')) throw error;
+    return await GitRepository.init(cwd);
+  }
+}
+
+async function commandInit(args, cwd, verbose) {
   const repositoryId = takeOption(args, '--repo-id');
   const secret = takeOption(args, '--secret');
   const signalingServer = takeOption(args, '--signal');
+  const inviteValue = args.shift();
+  const directory = args.shift();
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
-  const repository = await GitRepository.discover(cwd);
+  if (directory && !inviteValue) throw new Error('A destination directory requires an invite');
+  if (inviteValue && (repositoryId || secret || signalingServer)) {
+    throw new Error('An invite cannot be combined with --repo-id, --secret, or --signal');
+  }
+  const invite = inviteValue ? parseInvite(inviteValue) : null;
+  const repository = await discoverOrInitialize(cwd, directory);
+  let config = null;
   try {
-    await loadConfig(repository.gitDir);
-    throw new Error('GitPigeon is already configured for this repository');
+    config = await loadConfig(repository.gitDir);
   } catch (error) {
     if (!String(error.message).includes('not configured')) throw error;
   }
-  const config = createIdentity({ repositoryId, secret, signalingServer });
-  await saveConfig(repository.gitDir, config);
-  console.log('GitPigeon initialized. Share this invite only with trusted collaborators:\n');
-  console.log(createInvite(config));
-  console.log('\nRun `git pigeon watch` to keep this repository synchronized.');
+  if (config && invite && (
+    config.repositoryId !== invite.repositoryId || config.secret !== invite.secret
+  )) {
+    throw new Error('This repository is already configured with a different GitPigeon invite');
+  }
+  const created = !config;
+  if (!config) {
+    config = createIdentity(invite ?? { repositoryId, secret, signalingServer });
+    await saveConfig(repository.gitDir, config);
+  }
+  const workspace = new WorkspaceFiles(repository);
+  await workspace.init();
+  const watcher = await startWatchDaemon(repository, { verbose });
+
+  if (created && !invite) {
+    console.log('GitPigeon initialized and watching in the background.');
+    console.log('Share this invite only with trusted collaborators:\n');
+    console.log(createInvite(config));
+  } else if (created) {
+    console.log(`GitPigeon joined at ${repository.root} and is syncing in the background.`);
+  } else {
+    console.log(`GitPigeon is configured and ${watcher.started ? 'now watching' : 'already watching'} in the background.`);
+  }
+  const discovered = await workspace.list();
+  if (discovered.length) console.log(`Private files: ${discovered.length} automatically protected from Git.`);
+  console.log('Stop it with `git pigeon unwatch` or `git pigeon watch off`.');
 }
 
 async function commandInvite(args, cwd) {
@@ -158,14 +205,41 @@ async function commandSync(args, cwd, verbose) {
 }
 
 async function commandWatch(args, cwd, verbose) {
+  if (args[0] === 'off') {
+    args.shift();
+    return await commandUnwatch(args, cwd);
+  }
+  if (args[0] === 'on') args.shift();
   const pollMs = duration(takeOption(args, '--poll'), DEFAULT_POLL_MS);
+  const foreground = takeFlag(args, '--foreground');
+  const daemonToken = takeOption(args, '--daemon-child');
   if (pollMs < 100) throw new Error('Poll interval must be at least 100ms');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const { repository, config } = await configuredRepository(cwd);
+  if (!foreground && !daemonToken) {
+    const result = await startWatchDaemon(repository, { pollMs, verbose });
+    console.log(result.started ? 'GitPigeon is now watching in the background.' : 'GitPigeon is already watching.');
+    return;
+  }
+
   const log = logger(verbose);
-  const { runtime, synchronizer } = await openNetwork(repository, config, log);
+  let runtime;
+  let synchronizer;
   let timer;
+  let control;
+  let resolveStop;
+  const stopped = new Promise((resolve) => { resolveStop = resolve; });
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    resolveStop();
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
   try {
+    if (daemonToken) control = await createWatchControl(repository, daemonToken, stop);
+    ({ runtime, synchronizer } = await openNetwork(repository, config, log));
     await synchronizer.start();
     let previousDigest = await synchronizer.localDigest();
     let publishing = false;
@@ -188,25 +262,24 @@ async function commandWatch(args, cwd, verbose) {
     runtime.node.on('peerConnected', () => {
       synchronizer.refresh().catch((error) => log.error(error));
     });
-    log.info(`Watching ${repository.root} as ${config.deviceId.slice(0, 8)} (Ctrl+C to stop)`);
-
-    await new Promise((resolve) => {
-      let stopping = false;
-      const stop = () => {
-        if (stopping) return;
-        stopping = true;
-        process.off('SIGINT', stop);
-        process.off('SIGTERM', stop);
-        resolve();
-      };
-      process.once('SIGINT', stop);
-      process.once('SIGTERM', stop);
-    });
+    log.info(`Watching ${repository.root} as ${config.deviceId.slice(0, 8)}${daemonToken ? '' : ' (Ctrl+C to stop)'}`);
+    await stopped;
   } finally {
+    process.off('SIGINT', stop);
+    process.off('SIGTERM', stop);
     if (timer) clearInterval(timer);
-    await synchronizer.stop();
-    await runtime.close();
+    if (synchronizer) await synchronizer.stop();
+    if (runtime) await runtime.close();
+    if (control) await control.close();
   }
+}
+
+async function commandUnwatch(args, cwd) {
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  const { repository } = await configuredRepository(cwd);
+  const result = await stopWatchDaemon(repository);
+  if (result.stopped) console.log('GitPigeon stopped watching.');
+  else console.log('GitPigeon was not watching.');
 }
 
 async function ensureCloneDirectory(target) {
@@ -220,28 +293,14 @@ async function ensureCloneDirectory(target) {
 }
 
 async function commandClone(args, cwd, verbose) {
-  const waitMs = duration(takeOption(args, '--wait'), 10_000);
+  takeOption(args, '--wait');
   const inviteValue = args.shift();
   if (!inviteValue) throw new Error('clone requires a GitPigeon invite');
   const invite = parseInvite(inviteValue);
-  const target = path.resolve(cwd, args.shift() ?? `gitpigeon-${invite.repositoryId.slice(0, 8)}`);
+  const target = args.shift() ?? `gitpigeon-${invite.repositoryId.slice(0, 8)}`;
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
-  await ensureCloneDirectory(target);
-  const repository = await GitRepository.init(target);
-  const config = createIdentity({ ...invite, deviceId: randomBytes(16).toString('hex') });
-  await saveConfig(repository.gitDir, config);
-  const log = logger(verbose);
-  const { runtime, synchronizer } = await openNetwork(repository, config, log);
-  try {
-    await synchronizer.start({ publish: false });
-    if (waitMs > 0) await sleep(waitMs);
-    await synchronizer.refresh();
-    await synchronizer.publishLocal();
-  } finally {
-    await synchronizer.stop();
-    await runtime.close();
-  }
-  console.log(`GitPigeon clone ready at ${target}`);
+  console.warn('`git pigeon clone` is an alias; use `git pigeon init INVITE [DIRECTORY]`.');
+  return await commandInit([inviteValue, target], cwd, verbose);
 }
 
 async function commandStatus(args, cwd) {
@@ -251,6 +310,7 @@ async function commandStatus(args, cwd) {
   const cache = new RepositoryCache(repository.gitDir);
   const trackedFiles = await new WorkspaceFiles(repository, cache).list();
   const state = await cache.loadState();
+  const watcher = await watchDaemonStatus(repository.gitDir);
   const value = {
     repository: repository.root,
     repositoryId: config.repositoryId,
@@ -260,6 +320,8 @@ async function commandStatus(args, cwd) {
     knownDevices: Object.keys(state.heads ?? {}).sort(),
     importedSnapshots: state.imported ?? {},
     trackedFiles,
+    watching: watcher.running,
+    watcherPid: watcher.running ? watcher.pid : null,
   };
   if (json) console.log(JSON.stringify(value, null, 2));
   else {
@@ -271,6 +333,7 @@ async function commandStatus(args, cwd) {
     console.log(`Local refs digest:${value.refsDigest ? ` ${value.refsDigest}` : ' no commits yet'}`);
     console.log(`Private files:     ${value.trackedFiles.length}`);
     for (const file of value.trackedFiles) console.log(`  ${file}`);
+    console.log(`Watching:          ${value.watching ? `yes (PID ${value.watcherPid})` : 'no'}`);
   }
 }
 
@@ -298,13 +361,14 @@ export async function main(argv = process.argv.slice(2), options = {}) {
     console.log(HELP);
     return;
   }
-  if (command === 'init') return await commandInit(args, cwd);
+  if (command === 'init') return await commandInit(args, cwd, verbose);
   if (command === 'invite') return await commandInvite(args, cwd);
   if (command === 'track') return await commandTrack(args, cwd);
   if (command === 'untrack') return await commandUntrack(args, cwd);
   if (command === 'tracked') return await commandTracked(args, cwd);
   if (command === 'sync') return await commandSync(args, cwd, verbose);
   if (command === 'watch') return await commandWatch(args, cwd, verbose);
+  if (command === 'unwatch') return await commandUnwatch(args, cwd);
   if (command === 'clone') return await commandClone(args, cwd, verbose);
   if (command === 'status') return await commandStatus(args, cwd);
   if (command === 'doctor') return await commandDoctor(args, cwd);

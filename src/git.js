@@ -103,6 +103,25 @@ export class GitRepository {
     return result.code === 0;
   }
 
+  async ignoredFiles() {
+    const excluded = [
+      'node_modules', 'vendor', '.venv', 'venv', 'dist', 'build', 'out',
+      'target', 'coverage', '.cache', '__pycache__', '.next', '.nuxt', '.turbo',
+    ].map((directory) => `:(exclude,glob)**/${directory}/**`);
+    const result = await this.git([
+      'ls-files',
+      '--others',
+      '--ignored',
+      '--exclude-standard',
+      '-z',
+      '--',
+      ...excluded,
+      ':(exclude,glob)**/*.log',
+      ':(exclude,glob)**/*.tmp',
+    ]);
+    return result.stdout.split('\0').filter(Boolean).sort();
+  }
+
   async createBundle() {
     const refs = await this.refs();
     if (refs.length === 0) return null;

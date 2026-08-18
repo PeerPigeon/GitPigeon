@@ -63,10 +63,15 @@ the local tag does not already exist.
 
 ## Private workspace safety
 
-Tracked private paths are exact repository-relative paths. Each device mirrors
-the path list into a managed `.git/info/exclude` section, keeping the files out
-of Git without publishing a `.gitignore` change. Manifest entries contain either
-content descriptors or deletion tombstones.
+At initialization and periodically while watching, GitPigeon discovers regular
+files that are ignored by Git or have conventional secret/local-config names.
+Automatic files are capped at 1 MiB and generated dependency, build, coverage,
+and cache directories are excluded. Explicitly tracked private paths bypass the
+size and naming heuristic but remain exact repository-relative regular files.
+
+Each device mirrors the private path list into a managed `.git/info/exclude`
+section, keeping the files out of Git without publishing a `.gitignore` change.
+Manifest entries contain either content descriptors or deletion tombstones.
 
 For each path, the receiver records the newest peer version as a baseline. An
 incoming update is applied only when the local file is missing, identical to the
@@ -75,3 +80,13 @@ never overwritten: the incoming bytes are stored under
 `.git/gitpigeon/conflicts/<device>/`, and incoming deletion is represented by a
 `.deleted-by-peer` marker. Selecting the incoming conflict copy makes that
 version the local baseline for subsequent updates.
+
+## Watcher lifecycle
+
+`init` launches the watcher as a detached Node process with inherited log file
+descriptors and no shell. Its PID, random control token, and heartbeat live under
+`.git/gitpigeon/`. `unwatch` writes a token-authenticated stop request that the
+watcher polls locally. This file-based control channel works across macOS,
+Linux, and Windows and does not require a Unix socket or loopback port. Stale
+state is ignored, and an unresponsive authenticated watcher is terminated when
+the user explicitly requests `unwatch`.

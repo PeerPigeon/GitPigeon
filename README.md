@@ -40,24 +40,27 @@ exposes it as `git pigeon`.
 
 ## Start a repository
 
-Run this in an existing Git repository:
+Run one command. If the directory is not already a Git repository, GitPigeon
+initializes Git too:
 
 ```bash
 git pigeon init
-git pigeon watch
 ```
 
-`init` prints an invite URL. The URL contains the repository ID, the optional
-signaling server, and the encryption secret. Treat it like a repository
-password.
+`init` protects private files, starts the real-time watcher in the background,
+and prints an invite URL. The URL contains the repository ID, the optional
+signaling server, and the encryption secret. Treat it like a repository password.
 
 On a second device, while at least one existing device is online:
 
 ```bash
-git pigeon clone 'gitpigeon://sync/REPOSITORY_ID#SECRET' my-project
-cd my-project
-git pigeon watch
+git pigeon init 'gitpigeon://sync/REPOSITORY_ID#SECRET' my-project
 ```
+
+That creates `my-project`, initializes native Git, joins the Pigeon, retrieves
+the live snapshot, and keeps watching in the background. There is no separate
+clone or watch step. Running `git pigeon init` again is safe and simply ensures
+the watcher is running.
 
 Continue using Git normally on either device:
 
@@ -66,24 +69,31 @@ git add .
 git commit -m "Ship it"
 ```
 
-The watcher detects changed branches and tags and publishes them immediately.
+The background watcher detects changed branches, tags, secrets, and local config
+and publishes them immediately. Stop it with either spelling:
+
+```bash
+git pigeon unwatch
+# or
+git pigeon watch off
+```
+
+Run `git pigeon init` to start it again.
 
 ## Sync secrets and machine-local config without Git
 
-Use GitPigeon's private workspace channel for exact files that should appear on
-trusted devices but must not enter Git:
+`init` automatically discovers small Git-ignored files plus conventional secret
+and local-config names such as `.env`, `.env.local`, `credentials.json`,
+`secrets.yaml`, and `settings.local.json`. It adds them to a managed section of
+`.git/info/exclude`, not the repository's `.gitignore`. They therefore stay out
+of the Git index and history without changing a shared Git file. Changes and
+deletions sync through encrypted PeerPigeon storage even when no Git ref changes.
 
-```bash
-git pigeon track .env config/local.json .vscode/settings.json
-git pigeon tracked
-git pigeon watch
-```
-
-`track` adds each path to a managed section of `.git/info/exclude`, not the
-repository's `.gitignore`. The file therefore stays out of the Git index and
-history without changing a shared Git file. GitPigeon publishes its bytes and
-tracked-path metadata through the repository's encrypted PeerPigeon storage
-session. Changes and deletions are detected even when no branch or tag changes.
+Automatic discovery skips files over 1 MiB and dependency, build, coverage, and
+cache directories such as `node_modules`, `vendor`, `dist`, `target`, and
+`.next`. This keeps ignored generated trees out of the Pigeon. The advanced
+`git pigeon track FILE...` command can explicitly include an unusual config file
+that does not match the automatic rules.
 
 Only exact regular-file paths are accepted; directories, symlinks, globs,
 `.git` paths, and paths outside the repository are rejected. GitPigeon also
@@ -108,22 +118,23 @@ edited it, the local file is preserved and the incoming copy is written under:
 .git/gitpigeon/conflicts/<device>/<path>
 ```
 
-After choosing or merging the desired contents, normal watching resumes from
-that version. `git pigeon untrack PATH...` disables private syncing and removes
-the local Git exclusion for those paths on the current device.
+After choosing or merging the desired contents, normal background watching
+resumes from that version. `git pigeon untrack PATH...` is an advanced local
+override that disables private syncing and removes the Git exclusion.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `git pigeon init` | Add a new Pigeon identity to the current repository. |
+| `git pigeon init [INVITE] [DIR]` | Create or join a Pigeon and start background syncing. |
+| `git pigeon unwatch` | Stop the background watcher. |
+| `git pigeon watch off` | Alias for `unwatch`. |
 | `git pigeon invite` | Print the existing invite URL. |
 | `git pigeon track FILE...` | Exclude exact files from Git and sync them privately. |
 | `git pigeon untrack FILE...` | Stop private tracking on this device. |
 | `git pigeon tracked` | List private workspace files. |
-| `git pigeon clone INVITE [DIR]` | Create a normal Git repository and retrieve its first live snapshot. |
 | `git pigeon sync` | Publish, wait briefly for peers, retrieve, and exit. |
-| `git pigeon watch` | Keep a real-time sync process running. |
+| `git pigeon watch` | Ensure the background watcher is running. |
 | `git pigeon status` | Show local identity and cached sync state without joining the network. |
 | `git pigeon doctor` | Check Node, Git, and the PeerPigeon dependency. |
 
@@ -132,7 +143,7 @@ Useful options:
 ```bash
 git pigeon init --signal wss://your-relay.example/ws
 git pigeon sync --wait 15s
-git pigeon watch --poll 500ms --verbose
+git pigeon watch --foreground --poll 500ms --verbose
 git pigeon status --json
 ```
 
@@ -153,6 +164,9 @@ divided into small content-addressed chunks suitable for WebRTC data channels.
   envelopes, including private workspace files.
 - GitPigeon keeps a persistent cache in `.git/gitpigeon/` and re-seeds
   PeerPigeon's in-memory Node storage when the watcher restarts.
+- The detached watcher uses an authenticated heartbeat and stop request under
+  `.git/gitpigeon/`, so `init`, `unwatch`, and `status` work consistently on
+  macOS, Linux, and Windows without opening a local control port.
 
 Incoming branches are first written to:
 
@@ -203,5 +217,6 @@ npm run check
 
 The tests exercise real local Git repositories, fast-forward and divergence
 behavior, invite validation, chunked snapshot integrity, exact Git exclusion,
-config-only private sync, deletion and concurrent-secret conflict safety, and a
-two-device simulation of PeerPigeon's exact-key storage subscriptions.
+automatic secret/config discovery, background watcher control, config-only
+private sync, deletion and concurrent-secret conflict safety, and a two-device
+simulation of PeerPigeon's exact-key storage subscriptions.
