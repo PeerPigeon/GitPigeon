@@ -70,7 +70,8 @@ git commit -m "Ship it"
 ```
 
 The background watcher detects changed branches, tags, secrets, and local config
-and publishes them immediately. Stop it with either spelling:
+and publishes them immediately. Remove only the current repository from the
+local browser index with either spelling:
 
 ```bash
 git pigeon unwatch
@@ -79,6 +80,46 @@ git pigeon watch off
 ```
 
 Run `git pigeon init` to start it again.
+
+From any directory, list the repositories currently watched on this machine or
+remove one by its displayed name:
+
+```bash
+git pigeon list
+git pigeon unwatch my-project
+```
+
+If multiple watched repositories have the same name, GitPigeon prints their
+paths and requires you to run `unwatch` from inside the intended repository.
+
+To stop every watcher on this machine and clear the entire browser index:
+
+```bash
+git pigeon stop
+```
+
+`stop` is machine-wide and can be run from any directory; `unwatch` is always
+scoped to the Git repository containing the current directory.
+
+## Automatic browser index
+
+Every active watcher registers its Pigeon with a small loopback-only bridge at
+`127.0.0.1:17381`. Opening `https://gitpigeon.dev` reads that local index and
+automatically displays every Pigeon watched on the machine. The browser does
+not need an invite URL, and starting or stopping a watcher updates the index
+without another command.
+
+The bridge is a machine-wide GitPigeon index process, independent of any one
+repository watcher. `git pigeon unwatch` removes only the current repository;
+the index remains available and returns an empty list when no repositories are
+watched. Only `git pigeon stop` shuts down the entire index.
+
+The bridge accepts browser discovery only from `https://gitpigeon.dev` and the
+documented localhost development origins. Watcher-to-watcher registrations use
+an owner-readable per-user token. Repository secrets remain on the local
+machine and are passed directly to the browser peer; they are never sent to the
+Cloudflare application server. A browser may request loopback-network access
+the first time the site connects.
 
 ## Sync secrets and machine-local config without Git
 
@@ -127,8 +168,11 @@ override that disables private syncing and removes the Git exclusion.
 | Command | Purpose |
 | --- | --- |
 | `git pigeon init [INVITE] [DIR]` | Create or join a Pigeon and start background syncing. |
-| `git pigeon unwatch` | Stop the background watcher. |
-| `git pigeon watch off` | Alias for `unwatch`. |
+| `git pigeon list` | List every repository watched on this machine. |
+| `git pigeon unwatch` | Stop watching only the current repository and remove it from the local index. |
+| `git pigeon unwatch REPOSITORY` | Stop one watched repository by name from any directory. |
+| `git pigeon watch off` | Repository-scoped alias for `unwatch`. |
+| `git pigeon stop` | Stop every local watcher and clear the entire browser index. |
 | `git pigeon invite` | Print the existing invite URL. |
 | `git pigeon track FILE...` | Exclude exact files from Git and sync them privately. |
 | `git pigeon untrack FILE...` | Stop private tracking on this device. |
@@ -166,7 +210,9 @@ divided into small content-addressed chunks suitable for WebRTC data channels.
   PeerPigeon's in-memory Node storage when the watcher restarts.
 - The detached watcher uses an authenticated heartbeat and stop request under
   `.git/gitpigeon/`, so `init`, `unwatch`, and `status` work consistently on
-  macOS, Linux, and Windows without opening a local control port.
+  macOS, Linux, and Windows. A separate machine-wide browser index stays alive
+  across individual `unwatch` commands and is bound only to the loopback
+  interface.
 
 Incoming branches are first written to:
 
@@ -217,6 +263,7 @@ npm run check
 
 The tests exercise real local Git repositories, fast-forward and divergence
 behavior, invite validation, chunked snapshot integrity, exact Git exclusion,
-automatic secret/config discovery, background watcher control, config-only
-private sync, deletion and concurrent-secret conflict safety, and a two-device
-simulation of PeerPigeon's exact-key storage subscriptions.
+automatic secret/config discovery, background watcher control, multi-watcher
+browser indexing, config-only private sync, deletion and concurrent-secret
+conflict safety, and a two-device simulation of PeerPigeon's exact-key storage
+subscriptions.

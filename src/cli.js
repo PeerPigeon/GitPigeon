@@ -12,6 +12,11 @@ import {
 } from './daemon.js';
 import { GitRepository } from './git.js';
 import { createInvite, parseInvite } from './invite.js';
+import {
+  listBrowserBridgeRegistrations,
+  registerBrowserBridge,
+  stopBrowserBridgeService,
+} from './browser-bridge.js';
 import { connectPeerPigeon } from './peerpigeon.js';
 import { RepositorySynchronizer } from './protocol.js';
 import { WorkspaceFiles } from './workspace.js';
@@ -20,7 +25,9 @@ const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
 
 Usage:
   git pigeon init [INVITE] [DIRECTORY]
-  git pigeon unwatch
+  git pigeon list
+  git pigeon unwatch [REPOSITORY]
+  git pigeon stop
   git pigeon watch [off|--foreground] [--poll DURATION]
   git pigeon invite
   git pigeon track FILE...
@@ -146,7 +153,8 @@ async function commandInit(args, cwd, verbose) {
   }
   const discovered = await workspace.list();
   if (discovered.length) console.log(`Private files: ${discovered.length} automatically protected from Git.`);
-  console.log('Stop it with `git pigeon unwatch` or `git pigeon watch off`.');
+  console.log('Remove this repository from the local index with `git pigeon unwatch`.');
+  console.log('Stop every local watcher with `git pigeon stop`.');
 }
 
 async function commandInvite(args, cwd) {
@@ -227,6 +235,7 @@ async function commandWatch(args, cwd, verbose) {
   let synchronizer;
   let timer;
   let control;
+  let browserBridge;
   let resolveStop;
   const stopped = new Promise((resolve) => { resolveStop = resolve; });
   let stopping = false;
@@ -239,6 +248,11 @@ async function commandWatch(args, cwd, verbose) {
   process.once('SIGTERM', stop);
   try {
     if (daemonToken) control = await createWatchControl(repository, daemonToken, stop);
+    try {
+      browserBridge = await registerBrowserBridge(repository, config);
+    } catch (error) {
+      log.warn(`Browser index unavailable: ${error.message}`);
+    }
     ({ runtime, synchronizer } = await openNetwork(repository, config, log));
     await synchronizer.start();
     let previousDigest = await synchronizer.localDigest();
@@ -270,16 +284,160 @@ async function commandWatch(args, cwd, verbose) {
     if (timer) clearInterval(timer);
     if (synchronizer) await synchronizer.stop();
     if (runtime) await runtime.close();
+    if (browserBridge) await browserBridge.close();
     if (control) await control.close();
   }
 }
 
-async function commandUnwatch(args, cwd) {
+function processIsRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function browserIndexUnavailable(error) {
+  return ['ECONNREFUSED', 'ECONNRESET', 'EPIPE'].includes(error?.code);
+}
+
+function watchedRepositories(registrations) {
+  const repositories = new Map();
+  for (const registration of registrations) {
+    const current = repositories.get(registration.repository) ?? {
+      name: path.basename(registration.repository),
+      repositoryId: registration.repositoryId,
+      root: registration.repository,
+      registrations: [],
+    };
+    current.registrations.push(registration);
+    repositories.set(registration.repository, current);
+  }
+  return [...repositories.values()].sort((left, right) => (
+    left.name.localeCompare(right.name) || left.root.localeCompare(right.root)
+  ));
+}
+
+async function commandList(args) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
-  const { repository } = await configuredRepository(cwd);
+  let registrations;
+  try {
+    registrations = await listBrowserBridgeRegistrations();
+  } catch (error) {
+    if (!browserIndexUnavailable(error)) throw error;
+    registrations = [];
+  }
+  const repositories = watchedRepositories(registrations);
+  if (!repositories.length) {
+    console.log('No repositories are being watched.');
+    return;
+  }
+  const nameWidth = Math.max('NAME'.length, ...repositories.map(({ name }) => name.length));
+  console.log(`${'NAME'.padEnd(nameWidth)}  PIGEON      PATH`);
+  for (const repository of repositories) {
+    console.log(`${repository.name.padEnd(nameWidth)}  ${repository.repositoryId.slice(0, 10)}  ${repository.root}`);
+  }
+}
+
+async function stopRepository(repository, registrations = []) {
   const result = await stopWatchDaemon(repository);
-  if (result.stopped) console.log('GitPigeon stopped watching.');
-  else console.log('GitPigeon was not watching.');
+  const pids = [...new Set(registrations.map(({ pid }) => pid))];
+  for (const pid of pids) {
+    if (pid !== process.pid && processIsRunning(pid)) {
+      try { process.kill(pid, 'SIGTERM'); } catch { /* watcher already exited */ }
+    }
+  }
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && pids.some(processIsRunning)) await sleep(50);
+  const remaining = pids.filter(processIsRunning);
+  if (remaining.length) throw new Error(`Could not stop ${remaining.length} GitPigeon watcher${remaining.length === 1 ? '' : 's'} for ${repository.root}`);
+  return result.stopped || registrations.length > 0;
+}
+
+async function commandUnwatch(args, cwd) {
+  const name = args.shift();
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  if (!name) {
+    const { repository } = await configuredRepository(cwd);
+    let registrations = [];
+    try {
+      registrations = (await listBrowserBridgeRegistrations())
+        .filter((registration) => registration.repository === repository.root);
+    } catch (error) {
+      if (!browserIndexUnavailable(error)) throw error;
+    }
+    const stopped = await stopRepository(repository, registrations);
+    if (stopped) console.log('Stopped watching this repository and removed it from the local index.');
+    else console.log('This repository was not being watched.');
+    return;
+  }
+
+  let registrations;
+  try {
+    registrations = await listBrowserBridgeRegistrations();
+  } catch (error) {
+    if (browserIndexUnavailable(error)) {
+      throw new Error('No repositories are being watched. Run `git pigeon init` in a repository first.');
+    }
+    throw error;
+  }
+  const matches = watchedRepositories(registrations)
+    .filter((repository) => repository.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+  if (!matches.length) throw new Error(`No watched repository is named "${name}". Run \`git pigeon list\` to see the current names.`);
+  if (matches.length > 1) {
+    throw new Error(`Repository name "${name}" is ambiguous:\n${matches.map(({ root }) => `  ${root}`).join('\n')}`);
+  }
+  const match = matches[0];
+  const repository = await GitRepository.discover(match.root);
+  await stopRepository(repository, match.registrations);
+  console.log(`Stopped watching ${match.name} and removed it from the local index.`);
+}
+
+async function commandStop(args) {
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  let registrations;
+  try {
+    registrations = await listBrowserBridgeRegistrations();
+  } catch (error) {
+    if (browserIndexUnavailable(error)) {
+      console.log('The local GitPigeon index is already stopped.');
+      return;
+    }
+    throw error;
+  }
+  if (!registrations.length) {
+    await stopBrowserBridgeService();
+    console.log('Stopped the empty local GitPigeon index.');
+    return;
+  }
+
+  const repositories = new Map();
+  for (const registration of registrations) {
+    const current = repositories.get(registration.repository) ?? [];
+    current.push(registration);
+    repositories.set(registration.repository, current);
+  }
+
+  for (const [root, repositoryRegistrations] of repositories) {
+    try {
+      const repository = await GitRepository.discover(root);
+      await stopWatchDaemon(repository);
+    } catch { /* a deleted repository can still have a live foreground watcher */ }
+    for (const registration of repositoryRegistrations) {
+      if (registration.pid !== process.pid && processIsRunning(registration.pid)) {
+        try { process.kill(registration.pid, 'SIGTERM'); } catch { /* watcher already exited */ }
+      }
+    }
+  }
+
+  const pids = [...new Set(registrations.map((registration) => registration.pid))];
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && pids.some(processIsRunning)) await sleep(50);
+  const remaining = pids.filter(processIsRunning);
+  if (remaining.length) throw new Error(`Could not stop ${remaining.length} local GitPigeon watcher${remaining.length === 1 ? '' : 's'}`);
+  await stopBrowserBridgeService();
+  console.log(`Stopped ${repositories.size} watched repositor${repositories.size === 1 ? 'y' : 'ies'} and the entire local index.`);
 }
 
 async function ensureCloneDirectory(target) {
@@ -362,6 +520,7 @@ export async function main(argv = process.argv.slice(2), options = {}) {
     return;
   }
   if (command === 'init') return await commandInit(args, cwd, verbose);
+  if (command === 'list') return await commandList(args);
   if (command === 'invite') return await commandInvite(args, cwd);
   if (command === 'track') return await commandTrack(args, cwd);
   if (command === 'untrack') return await commandUntrack(args, cwd);
@@ -369,6 +528,7 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   if (command === 'sync') return await commandSync(args, cwd, verbose);
   if (command === 'watch') return await commandWatch(args, cwd, verbose);
   if (command === 'unwatch') return await commandUnwatch(args, cwd);
+  if (command === 'stop') return await commandStop(args);
   if (command === 'clone') return await commandClone(args, cwd, verbose);
   if (command === 'status') return await commandStatus(args, cwd);
   if (command === 'doctor') return await commandDoctor(args, cwd);

@@ -1,6 +1,8 @@
 import { NETWORK_ID, storagePrefix } from './constants.js';
+import { installNativeWebRTC } from './webrtc.js';
 
 export async function connectPeerPigeon(config, logger = {}) {
+  await installNativeWebRTC();
   let PeerPigeonNode;
   try {
     ({ PeerPigeonNode } = await import('peerpigeon'));

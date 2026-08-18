@@ -31,7 +31,9 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "peerpigeon": "git+https://github.com/PeerPigeon/PeerPigeon.git#ee07a5934bda5d05cf9b0f364a13456ba3438a1c"
+    "peerpigeon": "git+https://github.com/PeerPigeon/PeerPigeon.git#ee07a5934bda5d05cf9b0f364a13456ba3438a1c",
+    "werift": "0.24.4",
+    "ws": "8.21.3"
   },
   "overrides": {
     "freertc": "git+https://github.com/draeder/freertc.git#614254cf4b5185da917dca714ba7f65581191aae"

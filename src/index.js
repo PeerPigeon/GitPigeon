@@ -9,7 +9,18 @@ export {
   stopWatchDaemon,
   watchDaemonStatus,
 } from './daemon.js';
+export {
+  BROWSER_BRIDGE_HOST,
+  BROWSER_BRIDGE_PORT,
+  ensureBrowserBridgeService,
+  listBrowserBridgeRegistrations,
+  registerBrowserBridge,
+  runBrowserBridgeService,
+  startBrowserBridgeService,
+  stopBrowserBridgeService,
+} from './browser-bridge.js';
 export { connectPeerPigeon } from './peerpigeon.js';
+export { installNativeWebRTC } from './webrtc.js';
 export { createIdentity, loadConfig, saveConfig, validateConfig } from './config.js';
 export { createInvite, parseInvite } from './invite.js';
 export * from './constants.js';
