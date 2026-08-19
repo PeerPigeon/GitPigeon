@@ -10,6 +10,7 @@ export const INDEX_PROTOCOL = 'gitpigeon-index/1';
 export const INDEX_NETWORK_ID = 'gitpigeon-index-v1';
 export const INDEX_HEARTBEAT_MS = 3_000;
 export const INDEX_STALE_MS = 12_000;
+export const INDEX_PRESENCE_BUCKET_MS = 5_000;
 
 const STATE_VERSION = 3;
 const INDEX_ID = /^[a-f0-9]{32}$/;
@@ -236,6 +237,10 @@ export function directoryKey(indexId) {
   return `gitpigeon/index/v1/${indexId}/directory`;
 }
 
+export function liveDirectoryKey(indexId, bucket) {
+  return `gitpigeon/index/v1/${indexId}/live/${bucket}`;
+}
+
 export function directoryValue(index, entries, now = Date.now(), serviceInstanceId = null) {
   const grouped = new Map();
   for (const entry of entries) {
@@ -367,11 +372,20 @@ async function connectMachineDirectory(index, logger = {}, {
         needsReconcile = false;
       }
       const current = await loadMachineIndex({ root });
+      const value = directoryValue(current, current.entries, Date.now(), serviceInstanceId);
       const record = await storage.put(
         'public',
         directoryKey(current.indexId),
-        directoryValue(current, current.entries, Date.now(), serviceInstanceId),
+        value,
       );
+      if (serviceInstanceId) {
+        const bucket = Math.floor(Date.now() / INDEX_PRESENCE_BUCKET_MS);
+        await storage.put('public', liveDirectoryKey(current.indexId, bucket), {
+          ...value,
+          kind: 'live-directory',
+          watcherServiceId: serviceInstanceId,
+        });
+      }
       logger.debug?.(`Index directory published at version ${record?.version ?? 'unknown'} with ${current.entries.length} ${current.entries.length === 1 ? 'repository' : 'repositories'}`);
     });
     publishQueue = operation.catch(() => {});

@@ -8,6 +8,7 @@ import {
   claimDashboardPairing,
   completeDashboardPairing,
   directoryValue,
+  liveDirectoryKey,
   listMachinePigeons,
   loadMachineIndex,
   markMachinePigeonStopped,
@@ -51,6 +52,7 @@ test('machine index securely groups active repositories for PeerPigeon publicati
     { repositoryId: 'alpha-pigeon', secret: 'a'.repeat(64), name: 'alpha', watcherCount: 1, watcherServiceId },
     { repositoryId: 'beta-pigeon', secret: 'b'.repeat(64), name: 'beta', watcherCount: 1, watcherServiceId },
   ]);
+  assert.equal(liveDirectoryKey(state.indexId, 340_000_000), `gitpigeon/index/v1/${state.indexId}/live/340000000`);
 
   assert.equal((await unregisterMachinePigeon(firstRepository, { root: stateRoot })).removed, true);
   assert.deepEqual((await listMachinePigeons({ root: stateRoot })).map(({ repositoryId }) => repositoryId), ['beta-pigeon']);
