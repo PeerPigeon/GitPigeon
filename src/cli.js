@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { mkdir, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
@@ -99,13 +100,14 @@ async function configuredRepository(cwd) {
   return { repository, config };
 }
 
-async function openNetwork(repository, config, log) {
+async function openNetwork(repository, config, log, serviceInstanceId) {
   const runtime = await connectPeerPigeon(config, log);
   const synchronizer = new RepositorySynchronizer({
     repository,
     storage: runtime.storage,
     config,
     logger: log,
+    serviceInstanceId,
     // Browser peers retain PeerPigeon records in IndexedDB while the native
     // process starts with memory storage. Let every response merge before the
     // watcher advances mutable repository records.
@@ -134,8 +136,8 @@ async function prepareRepositorySession(entry, indexRoot) {
   return { repository, config, signature: repositorySessionSignature(config) };
 }
 
-async function openRepositorySession({ repository, config }, pollMs, log) {
-  const { runtime, synchronizer } = await openNetwork(repository, config, log);
+async function openRepositorySession({ repository, config }, pollMs, log, serviceInstanceId) {
+  const { runtime, synchronizer } = await openNetwork(repository, config, log, serviceInstanceId);
   let timer;
   let peerRefreshTimer;
   let started = false;
@@ -203,6 +205,7 @@ async function openRepositorySession({ repository, config }, pollMs, log) {
 
 async function runWatchService({ root, token, pollMs, verbose = false }) {
   const log = logger(verbose);
+  const serviceInstanceId = randomBytes(16).toString('hex');
   let resolveStop;
   const stopped = new Promise((resolve) => { resolveStop = resolve; });
   let stopping = false;
@@ -252,7 +255,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       opening: null,
     };
     sessions.set(entry.repository, record);
-    record.opening = openRepositorySession(prepared, pollMs, log)
+    record.opening = openRepositorySession(prepared, pollMs, log, serviceInstanceId)
       .then(async (session) => {
         record.session = session;
         if (record.cancelled) await session.close();

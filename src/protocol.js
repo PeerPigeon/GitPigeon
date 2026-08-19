@@ -63,6 +63,7 @@ export class RepositorySynchronizer {
     storageWritePauseMs = 20,
     presenceHeartbeatMs = REPOSITORY_PRESENCE_HEARTBEAT_MS,
     mutableRecordSettleMs = 0,
+    serviceInstanceId = randomBytes(16).toString('hex'),
   }) {
     this.repository = repository;
     this.storage = storage;
@@ -76,7 +77,7 @@ export class RepositorySynchronizer {
     this.storageWritePauseMs = storageWritePauseMs;
     this.presenceHeartbeatMs = presenceHeartbeatMs;
     this.mutableRecordSettleMs = mutableRecordSettleMs;
-    this.serviceInstanceId = randomBytes(16).toString('hex');
+    this.serviceInstanceId = serviceInstanceId;
     this.presenceTimer = null;
     this.availableSnapshots = new Set();
     this.logger = {
