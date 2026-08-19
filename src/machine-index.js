@@ -304,20 +304,22 @@ export async function connectMachineIndex(repository, config, logger = {}, {
   });
   node.on('error', (error) => logger.error?.(error));
   let closed = false;
-  let publishing = false;
-  const publish = async () => {
-    if (closed || publishing) return;
-    const storage = node.storage;
-    if (!storage) return;
-    publishing = true;
-    try {
+  let publishQueue = Promise.resolve();
+  const publish = ({ reconcile = false } = {}) => {
+    const operation = publishQueue.then(async () => {
+      if (closed) return;
+      const storage = node.storage;
+      if (!storage) return;
+      if (reconcile) {
+        await storage.retrieve('public', directoryKey(index.indexId), { timeoutMs: 750 });
+      }
       const current = await loadMachineIndex({ root });
       await storage.put('public', directoryKey(current.indexId), directoryValue(current, current.entries));
-    } finally {
-      publishing = false;
-    }
+    });
+    publishQueue = operation.catch(() => {});
+    return operation;
   };
-  node.on('peerConnected', () => { publish().catch((error) => logger.error?.(error)); });
+  node.on('peerConnected', () => { publish({ reconcile: true }).catch((error) => logger.error?.(error)); });
   try {
     await node.start();
   } catch (error) {
@@ -330,7 +332,8 @@ export async function connectMachineIndex(repository, config, logger = {}, {
     await node.destroy();
     throw new Error('PeerPigeon index storage did not initialize');
   }
-  await publish();
+  node.storage.subscribeKey('public', directoryKey(index.indexId));
+  await publish({ reconcile: true });
   const timer = setInterval(() => { publish().catch((error) => logger.error?.(error)); }, heartbeatMs);
   return {
     index,
@@ -338,7 +341,7 @@ export async function connectMachineIndex(repository, config, logger = {}, {
     async close() {
       if (closed) return;
       clearInterval(timer);
-      while (publishing) await sleep(10);
+      await publishQueue;
       await markMachinePigeonStopped(repository, { root });
       try {
         const current = await loadMachineIndex({ root });
