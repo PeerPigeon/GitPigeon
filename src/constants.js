@@ -3,9 +3,9 @@ export const NETWORK_ID = 'gitpigeon-v1';
 export const CONFIG_VERSION = 1;
 export const CONFIG_FILE = 'config.json';
 // A raw chunk is base64 encoded, encrypted by PeerPigeon Storage, and wrapped
-// in a gossip envelope. 28 KiB keeps the resulting RTC message below 64 KiB
-// while avoiding thousands of request/response round trips for ordinary repos.
-export const DEFAULT_CHUNK_SIZE = 28 * 1024;
+// in a gossip envelope. 16 KiB leaves headroom for PeerPigeon's encrypted
+// storage and gossip envelopes while avoiding thousands of tiny requests.
+export const DEFAULT_CHUNK_SIZE = 16 * 1024;
 export const DEFAULT_RETRIEVE_TIMEOUT_MS = 4_000;
 export const DEFAULT_SYNC_WAIT_MS = 5_000;
 export const DEFAULT_POLL_MS = 250;
