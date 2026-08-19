@@ -28,6 +28,7 @@ export {
   INDEX_PROTOCOL,
   INDEX_STALE_MS,
   claimDashboardPairing,
+  completeDashboardPairing,
   clearMachinePigeons,
   connectMachineIndex,
   directoryKey,

@@ -6,6 +6,7 @@ import test from 'node:test';
 import { createIdentity } from '../src/config.js';
 import {
   claimDashboardPairing,
+  completeDashboardPairing,
   directoryValue,
   listMachinePigeons,
   loadMachineIndex,
@@ -80,12 +81,17 @@ test('machine index entries persist while their watcher process is stopped', asy
   assert.equal((await listMachinePigeons({ root: stateRoot })).length, 1);
 });
 
-test('secure browser enrollment is claimed once and opens without a shell', async (t) => {
+test('secure browser enrollment remains available until the browser acknowledges it', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-pairing-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const pairing = await claimDashboardPairing({ root });
   assert.equal(pairing.index.pairingMode, 'secure');
   assert.equal(pairing.rotated, false);
+  assert.equal(pairing.index.pairingComplete, false);
+  const retry = await claimDashboardPairing({ root });
+  assert.equal(retry.index.secret, pairing.index.secret);
+  await completeDashboardPairing(retry.index, { root });
+  assert.equal((await loadMachineIndex({ root })).pairingComplete, true);
   assert.equal(await claimDashboardPairing({ root }), null);
 
   let invocation;
@@ -120,4 +126,25 @@ test('secure enrollment rotates a legacy URL-exposed machine secret', async (t) 
   assert.equal(pairing.rotated, true);
   assert.notEqual(pairing.index.secret, legacySecret);
   assert.equal(pairing.index.pairingMode, 'secure');
+  assert.equal(pairing.index.pairingComplete, false);
+});
+
+test('version-2 launched state retries enrollment because it did not prove acknowledgment', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-pairing-v2-migration-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const secret = 'secure-secret-that-must-not-rotate-during-retry';
+  await mkdir(root, { recursive: true });
+  await writeFile(path.join(root, 'index.json'), `${JSON.stringify({
+    version: 2,
+    indexId: 'b'.repeat(32),
+    secret,
+    pairingLaunched: true,
+    pairingMode: 'secure',
+    entries: [],
+  })}\n`);
+
+  const pairing = await claimDashboardPairing({ root });
+  assert.equal(pairing.rotated, false);
+  assert.equal(pairing.index.secret, secret);
+  assert.equal(pairing.index.pairingComplete, false);
 });

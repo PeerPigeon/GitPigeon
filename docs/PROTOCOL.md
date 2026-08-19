@@ -148,7 +148,9 @@ attempts. On success it encrypts the permanent index ID and secret to the same
 browser-specific ECDH key, waits for an authenticated acknowledgment, and then
 destroys the temporary PeerPigeon node. Enrollment therefore proves possession
 of both the short-lived URL rendezvous and the out-of-band terminal code without
-exposing the permanent capability to either one.
+exposing the permanent capability to either one. Native state is marked paired
+only after that acknowledgment. A failed or abandoned attempt remains pending,
+so the next `init` creates a fresh enrollment instead of suppressing the code.
 
 `git pigeon pair` creates another temporary enrollment. `git pigeon pair
 --rotate` changes the permanent machine-index secret before enrollment, which

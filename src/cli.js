@@ -16,6 +16,7 @@ import { createInvite, parseInvite } from './invite.js';
 import { createDashboardEnrollment, serveDashboardEnrollment } from './dashboard-pairing.js';
 import {
   claimDashboardPairing,
+  completeDashboardPairing,
   connectMachineIndex,
   listMachinePigeons,
   markMachinePigeonStopped,
@@ -156,10 +157,13 @@ async function commandInit(args, cwd, verbose) {
   }
   const workspace = new WorkspaceFiles(repository);
   await workspace.init();
+  const previouslyActive = (await listMachinePigeons({ activeOnly: false }))
+    .filter((entry) => processIsRunning(entry.pid));
   const pairing = await claimDashboardPairing();
-  if (pairing?.rotated) {
-    const previouslyActive = (await listMachinePigeons({ activeOnly: false }))
-      .filter((entry) => processIsRunning(entry.pid));
+  if (pairing) {
+    // Pairing can migrate the machine-index schema as well as rotate its
+    // secret. Restart already-loaded watcher processes so they cannot reject
+    // or overwrite the new durable state with an older in-memory schema.
     await commandStop([]);
     for (const root of [...new Set(previouslyActive.map((entry) => entry.repository))]) {
       if (root === repository.root) continue;
@@ -209,23 +213,22 @@ async function runDashboardPairing(pairing, verbose = false) {
       if (!opened) console.log(`Open this one-time enrollment URL:\n${enrollment.url}`);
     },
   });
+  await completeDashboardPairing(pairing.index, { root: pairing.root });
   console.log(`Securely paired browser ${result.browserId.slice(0, 16)}…; the permanent index secret was never placed in the URL.`);
 }
 
 async function commandPair(args, verbose) {
   const rotate = takeFlag(args, '--rotate');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  const previouslyActive = (await listMachinePigeons({ activeOnly: false }))
+    .filter((entry) => processIsRunning(entry.pid));
   const pairing = await claimDashboardPairing({ force: true, rotate });
-  if (pairing.rotated) {
-    const previouslyActive = (await listMachinePigeons({ activeOnly: false }))
-      .filter((entry) => processIsRunning(entry.pid));
-    await commandStop([]);
-    for (const root of [...new Set(previouslyActive.map((entry) => entry.repository))]) {
-      try {
-        await startWatchDaemon(await GitRepository.discover(root), { verbose });
-      } catch (error) {
-        console.warn(`Could not restart GitPigeon for ${root}: ${error.message}`);
-      }
+  await commandStop([]);
+  for (const root of [...new Set(previouslyActive.map((entry) => entry.repository))]) {
+    try {
+      await startWatchDaemon(await GitRepository.discover(root), { verbose });
+    } catch (error) {
+      console.warn(`Could not restart GitPigeon for ${root}: ${error.message}`);
     }
   }
   await runDashboardPairing(pairing, verbose);

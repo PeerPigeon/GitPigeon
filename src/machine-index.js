@@ -11,7 +11,7 @@ export const INDEX_NETWORK_ID = 'gitpigeon-index-v1';
 export const INDEX_HEARTBEAT_MS = 3_000;
 export const INDEX_STALE_MS = 12_000;
 
-const STATE_VERSION = 2;
+const STATE_VERSION = 3;
 const INDEX_ID = /^[a-f0-9]{32}$/;
 const SECRET = /^[a-zA-Z0-9_-]{32,256}$/;
 const DEVICE = /^[a-zA-Z0-9_-]{8,128}$/;
@@ -54,7 +54,7 @@ function validEntry(value) {
 }
 
 function validateState(value) {
-  if (!value || ![1, STATE_VERSION].includes(value.version)
+  if (!value || ![1, 2, STATE_VERSION].includes(value.version)
     || !INDEX_ID.test(String(value.indexId)) || !SECRET.test(String(value.secret))) {
     throw new Error('Invalid GitPigeon machine index');
   }
@@ -63,7 +63,10 @@ function validateState(value) {
     version: STATE_VERSION,
     indexId: String(value.indexId),
     secret: String(value.secret),
-    pairingLaunched: value.pairingLaunched === true,
+    // Version 2 recorded pairingLaunched before the browser acknowledged its
+    // grant. It cannot prove enrollment completed, so migrate it to pending and
+    // let the next `git pigeon init` retry without rotating the capability.
+    pairingComplete: value.version === STATE_VERSION && value.pairingComplete === true,
     pairingMode: value.version === 1 ? 'legacy' : value.pairingMode === 'secure' ? 'secure' : 'legacy',
     entries,
   };
@@ -74,7 +77,7 @@ function freshState() {
     version: STATE_VERSION,
     indexId: randomBytes(16).toString('hex'),
     secret: randomBytes(32).toString('base64url'),
-    pairingLaunched: false,
+    pairingComplete: false,
     pairingMode: 'secure',
     entries: [],
   };
@@ -248,13 +251,26 @@ export async function claimDashboardPairing({
 } = {}) {
   return await withLock(root, async () => {
     const value = await readState(root);
-    if (value.pairingLaunched && value.pairingMode === 'secure' && !force) return null;
+    if (value.pairingComplete && value.pairingMode === 'secure' && !force) return null;
     const rotated = rotate || value.pairingMode === 'legacy';
     if (rotated) value.secret = randomBytes(32).toString('base64url');
     value.pairingMode = 'secure';
-    value.pairingLaunched = true;
+    value.pairingComplete = false;
     await writeState(root, value);
-    return { index: value, rotated };
+    return { index: value, rotated, root };
+  });
+}
+
+export async function completeDashboardPairing(index, { root = machineIndexRoot() } = {}) {
+  return await withLock(root, async () => {
+    const value = await readState(root);
+    if (value.indexId !== index?.indexId || value.secret !== index?.secret) {
+      throw new Error('This browser enrollment was superseded by a newer GitPigeon pairing');
+    }
+    value.pairingMode = 'secure';
+    value.pairingComplete = true;
+    await writeState(root, value);
+    return value;
   });
 }
 

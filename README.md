@@ -64,7 +64,9 @@ git pigeon init
 `init` protects private files, starts the real-time watcher in the background,
 opens the default browser for secure enrollment on first use, and prints a
 six-digit approval code in the terminal. Enter that code in the browser within
-two minutes. Peer discovery and signaling are automatic through
+two minutes. GitPigeon records enrollment only after the browser acknowledges
+the encrypted grant, so an abandoned attempt is offered again by the next
+`git pigeon init`. Peer discovery and signaling are automatic through
 PeerPigeon and FreeRTC; no relay argument is required. The invite contains the
 repository identity and encryption secret, so treat it like a repository
 password.
@@ -151,8 +153,11 @@ six-digit terminal code is encrypted specifically to the native public key.
 After at most five attempts, the native peer either rejects the enrollment or
 returns the permanent index capability encrypted specifically to that browser's
 key. The browser acknowledges receipt, the temporary session closes, and the
-URL fragment is discarded. From then on, opening the bare site joins the
-encrypted PeerPigeon index and automatically displays every indexed Pigeon.
+URL fragment is discarded. Native state is marked paired only after that
+authenticated acknowledgment; a failed or abandoned attempt remains pending
+and the next `init` creates a fresh enrollment. From then on, opening the bare
+site joins the encrypted PeerPigeon index and automatically displays every
+indexed Pigeon.
 
 Pair another browser with a fresh one-time session, or deliberately rotate the
 machine-index secret and invalidate every previously paired browser:
