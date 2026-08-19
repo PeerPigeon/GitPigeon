@@ -38,6 +38,20 @@ the total bundle size, bundle digest, live-file size, private-file size, and all
 file digests are verified before anything is applied. PeerPigeon's storage
 session encrypts the synchronized envelopes with the invite secret.
 
+An online native peer additionally advertises its current PeerPigeon transport
+ID in the encrypted presence lease. A browser can request the manifest's bundle
+over the existing WebRTC data channel using `GPSTRM1` frames. Request, data,
+cumulative acknowledgement, end, error, and cancel frames are sealed with
+AES-256-GCM under a key derived from the repository secret. Each frame uses a
+fresh 96-bit IV and authenticates its type, random request ID, and sequence
+number. The sender permits at most 32 unacknowledged 16 KiB frames and the
+browser acknowledges every eight consumed frames. The browser exposes those
+ordered frames as a backpressured `ReadableStream`, verifies each descriptor and
+the complete bundle digest, and falls back to exact-key PeerPigeon storage for
+any missing frame. Durable chunk addressing and recovery therefore remain the
+same; the direct stream removes per-record request latency while the watcher is
+online.
+
 Persistent content chunks in `.git/gitpigeon/chunks/` are independently sealed
 with AES-256-GCM using a repository-secret-derived local cache key. The content
 SHA-256 is authenticated as associated data. This prevents the cache from

@@ -270,6 +270,11 @@ channels.
 
 - Bundle chunks and manifests use PeerPigeon's immutable `frozen` storage
   space.
+- While a watcher is online, browsers read the same verified chunks through an
+  encrypted, backpressured binary `ReadableStream` over PeerPigeon's existing
+  WebRTC data channel. A 32-frame window and cumulative acknowledgements avoid
+  one storage request per chunk. PeerPigeon storage remains the durable
+  recovery path for cached, interrupted, and offline-seeded transfers.
 - A small `public` head record points to each device's newest immutable
   manifest.
 - A mergeable device registry lets offline and newly joined devices discover
@@ -324,7 +329,11 @@ GitPigeon is peer-to-peer rather than a hosted forge. A device holding a wanted
 snapshot must be online for a brand-new device to retrieve it. Once retrieved,
 the new device caches and re-seeds that snapshot too.
 
-The current implementation sends complete Git bundles after ref changes; live
+Git bundles already contain Git packfiles, whose objects are compressed by Git.
+Wrapping the pack in a second compression layer would add CPU and buffering
+without removing the transport round trips, so the live fast path streams the
+pack bytes directly. The current implementation sends complete Git bundles
+after ref changes; live
 working-tree updates reuse the unchanged bundle and transfer only new
 content-addressed chunks. Git's pack format and chunk cache avoid corruption,
 but very large monorepositories will benefit from a future incremental pack

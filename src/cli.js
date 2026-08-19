@@ -110,6 +110,7 @@ async function openNetwork(repository, config, log, serviceInstanceId, machineIn
     logger: log,
     serviceInstanceId,
     machineIndexId,
+    streamTransport: runtime.node.mesh,
     // Browser peers retain PeerPigeon records in IndexedDB while the native
     // process starts with memory storage. Let every response merge before the
     // watcher advances mutable repository records.

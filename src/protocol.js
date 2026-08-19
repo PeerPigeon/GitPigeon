@@ -19,6 +19,7 @@ import {
 } from './constants.js';
 import { RepositoryCache } from './cache.js';
 import { LiveWorkspace, liveWorkspaceDigest } from './live-workspace.js';
+import { SnapshotStreamServer } from './snapshot-stream.js';
 import { WorkspaceFiles, workspaceDigest } from './workspace.js';
 
 const DIGEST = /^[a-f0-9]{64}$/;
@@ -66,6 +67,7 @@ export class RepositorySynchronizer {
     mutableRecordSettleMs = 0,
     serviceInstanceId = randomBytes(16).toString('hex'),
     machineIndexId = null,
+    streamTransport = null,
   }) {
     this.repository = repository;
     this.storage = storage;
@@ -81,6 +83,10 @@ export class RepositorySynchronizer {
     this.mutableRecordSettleMs = mutableRecordSettleMs;
     this.serviceInstanceId = serviceInstanceId;
     this.machineIndexId = MACHINE_INDEX.test(String(machineIndexId ?? '')) ? String(machineIndexId) : null;
+    this.streamTransport = streamTransport;
+    this.snapshotStream = streamTransport
+      ? new SnapshotStreamServer({ mesh: streamTransport, cache, secret: config.secret, logger })
+      : null;
     this.presenceTimer = null;
     this.availableSnapshots = new Set();
     this.logger = {
@@ -108,6 +114,7 @@ export class RepositorySynchronizer {
     this.started = true;
     try {
       await this.cache.init();
+      this.snapshotStream?.start();
       if (!this.repository.bare) {
         await this.workspace.init();
         await this.liveWorkspace.init();
@@ -140,6 +147,7 @@ export class RepositorySynchronizer {
         try { unsubscribe?.(); } catch { /* best effort */ }
       }
       this.started = false;
+      this.snapshotStream?.stop();
       throw error;
     }
   }
@@ -151,6 +159,7 @@ export class RepositorySynchronizer {
     for (const unsubscribe of this.unsubscribe.splice(0)) {
       try { unsubscribe?.(); } catch { /* best effort */ }
     }
+    this.snapshotStream?.stop();
     this.started = false;
   }
 
@@ -676,6 +685,9 @@ export class RepositorySynchronizer {
       name: path.basename(this.repository.root).slice(0, 200),
       snapshotId: head.snapshotId,
       serviceInstanceId: this.serviceInstanceId,
+      ...(DEVICE.test(String(this.streamTransport?.getClientId?.() ?? ''))
+        ? { peerId: this.streamTransport.getClientId() }
+        : {}),
       ...(this.machineIndexId ? { machineIndexId: this.machineIndexId } : {}),
       updatedAt: new Date().toISOString(),
     };
