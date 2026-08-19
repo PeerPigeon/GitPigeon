@@ -128,6 +128,7 @@ test('restart re-seeds cached chunks before publishing a fresh presence lease', 
     storage: network.store('initial'),
     config,
     presenceHeartbeatMs: 0,
+    machineIndexId: '1'.repeat(32),
   });
   await initial.start();
   const head = (await initial.status()).heads[config.deviceId];
@@ -141,6 +142,7 @@ test('restart re-seeds cached chunks before publishing a fresh presence lease', 
     storage: restartedStorage,
     config,
     presenceHeartbeatMs: 0,
+    machineIndexId: '1'.repeat(32),
   });
   await restarted.start({ publish: false });
 
@@ -162,6 +164,7 @@ test('restart re-seeds cached chunks before publishing a fresh presence lease', 
   const bucket = Math.floor(Date.parse(lease.value.updatedAt) / REPOSITORY_PRESENCE_BUCKET_MS);
   const bucketedLease = await restartedStorage.get('public', presenceLeaseKey(config.repositoryId, config.deviceId, bucket));
   assert.equal(bucketedLease?.value.snapshotId, head.snapshotId);
+  assert.equal(bucketedLease?.value.machineIndexId, '1'.repeat(32));
   await restarted.stop();
 });
 

@@ -23,6 +23,7 @@ import { WorkspaceFiles, workspaceDigest } from './workspace.js';
 
 const DIGEST = /^[a-f0-9]{64}$/;
 const DEVICE = /^[a-zA-Z0-9_-]{8,128}$/;
+const MACHINE_INDEX = /^[a-f0-9]{32}$/;
 const noop = () => {};
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -64,6 +65,7 @@ export class RepositorySynchronizer {
     presenceHeartbeatMs = REPOSITORY_PRESENCE_HEARTBEAT_MS,
     mutableRecordSettleMs = 0,
     serviceInstanceId = randomBytes(16).toString('hex'),
+    machineIndexId = null,
   }) {
     this.repository = repository;
     this.storage = storage;
@@ -78,6 +80,7 @@ export class RepositorySynchronizer {
     this.presenceHeartbeatMs = presenceHeartbeatMs;
     this.mutableRecordSettleMs = mutableRecordSettleMs;
     this.serviceInstanceId = serviceInstanceId;
+    this.machineIndexId = MACHINE_INDEX.test(String(machineIndexId ?? '')) ? String(machineIndexId) : null;
     this.presenceTimer = null;
     this.availableSnapshots = new Set();
     this.logger = {
@@ -673,6 +676,7 @@ export class RepositorySynchronizer {
       name: path.basename(this.repository.root).slice(0, 200),
       snapshotId: head.snapshotId,
       serviceInstanceId: this.serviceInstanceId,
+      ...(this.machineIndexId ? { machineIndexId: this.machineIndexId } : {}),
       updatedAt: new Date().toISOString(),
     };
     // A new key each short time bucket makes the liveness lease independent of
