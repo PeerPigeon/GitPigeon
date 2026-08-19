@@ -101,7 +101,16 @@ async function configuredRepository(cwd) {
 
 async function openNetwork(repository, config, log) {
   const runtime = await connectPeerPigeon(config, log);
-  const synchronizer = new RepositorySynchronizer({ repository, storage: runtime.storage, config, logger: log });
+  const synchronizer = new RepositorySynchronizer({
+    repository,
+    storage: runtime.storage,
+    config,
+    logger: log,
+    // Browser peers retain PeerPigeon records in IndexedDB while the native
+    // process starts with memory storage. Let every response merge before the
+    // watcher advances mutable repository records.
+    mutableRecordSettleMs: 1_000,
+  });
   return { runtime, synchronizer };
 }
 

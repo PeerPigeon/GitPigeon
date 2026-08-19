@@ -59,6 +59,7 @@ export class RepositorySynchronizer {
     retrieveTimeoutMs = DEFAULT_RETRIEVE_TIMEOUT_MS,
     storageWritePauseMs = 20,
     presenceHeartbeatMs = REPOSITORY_PRESENCE_HEARTBEAT_MS,
+    mutableRecordSettleMs = 0,
   }) {
     this.repository = repository;
     this.storage = storage;
@@ -71,6 +72,7 @@ export class RepositorySynchronizer {
     this.retrieveTimeoutMs = retrieveTimeoutMs;
     this.storageWritePauseMs = storageWritePauseMs;
     this.presenceHeartbeatMs = presenceHeartbeatMs;
+    this.mutableRecordSettleMs = mutableRecordSettleMs;
     this.serviceInstanceId = randomBytes(16).toString('hex');
     this.presenceTimer = null;
     this.availableSnapshots = new Set();
@@ -113,12 +115,9 @@ export class RepositorySynchronizer {
 
       await this.#rehydrateCurrentSnapshots();
       await this.#reconcileOwnHead();
+      await this.#reconcileOwnPresence();
       await this.#publishPresence();
-      const registry = await this.storage.retrieve(
-        'public',
-        registryKey(this.config.repositoryId),
-        { timeoutMs: this.retrieveTimeoutMs },
-      );
+      const registry = await this.#retrieveMutable(registryKey(this.config.repositoryId));
       await this.#acceptRegistry(registry?.value, true);
       await this.#publishRegistryIfNeeded();
       await this.#refreshKnownHeads();
@@ -153,11 +152,9 @@ export class RepositorySynchronizer {
   }
 
   async refresh() {
-    const registry = await this.storage.retrieve(
-      'public',
-      registryKey(this.config.repositoryId),
-      { timeoutMs: this.retrieveTimeoutMs },
-    );
+    await this.#reconcileOwnPresence();
+    await this.#publishPresence();
+    const registry = await this.#retrieveMutable(registryKey(this.config.repositoryId));
     await this.#acceptRegistry(registry?.value, true);
     await this.#refreshKnownHeads();
     await this.waitForIdle();
@@ -365,22 +362,14 @@ export class RepositorySynchronizer {
   }
 
   async #refreshHead(deviceId) {
-    const record = await this.storage.retrieve(
-      'public',
-      headKey(this.config.repositoryId, deviceId),
-      { timeoutMs: this.retrieveTimeoutMs },
-    );
+    const record = await this.#retrieveMutable(headKey(this.config.repositoryId, deviceId));
     if (record?.value) await this.#acceptHead(record.value);
   }
 
   async #reconcileOwnHead() {
     const key = headKey(this.config.repositoryId, this.config.deviceId);
     const desired = this.#validateHead(this.state.heads[this.config.deviceId]);
-    const record = await this.storage.retrieve(
-      'public',
-      key,
-      { timeoutMs: this.retrieveTimeoutMs },
-    );
+    const record = await this.#retrieveMutable(key);
     const observed = this.#validateHead(record?.value);
     if (!desired) {
       if (observed) {
@@ -678,6 +667,20 @@ export class RepositorySynchronizer {
       presenceKey(this.config.repositoryId, this.config.deviceId),
       value,
     );
+  }
+
+  async #reconcileOwnPresence() {
+    await this.#retrieveMutable(presenceKey(this.config.repositoryId, this.config.deviceId));
+  }
+
+  async #retrieveMutable(key) {
+    const retrieved = await this.storage.retrieve(
+      'public',
+      key,
+      { timeoutMs: this.retrieveTimeoutMs },
+    );
+    if (this.mutableRecordSettleMs > 0) await sleep(this.mutableRecordSettleMs);
+    return await this.storage.get('public', key) ?? retrieved;
   }
 
   async #put(space, key, value) {

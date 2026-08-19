@@ -13,6 +13,7 @@ class FakeNetwork {
     this.records = new Map();
     this.stores = new Set();
     this.puts = [];
+    this.retrieves = [];
   }
   store(id) {
     const store = new FakeStorage(this, id);
@@ -42,6 +43,7 @@ class FakeStorage {
   async get(space, key) { return this.local.get(this.pk(space, key)) ?? null; }
   async retrieve(space, key) {
     this.subscribeKey(space, key);
+    this.network.retrieves.push({ id: this.id, space, key });
     const record = this.network.records.get(this.pk(space, key)) ?? null;
     if (record) this.local.set(this.pk(space, key), record);
     return record;
@@ -144,6 +146,8 @@ test('restart re-seeds cached chunks before publishing a fresh presence lease', 
 
   const presence = presenceKey(config.repositoryId, config.deviceId);
   const presenceIndex = network.puts.findIndex((event) => event.id === 'restarted' && event.key === presence);
+  const presenceRetrieveIndex = network.retrieves.findIndex((event) => event.id === 'restarted' && event.key === presence);
+  assert.notEqual(presenceRetrieveIndex, -1);
   assert.notEqual(presenceIndex, -1);
   for (const descriptor of manifest.chunks) {
     const key = chunkKey(config.repositoryId, descriptor.sha256);
