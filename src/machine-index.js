@@ -183,6 +183,23 @@ export async function markMachinePigeonStopped(repository, {
   });
 }
 
+export async function markMachinePigeonsStopped({
+  root = machineIndexRoot(),
+  pid = process.pid,
+} = {}) {
+  return await withLock(root, async () => {
+    const value = await readState(root);
+    let changed = false;
+    value.entries = value.entries.map((entry) => {
+      if (entry.pid !== pid) return entry;
+      changed = true;
+      return { ...entry, pid: null };
+    });
+    await writeState(root, value);
+    return { changed, state: value };
+  });
+}
+
 export async function clearMachinePigeons({ root = machineIndexRoot() } = {}) {
   return await withLock(root, async () => {
     const value = await readState(root);
@@ -297,12 +314,12 @@ export function openDashboard(url, {
   return true;
 }
 
-export async function connectMachineIndex(repository, config, logger = {}, {
+async function connectMachineDirectory(index, logger = {}, {
   root = machineIndexRoot(),
   heartbeatMs = INDEX_HEARTBEAT_MS,
+  onClose = async () => {},
 } = {}) {
   await installNativeWebRTC();
-  const index = await registerMachinePigeon(repository, config, { root });
   const { PeerPigeonNode } = await import('peerpigeon');
   const prefix = `gitpigeon/index/v1/${index.indexId}/`;
   const node = new PeerPigeonNode({
@@ -315,7 +332,7 @@ export async function connectMachineIndex(repository, config, logger = {}, {
     autoDiscover: true,
     autoConnect: true,
     storage: {
-      userId: `index-${config.deviceId}`,
+      userId: `index-service-${index.indexId}`,
       sessionId: `${INDEX_NETWORK_ID}:${index.indexId}`,
       syncSecret: index.secret,
       dbName: `gitpigeon-index-${index.indexId}`,
@@ -324,15 +341,22 @@ export async function connectMachineIndex(repository, config, logger = {}, {
   });
   node.on('error', (error) => logger.error?.(error));
   let closed = false;
+  let ready = false;
+  let needsReconcile = true;
   let publishQueue = Promise.resolve();
   const publish = ({ reconcile = false } = {}) => {
     const operation = publishQueue.then(async () => {
-      if (closed) return;
+      if (closed || !ready) return;
       if (node.getConnectedPeers().length === 0) return;
       const storage = node.storage;
       if (!storage) return;
-      if (reconcile) {
-        await storage.retrieve('public', directoryKey(index.indexId), { timeoutMs: 250 });
+      if (reconcile || needsReconcile) {
+        // Node storage is memory-backed while the browser keeps its IndexedDB
+        // record across native process restarts. Import that higher version
+        // before the first write or the browser will reject the live update as
+        // stale. This must run only after PeerPigeonStorage.init() completes.
+        await storage.retrieve('public', directoryKey(index.indexId), { timeoutMs: 2_000 });
+        needsReconcile = false;
       }
       const current = await loadMachineIndex({ root });
       await storage.put('public', directoryKey(current.indexId), directoryValue(current, current.entries));
@@ -340,20 +364,30 @@ export async function connectMachineIndex(repository, config, logger = {}, {
     publishQueue = operation.catch(() => {});
     return operation;
   };
-  node.on('peerConnected', () => { publish({ reconcile: true }).catch((error) => logger.error?.(error)); });
+  node.on('peerConnected', (peerId) => {
+    needsReconcile = true;
+    logger.debug?.(`Index peer connected: ${peerId}`);
+    if (ready) publish({ reconcile: true }).catch((error) => logger.error?.(error));
+  });
+  node.on('peerDisconnected', (peerId) => {
+    logger.debug?.(`Index peer disconnected: ${peerId}`);
+    if (node.getConnectedPeers().length === 0) needsReconcile = true;
+  });
   try {
     await node.start();
   } catch (error) {
-    await markMachinePigeonStopped(repository, { root }).catch(() => {});
     await node.destroy().catch(() => {});
     throw error;
   }
   if (!node.storage) {
-    await markMachinePigeonStopped(repository, { root }).catch(() => {});
     await node.destroy();
     throw new Error('PeerPigeon index storage did not initialize');
   }
   node.storage.subscribeKey('public', directoryKey(index.indexId));
+  ready = true;
+  if (node.getConnectedPeers().length > 0) {
+    publish({ reconcile: true }).catch((error) => logger.error?.(error));
+  }
   const timer = setInterval(() => { publish().catch((error) => logger.error?.(error)); }, heartbeatMs);
   return {
     index,
@@ -362,7 +396,7 @@ export async function connectMachineIndex(repository, config, logger = {}, {
       if (closed) return;
       clearInterval(timer);
       await publishQueue;
-      await markMachinePigeonStopped(repository, { root });
+      await onClose();
       try {
         const current = await loadMachineIndex({ root });
         if (node.getConnectedPeers().length > 0) {
@@ -375,4 +409,23 @@ export async function connectMachineIndex(repository, config, logger = {}, {
       await node.destroy();
     },
   };
+}
+
+export async function connectMachineIndex(repository, config, logger = {}, options = {}) {
+  const root = options.root ?? machineIndexRoot();
+  const index = await registerMachinePigeon(repository, config, { root });
+  return await connectMachineDirectory(index, logger, {
+    ...options,
+    root,
+    onClose: async () => {
+      await markMachinePigeonStopped(repository, { root });
+      await options.onClose?.();
+    },
+  });
+}
+
+export async function connectMachineIndexService(logger = {}, options = {}) {
+  const root = options.root ?? machineIndexRoot();
+  const index = await loadMachineIndex({ root });
+  return await connectMachineDirectory(index, logger, { ...options, root });
 }

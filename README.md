@@ -61,7 +61,8 @@ cd path/to/your/repository
 git pigeon init
 ```
 
-`init` protects private files, starts the real-time watcher in the background,
+`init` protects private files, registers the repository with GitPigeon's single
+machine-wide watcher service,
 opens the default browser for secure enrollment on first use, and prints a
 six-digit approval code in the terminal. Enter that code in the browser within
 two minutes. GitPigeon records enrollment only after the browser acknowledges
@@ -89,7 +90,7 @@ git add .
 git commit -m "Ship it"
 ```
 
-The background watcher detects working-tree changes every 250 ms. Creating,
+The background service detects working-tree changes every 250 ms. Creating,
 editing, renaming, or deleting an ordinary code file is published immediately;
 you do not need to stage or commit it first. Commits still synchronize as native
 Git history, and turning a live change into a commit cleanly replaces the live
@@ -115,7 +116,8 @@ git pigeon unwatch
 git pigeon watch off
 ```
 
-Run `git pigeon init` to start it again.
+The machine-wide service keeps running for any other indexed repositories. Run
+`git pigeon init` here to add this repository again.
 
 From any directory, list every repository in the persistent machine index,
 including stopped repositories, or remove one by its displayed name:
@@ -128,7 +130,7 @@ git pigeon unwatch my-project
 If multiple watched repositories have the same name, GitPigeon prints their
 paths and requires you to run `unwatch` from inside the intended repository.
 
-To stop every GitPigeon watcher process on this machine without deleting the
+To stop the one GitPigeon watcher service on this machine without deleting the
 persistent encrypted Pigeon index:
 
 ```bash
@@ -170,13 +172,16 @@ git pigeon pair --rotate
 Legacy installations automatically rotate the old URL-exposed index secret the
 next time `git pigeon init` performs secure enrollment.
 
-There is no localhost HTTP bridge. Each native watcher is itself a PeerPigeon
-index peer and publishes the current directory through PeerPigeon storage.
+There is no localhost HTTP bridge. One native GitPigeon service is the
+PeerPigeon index peer for the machine and publishes the current directory
+through PeerPigeon storage. The same process multiplexes every indexed
+repository's PeerPigeon session.
 Repository IDs and encryption secrets travel only inside the encrypted index
-session. Starting or stopping a watcher updates the directory automatically.
+session. Registering or removing a repository updates the directory
+automatically.
 
 `git pigeon unwatch` removes only the selected repository. `git pigeon stop`
-stops every watcher process but retains the directory, so repository entries
+stops the single service process but retains the directory, so repository entries
 survive clean exits, crashes, and later process restarts. A different browser
 profile must be paired separately because it does not share the first profile's
 local capability.
@@ -228,19 +233,19 @@ override that disables private syncing and removes the Git exclusion.
 | Command | Purpose |
 | --- | --- |
 | `git pigeon init [INVITE] [DIR]` | Create or join a Pigeon and start background syncing. |
-| `git pigeon list` | List every persistent indexed repository and whether its watcher is running. |
+| `git pigeon list` | List every persistent indexed repository and whether the service is watching it. |
 | `git pigeon pair` | Securely approve another browser with a two-minute six-digit enrollment. |
 | `git pigeon pair --rotate` | Rotate the machine-index secret and invalidate earlier browser capabilities. |
-| `git pigeon unwatch` | Stop watching only the current repository and remove it from the encrypted index. |
-| `git pigeon unwatch REPOSITORY` | Stop one watched repository by name from any directory. |
+| `git pigeon unwatch` | Remove only the current repository from the encrypted index; keep the service running. |
+| `git pigeon unwatch REPOSITORY` | Remove one repository by name without stopping the service. |
 | `git pigeon watch off` | Repository-scoped alias for `unwatch`. |
-| `git pigeon stop` | Stop every local watcher process without deleting the persistent index. |
+| `git pigeon stop` | Stop the one machine-wide watcher service without deleting the persistent index. |
 | `git pigeon invite` | Print the existing invite URL. |
 | `git pigeon track FILE...` | Exclude exact files from Git and sync them privately. |
 | `git pigeon untrack FILE...` | Stop private tracking on this device. |
 | `git pigeon tracked` | List private workspace files. |
 | `git pigeon sync` | Publish, wait briefly for peers, retrieve, and exit. |
-| `git pigeon watch` | Ensure the background watcher is running. |
+| `git pigeon watch` | Register the current repository and ensure the one background service is running. |
 | `git pigeon status` | Show local identity and cached sync state without joining the network. |
 | `git pigeon doctor` | Check Node, Git, and the PeerPigeon dependency. |
 
@@ -248,7 +253,7 @@ Useful options:
 
 ```bash
 git pigeon sync --wait 15s
-git pigeon watch --foreground --poll 500ms --verbose
+git pigeon watch --poll 500ms --verbose
 git pigeon status --json
 ```
 
@@ -272,10 +277,11 @@ channels.
   envelopes, including live code and private workspace files.
 - GitPigeon keeps a persistent cache in `.git/gitpigeon/` and re-seeds
   PeerPigeon's in-memory Node storage when the watcher restarts.
-- The detached watcher uses an authenticated heartbeat and stop request under
-  `.git/gitpigeon/`, so `init`, `unwatch`, and `status` work consistently on
-  macOS, Linux, and Windows. Active watchers also publish the machine directory
-  into a separate PeerPigeon storage session protected by a per-machine secret.
+- The single detached service uses an authenticated heartbeat and stop request
+  in GitPigeon's per-user application-data directory, so concurrent `init` and
+  `watch` calls cannot spawn a second process on macOS, Linux, or Windows. It
+  publishes the machine directory through a separate PeerPigeon storage session
+  protected by a per-machine secret.
 
 Incoming branches are first written to:
 
@@ -332,7 +338,7 @@ npm run check
 
 The tests exercise real local Git repositories, fast-forward and divergence
 behavior, invite validation, chunked snapshot integrity, exact Git exclusion,
-automatic secret/config discovery, background watcher control, encrypted
-multi-watcher Pigeon indexing, config-only private sync, deletion and
+automatic secret/config discovery, single-service watcher control, encrypted
+multi-repository Pigeon indexing, config-only private sync, deletion and
 concurrent-secret conflict safety, and a two-device simulation of PeerPigeon's
 exact-key storage subscriptions.

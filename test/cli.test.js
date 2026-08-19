@@ -43,11 +43,9 @@ test('stop terminates discovered watcher processes even when the index is empty'
   assert.notEqual(child.signalCode, null);
 });
 
-test('stop terminates registered watchers without removing the persistent index', async (t) => {
+test('stop marks registered repositories inactive without removing the persistent index', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-stop-persistent-index-test-'));
-  const child = startFixtureProcess();
   t.after(async () => {
-    await stopFixtureProcess(child);
     await rm(root, { recursive: true, force: true });
   });
   const repository = await createRepository(path.join(root, 'repository'));
@@ -57,10 +55,9 @@ test('stop terminates registered watchers without removing the persistent index'
     secret: 's'.repeat(64),
     deviceId: 'stop-persistent-device',
   });
-  await registerMachinePigeon(repository, config, { root: stateRoot, pid: child.pid });
+  await registerMachinePigeon(repository, config, { root: stateRoot, pid: process.pid });
 
   await commandStop([], { indexRoot: stateRoot, findWatcherPids: async () => [] });
-  await waitForExit(child);
 
   const entries = await listMachinePigeons({ root: stateRoot, activeOnly: false });
   assert.equal(entries.length, 1);

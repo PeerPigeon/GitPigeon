@@ -107,24 +107,25 @@ version the local baseline for subsequent updates.
 
 ## Watcher lifecycle
 
-`init` launches the watcher as a detached Node process with inherited log file
-descriptors and no shell. Its PID, random control token, and heartbeat live under
-`.git/gitpigeon/`. `unwatch` writes a token-authenticated stop request that the
-watcher polls locally. This file-based control channel works across macOS,
-Linux, and Windows and does not require a Unix socket or loopback port. Stale
-state is ignored, and an unresponsive authenticated watcher is terminated when
-the user explicitly requests `unwatch`.
+`init` registers a repository and ensures that exactly one detached Node service
+is running for the operating-system user. An exclusive startup lock serializes
+concurrent `init` and `watch` calls. The service owns every registered
+repository session plus one machine-index PeerPigeon session; adding a second
+repository never launches a second process.
 
-Each active watcher also joins a per-machine PeerPigeon index session. The
-machine directory is persistent: stopping or restarting watcher processes marks
-entries inactive without removing their repository identity or secret.
-`unwatch` is the explicit removal operation. `stop` enumerates and terminates
-all local GitPigeon watcher processes but leaves the directory intact.
+The service PID, random control token, heartbeat, startup lock, and log live in
+GitPigeon's per-user application-data directory. The file-based control channel
+works across macOS, Linux, and Windows and needs neither a Unix socket nor a
+loopback port. `unwatch` only removes one repository from the persistent index;
+the running service observes that change and closes that repository session.
+`stop` sends one token-authenticated stop request to the service and leaves all
+repository entries intact with an inactive status.
 
 The machine directory is stored as an encrypted `public`-space record; `public`
 describes its ACL inside that session, while PeerPigeon's `syncSecret` encrypts
 the entire synchronization envelope. Each directory item includes a live
-watcher count, which is zero while its repository process is stopped.
+watcher count, which is one while the machine service owns that repository
+session and zero while the service is stopped.
 
 GitPigeon does not set a signaling relay for repository, machine-index, or
 enrollment sessions by default. PeerPigeon independently selects a nearby

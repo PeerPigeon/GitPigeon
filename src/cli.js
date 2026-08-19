@@ -5,11 +5,11 @@ import { DEFAULT_POLL_MS, DEFAULT_SYNC_WAIT_MS } from './constants.js';
 import { RepositoryCache } from './cache.js';
 import { createIdentity, loadConfig, saveConfig } from './config.js';
 import {
-  createWatchControl,
+  createWatchServiceControl,
   listGitPigeonWatcherPids,
-  startWatchDaemon,
-  stopWatchDaemon,
-  watchDaemonStatus,
+  startWatchService,
+  stopWatchService,
+  watchServiceStatus,
 } from './daemon.js';
 import { GitRepository } from './git.js';
 import { createInvite, parseInvite } from './invite.js';
@@ -17,10 +17,13 @@ import { createDashboardEnrollment, serveDashboardEnrollment } from './dashboard
 import {
   claimDashboardPairing,
   completeDashboardPairing,
-  connectMachineIndex,
+  connectMachineIndexService,
   listMachinePigeons,
+  machineIndexRoot,
   markMachinePigeonStopped,
+  markMachinePigeonsStopped,
   openDashboard,
+  registerMachinePigeon,
   unregisterMachinePigeon,
 } from './machine-index.js';
 import { connectPeerPigeon } from './peerpigeon.js';
@@ -35,7 +38,7 @@ Usage:
   git pigeon pair [--rotate]
   git pigeon unwatch [REPOSITORY]
   git pigeon stop
-  git pigeon watch [off|--foreground] [--poll DURATION]
+  git pigeon watch [off] [--poll DURATION]
   git pigeon invite
   git pigeon track FILE...
   git pigeon untrack FILE...
@@ -102,14 +105,195 @@ async function openNetwork(repository, config, log) {
   return { runtime, synchronizer };
 }
 
-async function startIndexedWatchDaemon(repository, options = {}) {
-  const current = await watchDaemonStatus(repository.gitDir);
-  if (current.running) {
-    const registered = (await listMachinePigeons({ activeOnly: false }))
-      .some((entry) => entry.repository === repository.root && entry.pid === current.pid);
-    if (!registered) await stopWatchDaemon(repository);
+async function startIndexedWatchService(options = {}) {
+  return await startWatchService({ root: machineIndexRoot(), ...options });
+}
+
+function repositorySessionSignature(config) {
+  return JSON.stringify({
+    repositoryId: config.repositoryId,
+    secret: config.secret,
+    deviceId: config.deviceId,
+    signalingServer: config.signalingServer ?? null,
+  });
+}
+
+async function prepareRepositorySession(entry, indexRoot) {
+  const repository = await GitRepository.discover(entry.repository);
+  const config = await loadConfig(repository.gitDir);
+  await registerMachinePigeon(repository, config, { root: indexRoot, pid: process.pid });
+  return { repository, config, signature: repositorySessionSignature(config) };
+}
+
+async function openRepositorySession({ repository, config }, pollMs, log) {
+  const { runtime, synchronizer } = await openNetwork(repository, config, log);
+  let timer;
+  let peerRefreshTimer;
+  let started = false;
+  let starting = false;
+  let stopped = false;
+  let previousDigest;
+  let publishing = false;
+
+  const publishChanges = async () => {
+    if (!started || publishing || stopped) return;
+    publishing = true;
+    try {
+      const nextDigest = await synchronizer.localDigest();
+      if (nextDigest !== previousDigest) {
+        previousDigest = nextDigest;
+        await synchronizer.publishLocal();
+      }
+    } catch (error) {
+      log.error(error);
+    } finally {
+      publishing = false;
+    }
+  };
+
+  const activate = async () => {
+    if (started || starting || stopped || runtime.node.getConnectedPeers().length === 0) return;
+    starting = true;
+    try {
+      await synchronizer.start();
+      previousDigest = await synchronizer.localDigest();
+      started = true;
+      timer = setInterval(() => { publishChanges().catch((error) => log.error(error)); }, pollMs);
+    } catch (error) {
+      log.error(error);
+    } finally {
+      starting = false;
+    }
+  };
+
+  runtime.node.on('peerConnected', () => {
+    activate().catch((error) => log.error(error));
+    if (!started || peerRefreshTimer) return;
+    peerRefreshTimer = setTimeout(() => {
+      peerRefreshTimer = null;
+      if (!stopped && runtime.node.getConnectedPeers().length > 0) {
+        synchronizer.refresh().catch((error) => log.error(error));
+      }
+    }, 250);
+  });
+  if (runtime.node.getConnectedPeers().length > 0) activate().catch((error) => log.error(error));
+  log.info(`Watching ${repository.root} as ${config.deviceId.slice(0, 8)}`);
+
+  return {
+    async close() {
+      if (stopped) return;
+      stopped = true;
+      if (timer) clearInterval(timer);
+      if (peerRefreshTimer) clearTimeout(peerRefreshTimer);
+      while (starting || publishing) await sleep(10);
+      await synchronizer.stop();
+      await runtime.close();
+    },
+  };
+}
+
+async function runWatchService({ root, token, pollMs, verbose = false }) {
+  const log = logger(verbose);
+  let resolveStop;
+  const stopped = new Promise((resolve) => { resolveStop = resolve; });
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    resolveStop();
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+
+  const sessions = new Map();
+  let control;
+  let machineIndex;
+  let reconciliationTimer;
+  let reconciling = false;
+
+  const stopSession = async (record) => {
+    record.cancelled = true;
+    try {
+      const session = record.session ?? await record.opening;
+      await session?.close();
+    } catch (error) {
+      log.error(error);
+    }
+  };
+
+  const launchSession = async (entry) => {
+    const existing = sessions.get(entry.repository);
+    const desiredSignature = repositorySessionSignature(entry);
+    if (existing?.signature === desiredSignature && !existing.cancelled) return;
+    let prepared;
+    try {
+      prepared = await prepareRepositorySession(entry, root);
+    } catch (error) {
+      log.error(new Error(`Could not watch ${entry.repository}: ${error.message}`));
+      return;
+    }
+    if (existing) {
+      sessions.delete(entry.repository);
+      await stopSession(existing);
+    }
+    const record = {
+      signature: prepared.signature,
+      cancelled: false,
+      session: null,
+      opening: null,
+    };
+    sessions.set(entry.repository, record);
+    record.opening = openRepositorySession(prepared, pollMs, log)
+      .then(async (session) => {
+        record.session = session;
+        if (record.cancelled) await session.close();
+        return session;
+      })
+      .catch(async (error) => {
+        log.error(new Error(`Watcher failed for ${entry.repository}: ${error.message}`));
+        if (sessions.get(entry.repository) === record) sessions.delete(entry.repository);
+        await markMachinePigeonStopped(prepared.repository, { root, pid: process.pid });
+        return null;
+      });
+  };
+
+  const reconcile = async () => {
+    if (reconciling || stopping) return;
+    reconciling = true;
+    try {
+      const entries = await listMachinePigeons({ root, activeOnly: false });
+      const desired = new Set(entries.map((entry) => entry.repository));
+      for (const [repositoryRoot, record] of sessions) {
+        if (desired.has(repositoryRoot)) continue;
+        sessions.delete(repositoryRoot);
+        await stopSession(record);
+      }
+      for (const entry of entries) await launchSession(entry);
+    } catch (error) {
+      log.error(error);
+    } finally {
+      reconciling = false;
+    }
+  };
+
+  try {
+    control = await createWatchServiceControl(root, token, stop);
+    await reconcile();
+    machineIndex = await connectMachineIndexService(log, { root });
+    reconciliationTimer = setInterval(() => { reconcile().catch((error) => log.error(error)); }, 500);
+    await control.ready();
+    log.info(`GitPigeon service is watching ${sessions.size} ${sessions.size === 1 ? 'repository' : 'repositories'} as PID ${process.pid}`);
+    await stopped;
+  } finally {
+    process.off('SIGINT', stop);
+    process.off('SIGTERM', stop);
+    if (reconciliationTimer) clearInterval(reconciliationTimer);
+    while (reconciling) await sleep(10);
+    for (const record of sessions.values()) await stopSession(record);
+    await markMachinePigeonsStopped({ root, pid: process.pid });
+    if (machineIndex) await machineIndex.close();
+    if (control) await control.close();
   }
-  return await startWatchDaemon(repository, options);
 }
 
 async function discoverOrInitialize(cwd, directory) {
@@ -157,24 +341,21 @@ async function commandInit(args, cwd, verbose) {
   }
   const workspace = new WorkspaceFiles(repository);
   await workspace.init();
-  const previouslyActive = (await listMachinePigeons({ activeOnly: false }))
-    .filter((entry) => processIsRunning(entry.pid));
+  const indexRoot = machineIndexRoot();
+  const currentService = await watchServiceStatus(indexRoot);
+  const wasRegistered = (await listMachinePigeons({ root: indexRoot, activeOnly: false }))
+    .some((entry) => entry.repository === repository.root);
+  await registerMachinePigeon(repository, config, {
+    root: indexRoot,
+    pid: currentService.running ? currentService.pid : null,
+  });
   const pairing = await claimDashboardPairing();
   if (pairing) {
-    // Pairing can migrate the machine-index schema as well as rotate its
-    // secret. Restart already-loaded watcher processes so they cannot reject
-    // or overwrite the new durable state with an older in-memory schema.
-    await commandStop([]);
-    for (const root of [...new Set(previouslyActive.map((entry) => entry.repository))]) {
-      if (root === repository.root) continue;
-      try {
-        await startWatchDaemon(await GitRepository.discover(root), { verbose });
-      } catch (error) {
-        console.warn(`Could not restart GitPigeon for ${root}: ${error.message}`);
-      }
-    }
+    // The index capability may have changed. Restart the one service so its
+    // PeerPigeon node is created with the durable index's current secret.
+    await stopWatchService(indexRoot);
   }
-  const watcher = await startIndexedWatchDaemon(repository, { verbose });
+  const watcher = await startIndexedWatchService({ verbose });
   if (pairing) {
     await runDashboardPairing(pairing, verbose);
   }
@@ -186,12 +367,17 @@ async function commandInit(args, cwd, verbose) {
   } else if (created) {
     console.log(`GitPigeon joined at ${repository.root} and is syncing in the background.`);
   } else {
-    console.log(`GitPigeon is configured and ${watcher.started ? 'now watching' : 'already watching'} in the background.`);
+    const state = watcher.started
+      ? 'started the machine-wide watcher service'
+      : wasRegistered
+        ? 'is already registered with the machine-wide watcher service'
+        : 'was added to the machine-wide watcher service';
+    console.log(`GitPigeon is configured and ${state}.`);
   }
   const discovered = await workspace.list();
   if (discovered.length) console.log(`Private files: ${discovered.length} automatically protected from Git.`);
   console.log('Remove this repository from the encrypted Pigeon index with `git pigeon unwatch`.');
-  console.log('Stop every local watcher with `git pigeon stop`.');
+  console.log('Stop the machine-wide GitPigeon service with `git pigeon stop`.');
 }
 
 async function runDashboardPairing(pairing, verbose = false) {
@@ -220,17 +406,11 @@ async function runDashboardPairing(pairing, verbose = false) {
 async function commandPair(args, verbose) {
   const rotate = takeFlag(args, '--rotate');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
-  const previouslyActive = (await listMachinePigeons({ activeOnly: false }))
-    .filter((entry) => processIsRunning(entry.pid));
+  const root = machineIndexRoot();
+  const registrations = await listMachinePigeons({ root, activeOnly: false });
+  await stopWatchService(root);
   const pairing = await claimDashboardPairing({ force: true, rotate });
-  await commandStop([]);
-  for (const root of [...new Set(previouslyActive.map((entry) => entry.repository))]) {
-    try {
-      await startWatchDaemon(await GitRepository.discover(root), { verbose });
-    } catch (error) {
-      console.warn(`Could not restart GitPigeon for ${root}: ${error.message}`);
-    }
-  }
+  if (registrations.length) await startWatchService({ root, verbose });
   await runDashboardPairing(pairing, verbose);
 }
 
@@ -298,81 +478,34 @@ async function commandWatch(args, cwd, verbose) {
   if (args[0] === 'on') args.shift();
   const pollMs = duration(takeOption(args, '--poll'), DEFAULT_POLL_MS);
   const foreground = takeFlag(args, '--foreground');
-  const daemonToken = takeOption(args, '--daemon-child');
+  const serviceToken = takeOption(args, '--service-child');
+  const stateDir = takeOption(args, '--state-dir');
+  const legacyDaemonToken = takeOption(args, '--daemon-child');
   if (pollMs < 100) throw new Error('Poll interval must be at least 100ms');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
-  const { repository, config } = await configuredRepository(cwd);
-  if (!foreground && !daemonToken) {
-    const result = await startIndexedWatchDaemon(repository, { pollMs, verbose });
-    console.log(result.started ? 'GitPigeon is now watching in the background.' : 'GitPigeon is already watching.');
-    return;
+  if (legacyDaemonToken) throw new Error('Per-repository GitPigeon watcher processes are no longer supported');
+  if (serviceToken) {
+    if (!foreground || !stateDir) throw new Error('Invalid GitPigeon service invocation');
+    return await runWatchService({ root: path.resolve(stateDir), token: serviceToken, pollMs, verbose });
   }
+  if (stateDir) throw new Error('--state-dir is reserved for the GitPigeon service');
+  if (foreground) throw new Error('GitPigeon foreground watching is managed by its single machine-wide service');
 
-  const log = logger(verbose);
-  let runtime;
-  let synchronizer;
-  let timer;
-  let peerRefreshTimer;
-  let control;
-  let machineIndex;
-  let resolveStop;
-  const stopped = new Promise((resolve) => { resolveStop = resolve; });
-  let stopping = false;
-  const stop = () => {
-    if (stopping) return;
-    stopping = true;
-    resolveStop();
-  };
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
-  try {
-    machineIndex = await connectMachineIndex(repository, config, log);
-    ({ runtime, synchronizer } = await openNetwork(repository, config, log));
-    if (daemonToken) control = await createWatchControl(repository, daemonToken, stop);
-    log.info(`Watching ${repository.root} as ${config.deviceId.slice(0, 8)}${daemonToken ? '' : ' (Ctrl+C to stop)'}`);
-    const peerId = await Promise.race([
-      runtime.waitForPeer(),
-      stopped.then(() => null),
-    ]);
-    if (!peerId) return;
-    await synchronizer.start();
-    let previousDigest = await synchronizer.localDigest();
-    let publishing = false;
-    const check = async () => {
-      if (publishing) return;
-      publishing = true;
-      try {
-        const nextDigest = await synchronizer.localDigest();
-        if (nextDigest !== previousDigest) {
-          previousDigest = nextDigest;
-          await synchronizer.publishLocal();
-        }
-      } catch (error) {
-        log.error(error);
-      } finally {
-        publishing = false;
-      }
-    };
-    timer = setInterval(check, pollMs);
-    runtime.node.on('peerConnected', () => {
-      if (peerRefreshTimer) return;
-      peerRefreshTimer = setTimeout(() => {
-        peerRefreshTimer = null;
-        if (runtime.node.getConnectedPeers().length === 0) return;
-        synchronizer.refresh().catch((error) => log.error(error));
-      }, 250);
-    });
-    await stopped;
-  } finally {
-    process.off('SIGINT', stop);
-    process.off('SIGTERM', stop);
-    if (timer) clearInterval(timer);
-    if (peerRefreshTimer) clearTimeout(peerRefreshTimer);
-    if (synchronizer) await synchronizer.stop();
-    if (runtime) await runtime.close();
-    if (machineIndex) await machineIndex.close();
-    if (control) await control.close();
-  }
+  const { repository, config } = await configuredRepository(cwd);
+  const root = machineIndexRoot();
+  const current = await watchServiceStatus(root);
+  const wasRegistered = (await listMachinePigeons({ root, activeOnly: false }))
+    .some((entry) => entry.repository === repository.root);
+  await registerMachinePigeon(repository, config, {
+    root,
+    pid: current.running ? current.pid : null,
+  });
+  const result = await startWatchService({ root, pollMs, verbose });
+  console.log(result.started
+    ? 'GitPigeon started the machine-wide background service and is now watching this repository.'
+    : wasRegistered
+      ? 'GitPigeon is already watching this repository in the machine-wide background service.'
+      : 'GitPigeon added this repository to the already-running machine-wide background service.');
 }
 
 function processIsRunning(pid) {
@@ -405,6 +538,7 @@ function watchedRepositories(registrations) {
 async function commandList(args) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const registrations = await listMachinePigeons({ activeOnly: false });
+  const service = await watchServiceStatus(machineIndexRoot());
   const repositories = watchedRepositories(registrations);
   if (!repositories.length) {
     console.log('The persistent GitPigeon index is empty.');
@@ -413,24 +547,9 @@ async function commandList(args) {
   const nameWidth = Math.max('NAME'.length, ...repositories.map(({ name }) => name.length));
   console.log(`${'NAME'.padEnd(nameWidth)}  PIGEON      STATUS   PATH`);
   for (const repository of repositories) {
-    const active = repository.registrations.some(({ pid }) => processIsRunning(pid));
+    const active = service.running && repository.registrations.some(({ pid }) => pid === service.pid);
     console.log(`${repository.name.padEnd(nameWidth)}  ${repository.repositoryId.slice(0, 10)}  ${(active ? 'watching' : 'stopped').padEnd(8)} ${repository.root}`);
   }
-}
-
-async function stopRepository(repository, registrations = []) {
-  const result = await stopWatchDaemon(repository);
-  const pids = [...new Set(registrations.map(({ pid }) => pid))];
-  for (const pid of pids) {
-    if (pid !== process.pid && processIsRunning(pid)) {
-      try { process.kill(pid, 'SIGTERM'); } catch { /* watcher already exited */ }
-    }
-  }
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline && pids.some(processIsRunning)) await sleep(50);
-  const remaining = pids.filter(processIsRunning);
-  if (remaining.length) throw new Error(`Could not stop ${remaining.length} GitPigeon watcher${remaining.length === 1 ? '' : 's'} for ${repository.root}`);
-  return result.stopped || registrations.length > 0;
 }
 
 async function commandUnwatch(args, cwd) {
@@ -438,11 +557,8 @@ async function commandUnwatch(args, cwd) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   if (!name) {
     const { repository } = await configuredRepository(cwd);
-    const registrations = (await listMachinePigeons({ activeOnly: false }))
-      .filter((registration) => registration.repository === repository.root);
-    await unregisterMachinePigeon(repository);
-    const stopped = await stopRepository(repository, registrations);
-    if (stopped) console.log('Stopped watching this repository and removed it from the encrypted PeerPigeon index.');
+    const result = await unregisterMachinePigeon(repository);
+    if (result.removed) console.log('Removed this repository from the encrypted PeerPigeon index. The machine-wide service is still running.');
     else console.log('This repository was not being watched.');
     return;
   }
@@ -458,8 +574,7 @@ async function commandUnwatch(args, cwd) {
   const match = matches[0];
   const repository = await GitRepository.discover(match.root);
   await unregisterMachinePigeon(repository);
-  await stopRepository(repository, match.registrations);
-  console.log(`Stopped watching ${match.name} and removed it from the encrypted PeerPigeon index.`);
+  console.log(`Removed ${match.name} from the encrypted PeerPigeon index. The machine-wide service is still running.`);
 }
 
 export async function commandStop(args, {
@@ -467,7 +582,9 @@ export async function commandStop(args, {
   findWatcherPids = listGitPigeonWatcherPids,
 } = {}) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
-  const registrations = await listMachinePigeons({ root: indexRoot, activeOnly: false });
+  const root = indexRoot ?? machineIndexRoot();
+  const registrations = await listMachinePigeons({ root, activeOnly: false });
+  const stoppedService = await stopWatchService(root);
   let discoveredPids;
   try {
     discoveredPids = await findWatcherPids();
@@ -475,28 +592,9 @@ export async function commandStop(args, {
     throw new Error(`Could not enumerate local GitPigeon watcher processes: ${error.message}`);
   }
 
-  const repositories = new Map();
-  for (const registration of registrations) {
-    const current = repositories.get(registration.repository) ?? [];
-    current.push(registration);
-    repositories.set(registration.repository, current);
-  }
   const pids = [...new Set([
-    ...registrations.map((registration) => registration.pid),
     ...discoveredPids,
   ])].filter((pid) => pid !== process.pid && processIsRunning(pid));
-
-  for (const [root, repositoryRegistrations] of repositories) {
-    try {
-      const repository = await GitRepository.discover(root);
-      await stopWatchDaemon(repository);
-    } catch { /* a deleted repository can still have a live foreground watcher */ }
-    for (const registration of repositoryRegistrations) {
-      if (registration.pid !== process.pid && processIsRunning(registration.pid)) {
-        try { process.kill(registration.pid, 'SIGTERM'); } catch { /* watcher already exited */ }
-      }
-    }
-  }
 
   for (const pid of pids) {
     try { process.kill(pid, 'SIGTERM'); } catch { /* watcher already exited */ }
@@ -514,14 +612,14 @@ export async function commandStop(args, {
   for (const registration of registrations) {
     await markMachinePigeonStopped(
       { root: registration.repository },
-      { root: indexRoot, pid: registration.pid },
+      { root, pid: registration.pid },
     );
   }
-  if (!pids.length) {
-    console.log('No GitPigeon watcher processes were running. The persistent encrypted Pigeon index was left intact.');
+  if (!stoppedService.stopped && !pids.length) {
+    console.log('The GitPigeon watcher service was not running. The persistent encrypted Pigeon index was left intact.');
     return;
   }
-  console.log(`Stopped ${pids.length} GitPigeon watcher process${pids.length === 1 ? '' : 'es'}. The persistent encrypted Pigeon index was left intact.`);
+  console.log('Stopped the GitPigeon watcher service. The persistent encrypted Pigeon index was left intact.');
 }
 
 async function ensureCloneDirectory(target) {
@@ -552,7 +650,11 @@ async function commandStatus(args, cwd) {
   const cache = new RepositoryCache(repository.gitDir);
   const trackedFiles = await new WorkspaceFiles(repository, cache).list();
   const state = await cache.loadState();
-  const watcher = await watchDaemonStatus(repository.gitDir);
+  const watcher = await watchServiceStatus(machineIndexRoot());
+  const registrations = await listMachinePigeons({ activeOnly: false });
+  const registered = registrations.some((entry) => (
+    entry.repository === repository.root && entry.pid === watcher.pid
+  ));
   const value = {
     repository: repository.root,
     repositoryId: config.repositoryId,
@@ -562,8 +664,8 @@ async function commandStatus(args, cwd) {
     knownDevices: Object.keys(state.heads ?? {}).sort(),
     importedSnapshots: state.imported ?? {},
     trackedFiles,
-    watching: watcher.running,
-    watcherPid: watcher.running ? watcher.pid : null,
+    watching: watcher.running && registered,
+    watcherPid: watcher.running && registered ? watcher.pid : null,
   };
   if (json) console.log(JSON.stringify(value, null, 2));
   else {
