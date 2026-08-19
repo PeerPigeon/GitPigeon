@@ -12,6 +12,14 @@ to commit
 The human- and machine-readable pin is also recorded in
 [`PEERPIGEON.lock.json`](./PEERPIGEON.lock.json).
 
+## Project status
+
+GitPigeon is currently a private pre-release. The
+[`PeerPigeon/GitPigeon`](https://github.com/PeerPigeon/GitPigeon) source
+repository is private, and no npm package or GitHub release has been published
+yet. [`gitpigeon.dev`](https://gitpigeon.dev) is live for paired development
+installations.
+
 ## Platform support
 
 - macOS, Linux, and Windows
@@ -23,17 +31,22 @@ argument arrays, paths use the platform path API, ref discovery is polled for
 consistent behavior across operating systems, and all repository state lives
 inside the Git directory.
 
-## Install
+## Install from the private source checkout
+
+Authorized contributors can install the current checkout locally:
 
 ```bash
-npm install
+git clone https://github.com/PeerPigeon/GitPigeon.git
+cd GitPigeon
+npm ci
 npm link
 ```
 
-The repository's `.npmrc` disables install lifecycle scripts. PeerPigeon already
-commits its built `dist/`, and its current Git `prepare` hook intentionally moves
-FreeRTC to live HEAD. Skipping that hook keeps the dependency graph at the
-revisions recorded by the pinned PeerPigeon commit.
+This is a source-checkout workflow, not an npm-published GitPigeon install.
+`npm ci` installs the checkout's locked dependencies. PeerPigeon is fetched
+directly from the pinned GitHub commit above, not from the npm registry. The
+repository's `.npmrc` disables dependency lifecycle scripts so PeerPigeon and
+FreeRTC stay at their locked revisions.
 
 The installed executable is named `git-pigeon`, which means Git automatically
 exposes it as `git pigeon`.
@@ -49,8 +62,10 @@ git pigeon init
 
 `init` protects private files, starts the real-time watcher in the background,
 pairs the default browser with the encrypted Pigeon index on first use, and
-prints an invite URL. The URL contains the repository ID, the optional
-signaling server, and the encryption secret. Treat it like a repository password.
+prints an invite URL. Peer discovery and signaling are automatic through
+PeerPigeon and FreeRTC; no relay argument is required. The invite contains the
+repository identity and encryption secret, so treat it like a repository
+password.
 
 On a second device, while at least one existing device is online:
 
@@ -72,7 +87,7 @@ git commit -m "Ship it"
 
 The background watcher detects changed branches, tags, secrets, and local config
 and publishes them immediately. Remove only the current repository from the
-encrypted browser index with either spelling:
+encrypted Pigeon index with either spelling:
 
 ```bash
 git pigeon unwatch
@@ -93,7 +108,8 @@ git pigeon unwatch my-project
 If multiple watched repositories have the same name, GitPigeon prints their
 paths and requires you to run `unwatch` from inside the intended repository.
 
-To stop every watcher on this machine and clear the entire browser index:
+To stop every watcher on this machine and clear the entire encrypted Pigeon
+index:
 
 ```bash
 git pigeon stop
@@ -102,7 +118,7 @@ git pigeon stop
 `stop` is machine-wide and can be run from any directory; `unwatch` is always
 scoped to the Git repository containing the current directory.
 
-## Automatic browser index
+## Automatic encrypted Pigeon index
 
 The first `git pigeon init` on a machine opens `https://gitpigeon.dev` with a
 one-time capability in the URL fragment. The fragment never reaches Cloudflare;
@@ -171,7 +187,7 @@ override that disables private syncing and removes the Git exclusion.
 | `git pigeon unwatch` | Stop watching only the current repository and remove it from the encrypted index. |
 | `git pigeon unwatch REPOSITORY` | Stop one watched repository by name from any directory. |
 | `git pigeon watch off` | Repository-scoped alias for `unwatch`. |
-| `git pigeon stop` | Stop every local watcher and clear the entire browser index. |
+| `git pigeon stop` | Stop every local watcher and clear the entire encrypted Pigeon index. |
 | `git pigeon invite` | Print the existing invite URL. |
 | `git pigeon track FILE...` | Exclude exact files from Git and sync them privately. |
 | `git pigeon untrack FILE...` | Stop private tracking on this device. |
@@ -184,7 +200,6 @@ override that disables private syncing and removes the Git exclusion.
 Useful options:
 
 ```bash
-git pigeon init --signal wss://your-relay.example/ws
 git pigeon sync --wait 15s
 git pigeon watch --foreground --poll 500ms --verbose
 git pigeon status --json
@@ -262,6 +277,6 @@ npm run check
 The tests exercise real local Git repositories, fast-forward and divergence
 behavior, invite validation, chunked snapshot integrity, exact Git exclusion,
 automatic secret/config discovery, background watcher control, encrypted
-multi-watcher browser indexing, config-only private sync, deletion and concurrent-secret
-conflict safety, and a two-device simulation of PeerPigeon's exact-key storage
-subscriptions.
+multi-watcher Pigeon indexing, config-only private sync, deletion and
+concurrent-secret conflict safety, and a two-device simulation of PeerPigeon's
+exact-key storage subscriptions.
