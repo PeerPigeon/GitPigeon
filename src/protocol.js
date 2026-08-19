@@ -668,6 +668,7 @@ export class RepositorySynchronizer {
       protocol: PROTOCOL,
       repositoryId: this.config.repositoryId,
       deviceId: this.config.deviceId,
+      name: path.basename(this.repository.root).slice(0, 200),
       snapshotId: head.snapshotId,
       serviceInstanceId: this.serviceInstanceId,
       updatedAt: new Date().toISOString(),

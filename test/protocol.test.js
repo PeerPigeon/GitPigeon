@@ -154,6 +154,7 @@ test('restart re-seeds cached chunks before publishing a fresh presence lease', 
   }
   const lease = await restartedStorage.get('public', presence);
   assert.equal(lease?.value.snapshotId, head.snapshotId);
+  assert.equal(lease?.value.name, 'source');
   await restarted.stop();
 });
 
