@@ -141,6 +141,7 @@ export class SnapshotStreamServer {
       next: 0,
       pumping: false,
       cancelled: false,
+      startedAt: Date.now(),
     };
     this.transfers.set(id, transfer);
     await this.#pump(transfer);
@@ -170,6 +171,9 @@ export class SnapshotStreamServer {
             sha256: transfer.manifest.bundleSha256,
           })),
         ));
+        this.logger.info?.(
+          `Streamed ${transfer.manifest.bundleSize} snapshot bytes to a browser in ${Date.now() - transfer.startedAt} ms`,
+        );
         this.transfers.delete(transfer.id);
       }
     } catch (error) {
