@@ -355,11 +355,18 @@ async function connectMachineDirectory(index, logger = {}, {
         // record across native process restarts. Import that higher version
         // before the first write or the browser will reject the live update as
         // stale. This must run only after PeerPigeonStorage.init() completes.
-        await storage.retrieve('public', directoryKey(index.indexId), { timeoutMs: 2_000 });
+        const retrieved = await storage.retrieve('public', directoryKey(index.indexId), { timeoutMs: 2_000 });
+        // retrieve() resolves after the first peer responds, but other paired
+        // browsers may answer with a higher persisted version. Let all of
+        // those responses merge before advancing the record locally.
+        await sleep(1_000);
+        const settled = await storage.get('public', directoryKey(index.indexId));
+        logger.debug?.(`Index directory reconciled at version ${settled?.version ?? retrieved?.version ?? 'none'}`);
         needsReconcile = false;
       }
       const current = await loadMachineIndex({ root });
-      await storage.put('public', directoryKey(current.indexId), directoryValue(current, current.entries));
+      const record = await storage.put('public', directoryKey(current.indexId), directoryValue(current, current.entries));
+      logger.debug?.(`Index directory published at version ${record?.version ?? 'unknown'} with ${current.entries.length} ${current.entries.length === 1 ? 'repository' : 'repositories'}`);
     });
     publishQueue = operation.catch(() => {});
     return operation;
