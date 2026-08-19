@@ -1,11 +1,13 @@
 import { NETWORK_ID, storagePrefix } from './constants.js';
+import { productionSignalingServers } from './relay-policy.js';
 import { installNativeWebRTC } from './webrtc.js';
 
 export async function connectPeerPigeon(config, logger = {}) {
   await installNativeWebRTC();
   let PeerPigeonNode;
+  let defaultSignalingServers;
   try {
-    ({ PeerPigeonNode } = await import('peerpigeon'));
+    ({ PeerPigeonNode, DEFAULT_SIGNALING_SERVERS: defaultSignalingServers } = await import('peerpigeon'));
   } catch (error) {
     throw new Error(`PeerPigeon is not installed. Run your package manager install first. (${error.message})`);
   }
@@ -23,6 +25,7 @@ export async function connectPeerPigeon(config, logger = {}) {
     tolerantPeers: 1,
     autoDiscover: true,
     autoConnect: true,
+    signalingServers: productionSignalingServers(defaultSignalingServers),
     storage: {
       userId: config.deviceId,
       sessionId: `${NETWORK_ID}:${config.repositoryId}`,

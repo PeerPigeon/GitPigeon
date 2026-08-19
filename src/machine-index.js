@@ -4,6 +4,7 @@ import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/prom
 import { homedir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { productionSignalingServers } from './relay-policy.js';
 import { installNativeWebRTC } from './webrtc.js';
 
 export const INDEX_PROTOCOL = 'gitpigeon-index/1';
@@ -327,7 +328,7 @@ async function connectMachineDirectory(index, logger = {}, {
   onClose = async () => {},
 } = {}) {
   await installNativeWebRTC();
-  const { PeerPigeonNode } = await import('peerpigeon');
+  const { PeerPigeonNode, DEFAULT_SIGNALING_SERVERS } = await import('peerpigeon');
   const prefix = `gitpigeon/index/v1/${index.indexId}/`;
   const node = new PeerPigeonNode({
     crypto: false,
@@ -338,6 +339,7 @@ async function connectMachineDirectory(index, logger = {}, {
     tolerantPeers: 1,
     autoDiscover: true,
     autoConnect: true,
+    signalingServers: productionSignalingServers(DEFAULT_SIGNALING_SERVERS),
     storage: {
       userId: `index-service-${index.indexId}`,
       sessionId: `${INDEX_NETWORK_ID}:${index.indexId}`,
