@@ -236,7 +236,7 @@ export function directoryKey(indexId) {
   return `gitpigeon/index/v1/${indexId}/directory`;
 }
 
-export function directoryValue(index, entries, now = Date.now()) {
+export function directoryValue(index, entries, now = Date.now(), serviceInstanceId = null) {
   const grouped = new Map();
   for (const entry of entries) {
     const active = processIsRunning(entry.pid) ? 1 : 0;
@@ -247,6 +247,7 @@ export function directoryValue(index, entries, now = Date.now()) {
         secret: entry.secret,
         name: entry.name,
         watcherCount: active,
+        ...(active && serviceInstanceId ? { watcherServiceId: serviceInstanceId } : {}),
         ...(entry.signalingServer ? { signalingServer: entry.signalingServer } : {}),
       });
     } else {
@@ -317,6 +318,7 @@ export function openDashboard(url, {
 async function connectMachineDirectory(index, logger = {}, {
   root = machineIndexRoot(),
   heartbeatMs = INDEX_HEARTBEAT_MS,
+  serviceInstanceId = null,
   onClose = async () => {},
 } = {}) {
   await installNativeWebRTC();
@@ -365,7 +367,11 @@ async function connectMachineDirectory(index, logger = {}, {
         needsReconcile = false;
       }
       const current = await loadMachineIndex({ root });
-      const record = await storage.put('public', directoryKey(current.indexId), directoryValue(current, current.entries));
+      const record = await storage.put(
+        'public',
+        directoryKey(current.indexId),
+        directoryValue(current, current.entries, Date.now(), serviceInstanceId),
+      );
       logger.debug?.(`Index directory published at version ${record?.version ?? 'unknown'} with ${current.entries.length} ${current.entries.length === 1 ? 'repository' : 'repositories'}`);
     });
     publishQueue = operation.catch(() => {});
@@ -407,7 +413,11 @@ async function connectMachineDirectory(index, logger = {}, {
       try {
         const current = await loadMachineIndex({ root });
         if (node.getConnectedPeers().length > 0) {
-          await node.storage?.put('public', directoryKey(current.indexId), directoryValue(current, current.entries));
+          await node.storage?.put(
+            'public',
+            directoryKey(current.indexId),
+            directoryValue(current, current.entries, Date.now(), serviceInstanceId),
+          );
         }
       } catch (error) {
         logger.error?.(error);

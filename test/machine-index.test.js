@@ -43,12 +43,13 @@ test('machine index securely groups active repositories for PeerPigeon publicati
   ]);
 
   const state = await loadMachineIndex({ root: stateRoot });
-  const published = directoryValue(state, active, 1_700_000_000_000);
+  const watcherServiceId = 'f'.repeat(32);
+  const published = directoryValue(state, active, 1_700_000_000_000, watcherServiceId);
   assert.equal(published.protocol, 'gitpigeon-index/1');
   assert.equal(published.updatedAt, '2023-11-14T22:13:20.000Z');
   assert.deepEqual(published.pigeons, [
-    { repositoryId: 'alpha-pigeon', secret: 'a'.repeat(64), name: 'alpha', watcherCount: 1 },
-    { repositoryId: 'beta-pigeon', secret: 'b'.repeat(64), name: 'beta', watcherCount: 1 },
+    { repositoryId: 'alpha-pigeon', secret: 'a'.repeat(64), name: 'alpha', watcherCount: 1, watcherServiceId },
+    { repositoryId: 'beta-pigeon', secret: 'b'.repeat(64), name: 'beta', watcherCount: 1, watcherServiceId },
   ]);
 
   assert.equal((await unregisterMachinePigeon(firstRepository, { root: stateRoot })).removed, true);

@@ -291,7 +291,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   try {
     control = await createWatchServiceControl(root, token, stop);
     await reconcile();
-    machineIndex = await connectMachineIndexService(log, { root });
+    machineIndex = await connectMachineIndexService(log, { root, serviceInstanceId });
     reconciliationTimer = setInterval(() => { reconcile().catch((error) => log.error(error)); }, 500);
     await control.ready();
     log.info(`GitPigeon service is watching ${sessions.size} ${sessions.size === 1 ? 'repository' : 'repositories'} as PID ${process.pid}`);
