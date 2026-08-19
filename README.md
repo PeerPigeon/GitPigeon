@@ -62,8 +62,9 @@ git pigeon init
 ```
 
 `init` protects private files, starts the real-time watcher in the background,
-pairs the default browser with the encrypted Pigeon index on first use, and
-prints an invite URL. Peer discovery and signaling are automatic through
+opens the default browser for secure enrollment on first use, and prints a
+six-digit approval code in the terminal. Enter that code in the browser within
+two minutes. Peer discovery and signaling are automatic through
 PeerPigeon and FreeRTC; no relay argument is required. The invite contains the
 repository identity and encryption secret, so treat it like a repository
 password.
@@ -140,10 +141,29 @@ from the persistent index.
 ## Automatic encrypted Pigeon index
 
 The first `git pigeon init` on a machine opens `https://gitpigeon.dev` with a
-one-time capability in the URL fragment. The fragment never reaches Cloudflare;
-the browser stores it locally and removes it from the address bar. From then on,
-opening the bare site joins an encrypted PeerPigeon index and automatically
-displays every active Pigeon registered on that machine.
+two-minute enrollment rendezvous in the URL fragment. The fragment never
+contains the permanent machine-index secret and is not sent to Cloudflare. It
+contains only an ephemeral PeerPigeon session secret plus the native peer's
+ephemeral public key.
+
+The browser creates its own ephemeral device key and asks for approval. The
+six-digit terminal code is encrypted specifically to the native public key.
+After at most five attempts, the native peer either rejects the enrollment or
+returns the permanent index capability encrypted specifically to that browser's
+key. The browser acknowledges receipt, the temporary session closes, and the
+URL fragment is discarded. From then on, opening the bare site joins the
+encrypted PeerPigeon index and automatically displays every indexed Pigeon.
+
+Pair another browser with a fresh one-time session, or deliberately rotate the
+machine-index secret and invalidate every previously paired browser:
+
+```bash
+git pigeon pair
+git pigeon pair --rotate
+```
+
+Legacy installations automatically rotate the old URL-exposed index secret the
+next time `git pigeon init` performs secure enrollment.
 
 There is no localhost HTTP bridge. Each native watcher is itself a PeerPigeon
 index peer and publishes the current directory through PeerPigeon storage.
@@ -204,6 +224,8 @@ override that disables private syncing and removes the Git exclusion.
 | --- | --- |
 | `git pigeon init [INVITE] [DIR]` | Create or join a Pigeon and start background syncing. |
 | `git pigeon list` | List every persistent indexed repository and whether its watcher is running. |
+| `git pigeon pair` | Securely approve another browser with a two-minute six-digit enrollment. |
+| `git pigeon pair --rotate` | Rotate the machine-index secret and invalidate earlier browser capabilities. |
 | `git pigeon unwatch` | Stop watching only the current repository and remove it from the encrypted index. |
 | `git pigeon unwatch REPOSITORY` | Stop one watched repository by name from any directory. |
 | `git pigeon watch off` | Repository-scoped alias for `unwatch`. |
@@ -271,9 +293,12 @@ last-writer-wins storage record discard Git history.
 ## Security and availability
 
 PeerPigeon uses a signaling service for peer discovery and WebRTC negotiation;
-Git data travels through the PeerPigeon mesh. Storage envelopes are encrypted
-with the invite secret. Anyone who has the invite can join and read the
-repository, so rotate to a new repository identity if an invite is exposed.
+Git data travels through the PeerPigeon mesh. By default GitPigeon leaves relay
+selection to PeerPigeon, so each peer independently chooses a nearby FreeRTC
+relay and FreeRTC federates matching Network + Room peers across relays. No
+local bridge, fixed relay, or relay argument is required. Storage envelopes are
+encrypted with the invite secret. Anyone who has the invite can join and read
+the repository, so rotate to a new repository identity if an invite is exposed.
 
 Working-tree code and private workspace files remain ordinary plaintext files
 in each trusted working directory. Persistent content chunks under

@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createIdentity } from '../src/config.js';
 import {
-  claimPairingUrl,
+  claimDashboardPairing,
   directoryValue,
   listMachinePigeons,
   loadMachineIndex,
@@ -80,16 +80,17 @@ test('machine index entries persist while their watcher process is stopped', asy
   assert.equal((await listMachinePigeons({ root: stateRoot })).length, 1);
 });
 
-test('pairing is claimed once and opens without a shell', async (t) => {
+test('secure browser enrollment is claimed once and opens without a shell', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-pairing-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const url = await claimPairingUrl({ root });
-  assert.match(url, /^https:\/\/gitpigeon\.dev\/#pair=[a-f0-9]{32}\.[a-zA-Z0-9_-]{32,256}$/);
-  assert.equal(await claimPairingUrl({ root }), null);
+  const pairing = await claimDashboardPairing({ root });
+  assert.equal(pairing.index.pairingMode, 'secure');
+  assert.equal(pairing.rotated, false);
+  assert.equal(await claimDashboardPairing({ root }), null);
 
   let invocation;
   const child = { unref() {} };
-  assert.equal(openDashboard(url, {
+  assert.equal(openDashboard('https://gitpigeon.dev/#enroll=temporary', {
     platform: 'darwin',
     environment: {},
     spawnImpl(command, args, options) {
@@ -98,6 +99,25 @@ test('pairing is claimed once and opens without a shell', async (t) => {
     },
   }), true);
   assert.equal(invocation.command, 'open');
-  assert.deepEqual(invocation.args, [url]);
+  assert.deepEqual(invocation.args, ['https://gitpigeon.dev/#enroll=temporary']);
   assert.equal(invocation.options.shell, false);
+});
+
+test('secure enrollment rotates a legacy URL-exposed machine secret', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-pairing-migration-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const legacySecret = 'legacy-secret-that-was-previously-in-the-url';
+  await mkdir(root, { recursive: true });
+  await writeFile(path.join(root, 'index.json'), `${JSON.stringify({
+    version: 1,
+    indexId: 'a'.repeat(32),
+    secret: legacySecret,
+    pairingLaunched: true,
+    entries: [],
+  })}\n`);
+
+  const pairing = await claimDashboardPairing({ root });
+  assert.equal(pairing.rotated, true);
+  assert.notEqual(pairing.index.secret, legacySecret);
+  assert.equal(pairing.index.pairingMode, 'secure');
 });

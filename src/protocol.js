@@ -19,6 +19,7 @@ import { WorkspaceFiles, workspaceDigest } from './workspace.js';
 const DIGEST = /^[a-f0-9]{64}$/;
 const DEVICE = /^[a-zA-Z0-9_-]{8,128}$/;
 const noop = () => {};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function digest(data) {
   return createHash('sha256').update(data).digest('hex');
@@ -32,11 +33,11 @@ function sameStrings(left, right) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function snapshotDigest(bundleSha256, filesDigest, liveFilesDigest) {
+function snapshotDigest(bundleSha256, filesDigest, liveFilesDigest, chunkSize = DEFAULT_CHUNK_SIZE) {
   if (liveFilesDigest === undefined) {
     return digest(`gitpigeon-snapshot-v1\0${bundleSha256 ?? '-'}\0${filesDigest}`);
   }
-  return digest(`gitpigeon-snapshot-v2\0${bundleSha256 ?? '-'}\0${filesDigest}\0${liveFilesDigest}`);
+  return digest(`gitpigeon-snapshot-v3\0${bundleSha256 ?? '-'}\0${filesDigest}\0${liveFilesDigest}\0${chunkSize}`);
 }
 
 function contentDigest(refsDigest, filesDigest, liveFilesDigest) {
@@ -54,6 +55,7 @@ export class RepositorySynchronizer {
     logger = {},
     chunkSize = DEFAULT_CHUNK_SIZE,
     retrieveTimeoutMs = DEFAULT_RETRIEVE_TIMEOUT_MS,
+    storageWritePauseMs = 20,
   }) {
     this.repository = repository;
     this.storage = storage;
@@ -64,6 +66,7 @@ export class RepositorySynchronizer {
     this.liveWorkspace = liveWorkspace;
     this.chunkSize = chunkSize;
     this.retrieveTimeoutMs = retrieveTimeoutMs;
+    this.storageWritePauseMs = storageWritePauseMs;
     this.logger = {
       info: logger.info ?? noop,
       warn: logger.warn ?? noop,
@@ -157,12 +160,16 @@ export class RepositorySynchronizer {
       return null;
     }
     const currentContentDigest = contentDigest(refsDigest, workspace.digest, liveWorkspace.digest);
-    if (!force && previous?.contentDigest === currentContentDigest) return previous;
+    const previousManifest = previous
+      ? this.#validateManifest(await this.cache.readManifest(previous.snapshotId), previous.snapshotId)
+      : null;
+    const previousTransportCompatible = previousManifest && this.#manifestFitsChunkSize(previousManifest);
+    if (!force && previous?.contentDigest === currentContentDigest && previousTransportCompatible) return previous;
 
     let bundle = null;
     try {
-      const cachedManifest = previous?.refsDigest === refsDigest
-        ? this.#validateManifest(await this.cache.readManifest(previous.snapshotId), previous.snapshotId)
+      const cachedManifest = previous?.refsDigest === refsDigest && previousTransportCompatible
+        ? previousManifest
         : null;
       let bundleSize;
       let bundleSha256;
@@ -203,13 +210,14 @@ export class RepositorySynchronizer {
           chunks: file.deleted ? [] : await this.#cacheChunks(file.data),
         });
       }
-      const snapshotId = snapshotDigest(bundleSha256, workspace.digest, liveWorkspace.digest);
+      const snapshotId = snapshotDigest(bundleSha256, workspace.digest, liveWorkspace.digest, this.chunkSize);
       const manifest = {
         protocol: PROTOCOL,
         repositoryId: this.config.repositoryId,
         snapshotId,
         deviceId: this.config.deviceId,
         createdAt: new Date().toISOString(),
+        transportChunkSize: this.chunkSize,
         bundleSize,
         bundleSha256,
         refsDigest,
@@ -232,7 +240,7 @@ export class RepositorySynchronizer {
         contentDigest: currentContentDigest,
         updatedAt: new Date().toISOString(),
       };
-      await this.storage.put('public', headKey(this.config.repositoryId, this.config.deviceId), head);
+      await this.#put('public', headKey(this.config.repositoryId, this.config.deviceId), head);
       this.state.heads[this.config.deviceId] = head;
       await this.cache.saveState(this.state);
       this.logger.info(
@@ -318,7 +326,7 @@ export class RepositorySynchronizer {
       devices,
       updatedAt: new Date().toISOString(),
     };
-    await this.storage.put('public', registryKey(this.config.repositoryId), value);
+    await this.#put('public', registryKey(this.config.repositoryId), value);
     this.registryDevices = devices;
   }
 
@@ -368,7 +376,7 @@ export class RepositorySynchronizer {
       // PeerPigeon's Node storage is memory-backed. Retrieving first imports the
       // highest mesh version; this write then advances it while preserving the
       // locally cached Git head across process restarts.
-      await this.storage.put('public', key, desired);
+      await this.#put('public', key, desired);
     }
   }
 
@@ -395,7 +403,7 @@ export class RepositorySynchronizer {
     if (head.deviceId === this.config.deviceId) {
       const desired = this.#validateHead(this.state.heads[this.config.deviceId]);
       if (desired && desired.snapshotId !== head.snapshotId) {
-        await this.storage.put(
+        await this.#put(
           'public',
           headKey(this.config.repositoryId, this.config.deviceId),
           desired,
@@ -604,7 +612,7 @@ export class RepositorySynchronizer {
       const key = chunkKey(this.config.repositoryId, chunk.sha256);
       if (!await this.storage.get('frozen', key)) {
         const data = await this.cache.readChunk(chunk.sha256);
-        await this.storage.put('frozen', key, {
+        await this.#put('frozen', key, {
           protocol: PROTOCOL,
           kind: 'chunk',
           sha256: chunk.sha256,
@@ -616,7 +624,7 @@ export class RepositorySynchronizer {
     }
     const key = manifestKey(this.config.repositoryId, manifest.snapshotId);
     if (!await this.storage.get('frozen', key)) {
-      await this.storage.put('frozen', key, manifest);
+      await this.#put('frozen', key, manifest);
     }
   }
 
@@ -626,11 +634,29 @@ export class RepositorySynchronizer {
       const manifest = await this.cache.readManifest(snapshotId);
       if (!manifest) continue;
       try {
-        await this.#seedManifest(this.#validateManifest(manifest, snapshotId));
+        const validated = this.#validateManifest(manifest, snapshotId);
+        if (!this.#manifestFitsChunkSize(validated)) continue;
+        await this.#seedManifest(validated);
       } catch (error) {
         this.logger.warn(`Could not re-seed cached snapshot ${snapshotId.slice(0, 12)}: ${error.message}`);
       }
     }
+  }
+
+  async #put(space, key, value) {
+    const record = await this.storage.put(space, key, value);
+    if (this.storageWritePauseMs > 0) await sleep(this.storageWritePauseMs);
+    return record;
+  }
+
+  #manifestFitsChunkSize(manifest) {
+    if (!manifest) return false;
+    const chunks = [
+      ...manifest.chunks,
+      ...manifest.files.flatMap((file) => file.chunks),
+      ...manifest.liveFiles.flatMap((file) => file.chunks),
+    ];
+    return chunks.every((chunk) => chunk.size <= this.chunkSize);
   }
 
   #decodeChunk(value, expected) {
@@ -732,6 +758,8 @@ export class RepositorySynchronizer {
 
     const hasLiveWorkspace = Object.prototype.hasOwnProperty.call(value, 'liveWorkspaceDigest')
       || Object.prototype.hasOwnProperty.call(value, 'liveFiles');
+    const transportChunkSize = Number(value.transportChunkSize ?? DEFAULT_CHUNK_SIZE);
+    if (hasLiveWorkspace && (!Number.isSafeInteger(transportChunkSize) || transportChunkSize < 1)) return null;
     const rawLiveFiles = value.liveFiles ?? [];
     if (!Array.isArray(rawLiveFiles) || rawLiveFiles.length > 100_000) return null;
     const seenLive = new Set();
@@ -781,7 +809,7 @@ export class RepositorySynchronizer {
       : calculatedLiveWorkspaceDigest;
     if (!DIGEST.test(liveFilesDigest) || liveFilesDigest !== calculatedLiveWorkspaceDigest) return null;
     const expectedDigest = hasLiveWorkspace
-      ? snapshotDigest(bundleSha256, filesDigest, liveFilesDigest)
+      ? snapshotDigest(bundleSha256, filesDigest, liveFilesDigest, transportChunkSize)
       : snapshotDigest(bundleSha256, filesDigest);
     if (extended && expectedDigest !== value.snapshotId) return null;
     return {
@@ -793,6 +821,7 @@ export class RepositorySynchronizer {
       files,
       liveWorkspaceDigest: liveFilesDigest,
       liveFiles,
+      transportChunkSize,
       refs: Array.isArray(value.refs) ? value.refs : [],
     };
   }

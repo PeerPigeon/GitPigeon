@@ -4,6 +4,15 @@ export { RepositoryCache } from './cache.js';
 export { WorkspaceFiles, workspaceDigest } from './workspace.js';
 export { LIVE_FILE_LIMIT, LiveWorkspace, liveWorkspaceDigest } from './live-workspace.js';
 export {
+  PAIRING_NETWORK_ID,
+  PAIRING_PROTOCOL,
+  PAIRING_TTL_MS,
+  createDashboardEnrollment,
+  decryptEnrollmentClaim,
+  encryptEnrollmentGrant,
+  serveDashboardEnrollment,
+} from './dashboard-pairing.js';
+export {
   createWatchControl,
   isGitPigeonWatcherCommand,
   listGitPigeonWatcherPids,
@@ -18,7 +27,7 @@ export {
   INDEX_NETWORK_ID,
   INDEX_PROTOCOL,
   INDEX_STALE_MS,
-  claimPairingUrl,
+  claimDashboardPairing,
   clearMachinePigeons,
   connectMachineIndex,
   directoryKey,
@@ -28,7 +37,6 @@ export {
   machineIndexRoot,
   markMachinePigeonStopped,
   openDashboard,
-  pairingUrl,
   registerMachinePigeon,
   unregisterMachinePigeon,
 } from './machine-index.js';

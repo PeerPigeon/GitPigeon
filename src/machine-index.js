@@ -11,7 +11,7 @@ export const INDEX_NETWORK_ID = 'gitpigeon-index-v1';
 export const INDEX_HEARTBEAT_MS = 3_000;
 export const INDEX_STALE_MS = 12_000;
 
-const STATE_VERSION = 1;
+const STATE_VERSION = 2;
 const INDEX_ID = /^[a-f0-9]{32}$/;
 const SECRET = /^[a-zA-Z0-9_-]{32,256}$/;
 const DEVICE = /^[a-zA-Z0-9_-]{8,128}$/;
@@ -54,7 +54,8 @@ function validEntry(value) {
 }
 
 function validateState(value) {
-  if (!value || value.version !== STATE_VERSION || !INDEX_ID.test(String(value.indexId)) || !SECRET.test(String(value.secret))) {
+  if (!value || ![1, STATE_VERSION].includes(value.version)
+    || !INDEX_ID.test(String(value.indexId)) || !SECRET.test(String(value.secret))) {
     throw new Error('Invalid GitPigeon machine index');
   }
   const entries = Array.isArray(value.entries) ? value.entries.map(validEntry).filter(Boolean) : [];
@@ -63,6 +64,7 @@ function validateState(value) {
     indexId: String(value.indexId),
     secret: String(value.secret),
     pairingLaunched: value.pairingLaunched === true,
+    pairingMode: value.version === 1 ? 'legacy' : value.pairingMode === 'secure' ? 'secure' : 'legacy',
     entries,
   };
 }
@@ -73,6 +75,7 @@ function freshState() {
     indexId: randomBytes(16).toString('hex'),
     secret: randomBytes(32).toString('base64url'),
     pairingLaunched: false,
+    pairingMode: 'secure',
     entries: [],
   };
 }
@@ -238,20 +241,20 @@ export function directoryValue(index, entries, now = Date.now()) {
   };
 }
 
-export function pairingUrl(index, baseUrl = 'https://gitpigeon.dev/') {
-  const capability = `${index.indexId}.${index.secret}`;
-  const url = new URL(baseUrl);
-  url.hash = `pair=${encodeURIComponent(capability)}`;
-  return url.toString();
-}
-
-export async function claimPairingUrl({ root = machineIndexRoot(), baseUrl } = {}) {
+export async function claimDashboardPairing({
+  root = machineIndexRoot(),
+  force = false,
+  rotate = false,
+} = {}) {
   return await withLock(root, async () => {
     const value = await readState(root);
-    if (value.pairingLaunched) return null;
+    if (value.pairingLaunched && value.pairingMode === 'secure' && !force) return null;
+    const rotated = rotate || value.pairingMode === 'legacy';
+    if (rotated) value.secret = randomBytes(32).toString('base64url');
+    value.pairingMode = 'secure';
     value.pairingLaunched = true;
     await writeState(root, value);
-    return pairingUrl(value, baseUrl);
+    return { index: value, rotated };
   });
 }
 
@@ -287,11 +290,12 @@ export async function connectMachineIndex(repository, config, logger = {}, {
   const { PeerPigeonNode } = await import('peerpigeon');
   const prefix = `gitpigeon/index/v1/${index.indexId}/`;
   const node = new PeerPigeonNode({
+    crypto: false,
     networkId: INDEX_NETWORK_ID,
     sessionId: index.indexId,
     minPeers: 1,
-    maxPeers: 8,
-    tolerantPeers: 2,
+    maxPeers: 4,
+    tolerantPeers: 1,
     autoDiscover: true,
     autoConnect: true,
     storage: {
@@ -308,10 +312,11 @@ export async function connectMachineIndex(repository, config, logger = {}, {
   const publish = ({ reconcile = false } = {}) => {
     const operation = publishQueue.then(async () => {
       if (closed) return;
+      if (node.getConnectedPeers().length === 0) return;
       const storage = node.storage;
       if (!storage) return;
       if (reconcile) {
-        await storage.retrieve('public', directoryKey(index.indexId), { timeoutMs: 750 });
+        await storage.retrieve('public', directoryKey(index.indexId), { timeoutMs: 250 });
       }
       const current = await loadMachineIndex({ root });
       await storage.put('public', directoryKey(current.indexId), directoryValue(current, current.entries));
@@ -333,7 +338,6 @@ export async function connectMachineIndex(repository, config, logger = {}, {
     throw new Error('PeerPigeon index storage did not initialize');
   }
   node.storage.subscribeKey('public', directoryKey(index.indexId));
-  await publish({ reconcile: true });
   const timer = setInterval(() => { publish().catch((error) => logger.error?.(error)); }, heartbeatMs);
   return {
     index,
@@ -345,7 +349,9 @@ export async function connectMachineIndex(repository, config, logger = {}, {
       await markMachinePigeonStopped(repository, { root });
       try {
         const current = await loadMachineIndex({ root });
-        await node.storage?.put('public', directoryKey(current.indexId), directoryValue(current, current.entries));
+        if (node.getConnectedPeers().length > 0) {
+          await node.storage?.put('public', directoryKey(current.indexId), directoryValue(current, current.entries));
+        }
       } catch (error) {
         logger.error?.(error);
       }

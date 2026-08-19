@@ -15,11 +15,12 @@ export async function connectPeerPigeon(config, logger = {}) {
 
   const prefix = `${storagePrefix(config.repositoryId)}/`;
   const options = {
+    crypto: false,
     networkId: NETWORK_ID,
     sessionId: config.repositoryId,
     minPeers: 1,
-    maxPeers: 8,
-    tolerantPeers: 2,
+    maxPeers: 4,
+    tolerantPeers: 1,
     autoDiscover: true,
     autoConnect: true,
     storage: {
@@ -30,8 +31,9 @@ export async function connectPeerPigeon(config, logger = {}) {
       syncFilter: (_space, key) => String(key).startsWith(prefix),
     },
   };
+  // Leave signaling unset by default so PeerPigeon independently selects a
+  // nearby relay and FreeRTC federates peers sharing this Network + Room.
   if (config.signalingServer) options.signalingServer = config.signalingServer;
-
   const node = new PeerPigeonNode(options);
   node.on('error', (error) => logger.error?.(error));
   node.on('peerConnected', (peerId) => logger.debug?.(`Peer connected: ${peerId}`));
@@ -49,6 +51,24 @@ export async function connectPeerPigeon(config, logger = {}) {
   return {
     node,
     storage: node.storage,
+    async waitForPeer({ timeoutMs = 0 } = {}) {
+      if (node.getConnectedPeers().length > 0) return node.getConnectedPeers()[0];
+      return await new Promise((resolve, reject) => {
+        let timer = null;
+        const connected = (peerId) => {
+          if (timer) clearTimeout(timer);
+          node.off('peerConnected', connected);
+          resolve(peerId);
+        };
+        node.on('peerConnected', connected);
+        if (timeoutMs > 0) {
+          timer = setTimeout(() => {
+            node.off('peerConnected', connected);
+            reject(new Error('No GitPigeon repository peer connected before the timeout'));
+          }, timeoutMs);
+        }
+      });
+    },
     async close() {
       await node.destroy();
     },

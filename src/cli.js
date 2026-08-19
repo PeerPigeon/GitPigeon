@@ -13,8 +13,9 @@ import {
 } from './daemon.js';
 import { GitRepository } from './git.js';
 import { createInvite, parseInvite } from './invite.js';
+import { createDashboardEnrollment, serveDashboardEnrollment } from './dashboard-pairing.js';
 import {
-  claimPairingUrl,
+  claimDashboardPairing,
   connectMachineIndex,
   listMachinePigeons,
   markMachinePigeonStopped,
@@ -30,6 +31,7 @@ const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
 Usage:
   git pigeon init [INVITE] [DIRECTORY]
   git pigeon list
+  git pigeon pair [--rotate]
   git pigeon unwatch [REPOSITORY]
   git pigeon stop
   git pigeon watch [off|--foreground] [--poll DURATION]
@@ -154,17 +156,23 @@ async function commandInit(args, cwd, verbose) {
   }
   const workspace = new WorkspaceFiles(repository);
   await workspace.init();
-  const watcher = await startIndexedWatchDaemon(repository, { verbose });
-  const dashboardPairing = await claimPairingUrl({ baseUrl: process.env.GITPIGEON_DASHBOARD_URL });
-  if (dashboardPairing) {
-    try {
-      const opened = openDashboard(dashboardPairing);
-      if (opened) console.log('Paired this machine with the GitPigeon dashboard through PeerPigeon.');
-      else console.log(`Open this one-time pairing URL:\n${dashboardPairing}`);
-    } catch (error) {
-      console.warn(`Could not open the GitPigeon dashboard automatically: ${error.message}`);
-      console.log(`Open this one-time pairing URL:\n${dashboardPairing}`);
+  const pairing = await claimDashboardPairing();
+  if (pairing?.rotated) {
+    const previouslyActive = (await listMachinePigeons({ activeOnly: false }))
+      .filter((entry) => processIsRunning(entry.pid));
+    await commandStop([]);
+    for (const root of [...new Set(previouslyActive.map((entry) => entry.repository))]) {
+      if (root === repository.root) continue;
+      try {
+        await startWatchDaemon(await GitRepository.discover(root), { verbose });
+      } catch (error) {
+        console.warn(`Could not restart GitPigeon for ${root}: ${error.message}`);
+      }
     }
+  }
+  const watcher = await startIndexedWatchDaemon(repository, { verbose });
+  if (pairing) {
+    await runDashboardPairing(pairing, verbose);
   }
 
   if (created && !invite) {
@@ -180,6 +188,47 @@ async function commandInit(args, cwd, verbose) {
   if (discovered.length) console.log(`Private files: ${discovered.length} automatically protected from Git.`);
   console.log('Remove this repository from the encrypted Pigeon index with `git pigeon unwatch`.');
   console.log('Stop every local watcher with `git pigeon stop`.');
+}
+
+async function runDashboardPairing(pairing, verbose = false) {
+  const enrollment = createDashboardEnrollment(
+    pairing.index,
+    process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/',
+  );
+  console.log(`Browser approval code: ${enrollment.displayCode}`);
+  console.log('Enter this code at gitpigeon.dev within two minutes.');
+  const result = await serveDashboardEnrollment(enrollment, {
+    logger: logger(verbose),
+    onReady: () => {
+      let opened = false;
+      try {
+        opened = openDashboard(enrollment.url);
+      } catch (error) {
+        console.warn(`Could not open the GitPigeon dashboard automatically: ${error.message}`);
+      }
+      if (!opened) console.log(`Open this one-time enrollment URL:\n${enrollment.url}`);
+    },
+  });
+  console.log(`Securely paired browser ${result.browserId.slice(0, 16)}…; the permanent index secret was never placed in the URL.`);
+}
+
+async function commandPair(args, verbose) {
+  const rotate = takeFlag(args, '--rotate');
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  const pairing = await claimDashboardPairing({ force: true, rotate });
+  if (pairing.rotated) {
+    const previouslyActive = (await listMachinePigeons({ activeOnly: false }))
+      .filter((entry) => processIsRunning(entry.pid));
+    await commandStop([]);
+    for (const root of [...new Set(previouslyActive.map((entry) => entry.repository))]) {
+      try {
+        await startWatchDaemon(await GitRepository.discover(root), { verbose });
+      } catch (error) {
+        console.warn(`Could not restart GitPigeon for ${root}: ${error.message}`);
+      }
+    }
+  }
+  await runDashboardPairing(pairing, verbose);
 }
 
 async function commandInvite(args, cwd) {
@@ -226,6 +275,7 @@ async function commandSync(args, cwd, verbose) {
   const log = logger(verbose);
   const { runtime, synchronizer } = await openNetwork(repository, config, log);
   try {
+    await runtime.waitForPeer({ timeoutMs: Math.max(waitMs, DEFAULT_SYNC_WAIT_MS) });
     await synchronizer.start({ publish: false });
     await synchronizer.publishLocal({ force });
     if (waitMs > 0) await sleep(waitMs);
@@ -259,6 +309,7 @@ async function commandWatch(args, cwd, verbose) {
   let runtime;
   let synchronizer;
   let timer;
+  let peerRefreshTimer;
   let control;
   let machineIndex;
   let resolveStop;
@@ -274,8 +325,14 @@ async function commandWatch(args, cwd, verbose) {
   try {
     machineIndex = await connectMachineIndex(repository, config, log);
     ({ runtime, synchronizer } = await openNetwork(repository, config, log));
-    await synchronizer.start();
     if (daemonToken) control = await createWatchControl(repository, daemonToken, stop);
+    log.info(`Watching ${repository.root} as ${config.deviceId.slice(0, 8)}${daemonToken ? '' : ' (Ctrl+C to stop)'}`);
+    const peerId = await Promise.race([
+      runtime.waitForPeer(),
+      stopped.then(() => null),
+    ]);
+    if (!peerId) return;
+    await synchronizer.start();
     let previousDigest = await synchronizer.localDigest();
     let publishing = false;
     const check = async () => {
@@ -295,14 +352,19 @@ async function commandWatch(args, cwd, verbose) {
     };
     timer = setInterval(check, pollMs);
     runtime.node.on('peerConnected', () => {
-      synchronizer.refresh().catch((error) => log.error(error));
+      if (peerRefreshTimer) return;
+      peerRefreshTimer = setTimeout(() => {
+        peerRefreshTimer = null;
+        if (runtime.node.getConnectedPeers().length === 0) return;
+        synchronizer.refresh().catch((error) => log.error(error));
+      }, 250);
     });
-    log.info(`Watching ${repository.root} as ${config.deviceId.slice(0, 8)}${daemonToken ? '' : ' (Ctrl+C to stop)'}`);
     await stopped;
   } finally {
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);
     if (timer) clearInterval(timer);
+    if (peerRefreshTimer) clearTimeout(peerRefreshTimer);
     if (synchronizer) await synchronizer.stop();
     if (runtime) await runtime.close();
     if (machineIndex) await machineIndex.close();
@@ -540,6 +602,7 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   }
   if (command === 'init') return await commandInit(args, cwd, verbose);
   if (command === 'list') return await commandList(args);
+  if (command === 'pair') return await commandPair(args, verbose);
   if (command === 'invite') return await commandInvite(args, cwd);
   if (command === 'track') return await commandTrack(args, cwd);
   if (command === 'untrack') return await commandUntrack(args, cwd);

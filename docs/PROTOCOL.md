@@ -124,7 +124,34 @@ all local GitPigeon watcher processes but leaves the directory intact.
 The machine directory is stored as an encrypted `public`-space record; `public`
 describes its ACL inside that session, while PeerPigeon's `syncSecret` encrypts
 the entire synchronization envelope. Each directory item includes a live
-watcher count, which is zero while its repository process is stopped. The first
-`init` transfers the index capability to `gitpigeon.dev` in a URL fragment,
-which is never sent to the web server. No HTTP listener or loopback bridge
-participates in discovery.
+watcher count, which is zero while its repository process is stopped.
+
+GitPigeon does not set a signaling relay for repository, machine-index, or
+enrollment sessions by default. PeerPigeon independently selects a nearby
+FreeRTC relay for each peer. Peers remain discoverable because FreeRTC federates
+the exact shared Network + Room scope across its Kademlia relay overlay. An
+explicit signaling URL in an older or custom repository invite remains an
+opt-in override for that repository only.
+
+## Browser enrollment
+
+`init` never places the permanent machine-index capability in a URL. It creates
+a two-minute pairing ID, an ephemeral PeerPigeon sync secret, a P-256 ECDH key,
+and a random six-digit approval code. The URL fragment contains only the pairing
+ID, ephemeral sync secret, and native ephemeral public key; fragments are not
+sent to the web server.
+
+The browser generates its own P-256 key and encrypts the terminal code to the
+ECDH shared key using AES-256-GCM. The claim is bound to the pairing ID, browser
+ID, and browser public key as authenticated data. The native peer permits five
+attempts. On success it encrypts the permanent index ID and secret to the same
+browser-specific ECDH key, waits for an authenticated acknowledgment, and then
+destroys the temporary PeerPigeon node. Enrollment therefore proves possession
+of both the short-lived URL rendezvous and the out-of-band terminal code without
+exposing the permanent capability to either one.
+
+`git pigeon pair` creates another temporary enrollment. `git pigeon pair
+--rotate` changes the permanent machine-index secret before enrollment, which
+invalidates prior browser capabilities. Version-1 machine-index state is marked
+legacy and automatically rotates during its first secure enrollment. No HTTP
+listener or loopback bridge participates in discovery or approval.
