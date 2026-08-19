@@ -13,6 +13,7 @@ import {
   storagePrefix,
 } from './constants.js';
 import { RepositoryCache } from './cache.js';
+import { LiveWorkspace, liveWorkspaceDigest } from './live-workspace.js';
 import { WorkspaceFiles, workspaceDigest } from './workspace.js';
 
 const DIGEST = /^[a-f0-9]{64}$/;
@@ -31,12 +32,15 @@ function sameStrings(left, right) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function snapshotDigest(bundleSha256, filesDigest) {
-  return digest(`gitpigeon-snapshot-v1\0${bundleSha256 ?? '-'}\0${filesDigest}`);
+function snapshotDigest(bundleSha256, filesDigest, liveFilesDigest) {
+  if (liveFilesDigest === undefined) {
+    return digest(`gitpigeon-snapshot-v1\0${bundleSha256 ?? '-'}\0${filesDigest}`);
+  }
+  return digest(`gitpigeon-snapshot-v2\0${bundleSha256 ?? '-'}\0${filesDigest}\0${liveFilesDigest}`);
 }
 
-function contentDigest(refsDigest, filesDigest) {
-  return digest(`gitpigeon-content-v1\0${refsDigest ?? '-'}\0${filesDigest}`);
+function contentDigest(refsDigest, filesDigest, liveFilesDigest) {
+  return digest(`gitpigeon-content-v2\0${refsDigest ?? '-'}\0${filesDigest}\0${liveFilesDigest}`);
 }
 
 export class RepositorySynchronizer {
@@ -46,6 +50,7 @@ export class RepositorySynchronizer {
     config,
     cache = new RepositoryCache(repository.gitDir),
     workspace = new WorkspaceFiles(repository, cache),
+    liveWorkspace = new LiveWorkspace(repository, cache),
     logger = {},
     chunkSize = DEFAULT_CHUNK_SIZE,
     retrieveTimeoutMs = DEFAULT_RETRIEVE_TIMEOUT_MS,
@@ -56,6 +61,7 @@ export class RepositorySynchronizer {
     this.cache = cache;
     this.cache.setEncryptionSecret?.(config.secret);
     this.workspace = workspace;
+    this.liveWorkspace = liveWorkspace;
     this.chunkSize = chunkSize;
     this.retrieveTimeoutMs = retrieveTimeoutMs;
     this.logger = {
@@ -66,12 +72,16 @@ export class RepositorySynchronizer {
     };
     this.devices = new Set([config.deviceId]);
     this.registryDevices = [];
-    this.state = { heads: {}, imported: {}, fileBaselines: {} };
+    this.state = { heads: {}, imported: {}, fileBaselines: {}, liveBaselines: {}, importedRefs: {} };
     this.unsubscribe = [];
     this.subscribedHeads = new Set();
+    this.acceptingHeads = new Map();
     this.started = false;
     this.work = Promise.resolve();
-    this.lastResult = { updated: [], conflicts: [], updatedFiles: [], fileConflicts: [] };
+    this.lastResult = {
+      updated: [], conflicts: [], updatedFiles: [], fileConflicts: [],
+      updatedLiveFiles: [], liveConflicts: [],
+    };
   }
 
   async start({ publish = true } = {}) {
@@ -79,7 +89,10 @@ export class RepositorySynchronizer {
     this.started = true;
     try {
       await this.cache.init();
-      if (!this.repository.bare) await this.workspace.init();
+      if (!this.repository.bare) {
+        await this.workspace.init();
+        await this.liveWorkspace.init();
+      }
       this.state = this.#normalizeState(await this.cache.loadState());
       for (const deviceId of Object.keys(this.state.heads)) {
         if (DEVICE.test(deviceId)) this.devices.add(deviceId);
@@ -135,19 +148,39 @@ export class RepositorySynchronizer {
   async publishLocal({ force = false } = {}) {
     const refsDigest = await this.repository.refsDigest();
     const workspace = await this.workspace.snapshot();
-    if (!refsDigest && workspace.files.length === 0) {
-      this.logger.debug('No Git refs or private workspace files to publish yet');
+    const liveWorkspace = await this.liveWorkspace.snapshot({
+      privatePaths: workspace.files.map((file) => file.path),
+    });
+    const previous = this.state.heads[this.config.deviceId];
+    if (!refsDigest && workspace.files.length === 0 && liveWorkspace.files.length === 0 && !previous) {
+      this.logger.debug('No Git refs, private files, or live code changes to publish yet');
       return null;
     }
-    const currentContentDigest = contentDigest(refsDigest, workspace.digest);
-    const previous = this.state.heads[this.config.deviceId];
+    const currentContentDigest = contentDigest(refsDigest, workspace.digest, liveWorkspace.digest);
     if (!force && previous?.contentDigest === currentContentDigest) return previous;
 
-    const bundle = await this.repository.createBundle();
+    let bundle = null;
     try {
-      const bundleData = bundle?.data ?? Buffer.alloc(0);
-      const bundleSha256 = bundle ? digest(bundleData) : null;
-      const chunks = await this.#cacheChunks(bundleData);
+      const cachedManifest = previous?.refsDigest === refsDigest
+        ? this.#validateManifest(await this.cache.readManifest(previous.snapshotId), previous.snapshotId)
+        : null;
+      let bundleSize;
+      let bundleSha256;
+      let chunks;
+      let refs;
+      if (cachedManifest) {
+        bundleSize = cachedManifest.bundleSize;
+        bundleSha256 = cachedManifest.bundleSha256;
+        chunks = cachedManifest.chunks;
+        refs = cachedManifest.refs;
+      } else {
+        bundle = await this.repository.createBundle();
+        const bundleData = bundle?.data ?? Buffer.alloc(0);
+        bundleSize = bundleData.length;
+        bundleSha256 = bundle ? digest(bundleData) : null;
+        chunks = await this.#cacheChunks(bundleData);
+        refs = bundle?.refs ?? [];
+      }
       const files = [];
       for (const file of workspace.files) {
         files.push({
@@ -158,20 +191,34 @@ export class RepositorySynchronizer {
           chunks: file.deleted ? [] : await this.#cacheChunks(file.data),
         });
       }
-      const snapshotId = snapshotDigest(bundleSha256, workspace.digest);
+      const liveFiles = [];
+      for (const file of liveWorkspace.files) {
+        liveFiles.push({
+          path: file.path,
+          deleted: file.deleted,
+          size: file.size,
+          sha256: file.sha256,
+          baseSha256: file.baseSha256,
+          executable: file.executable,
+          chunks: file.deleted ? [] : await this.#cacheChunks(file.data),
+        });
+      }
+      const snapshotId = snapshotDigest(bundleSha256, workspace.digest, liveWorkspace.digest);
       const manifest = {
         protocol: PROTOCOL,
         repositoryId: this.config.repositoryId,
         snapshotId,
         deviceId: this.config.deviceId,
         createdAt: new Date().toISOString(),
-        bundleSize: bundleData.length,
+        bundleSize,
         bundleSha256,
         refsDigest,
-        refs: bundle?.refs ?? [],
+        refs,
         chunks,
         workspaceDigest: workspace.digest,
         files,
+        liveWorkspaceDigest: liveWorkspace.digest,
+        liveFiles,
       };
       await this.cache.writeManifest(manifest);
       await this.#seedManifest(manifest);
@@ -189,7 +236,7 @@ export class RepositorySynchronizer {
       this.state.heads[this.config.deviceId] = head;
       await this.cache.saveState(this.state);
       this.logger.info(
-        `Published ${bundle?.refs.length ?? 0} refs and ${files.length} private files (${snapshotId.slice(0, 12)})`,
+        `Published ${refs.length} refs, ${liveFiles.length} live code changes, and ${files.length} private files (${snapshotId.slice(0, 12)})`,
       );
       return head;
     } finally {
@@ -200,8 +247,12 @@ export class RepositorySynchronizer {
   async localDigest() {
     const refsDigest = await this.repository.refsDigest();
     const workspace = await this.workspace.snapshot();
-    if (!refsDigest && workspace.files.length === 0) return null;
-    return contentDigest(refsDigest, workspace.digest);
+    const liveWorkspace = await this.liveWorkspace.snapshot({
+      privatePaths: workspace.files.map((file) => file.path),
+    });
+    if (!refsDigest && workspace.files.length === 0 && liveWorkspace.files.length === 0
+      && !this.state.heads[this.config.deviceId]) return null;
+    return contentDigest(refsDigest, workspace.digest, liveWorkspace.digest);
   }
 
   async status() {
@@ -212,6 +263,8 @@ export class RepositorySynchronizer {
       heads: { ...this.state.heads },
       imported: { ...this.state.imported },
       trackedFiles: await this.workspace.list(),
+      liveFiles: (await this.liveWorkspace.snapshot({ privatePaths: await this.workspace.list() }))
+        .files.map((file) => file.path),
       lastResult: this.lastResult,
     };
   }
@@ -322,6 +375,22 @@ export class RepositorySynchronizer {
   async #acceptHead(value) {
     const head = this.#validateHead(value);
     if (!head) return;
+    const previous = this.acceptingHeads.get(head.deviceId) ?? Promise.resolve();
+    const operation = previous.then(
+      () => this.#acceptValidatedHead(head),
+      () => this.#acceptValidatedHead(head),
+    );
+    this.acceptingHeads.set(head.deviceId, operation);
+    try {
+      await operation;
+    } finally {
+      if (this.acceptingHeads.get(head.deviceId) === operation) {
+        this.acceptingHeads.delete(head.deviceId);
+      }
+    }
+  }
+
+  async #acceptValidatedHead(head) {
     this.devices.add(head.deviceId);
     if (head.deviceId === this.config.deviceId) {
       const desired = this.#validateHead(this.state.heads[this.config.deviceId]);
@@ -347,26 +416,45 @@ export class RepositorySynchronizer {
     let temporary = null;
     try {
       let gitResult = { updated: [], conflicts: [], remoteRefs: [] };
+      let bundleFile = null;
       if (manifest.bundleSize > 0) {
         temporary = await mkdtemp(path.join(tmpdir(), 'gitpigeon-import-'));
-        const bundleFile = path.join(temporary, 'repository.bundle');
+        bundleFile = path.join(temporary, 'repository.bundle');
         const data = await this.#retrieveBundle(manifest);
         await writeFile(bundleFile, data);
-        gitResult = await this.repository.importBundle(bundleFile, head.deviceId);
       }
       const privateFiles = await this.#retrieveWorkspaceFiles(manifest);
+      const liveFiles = await this.#retrieveLiveWorkspaceFiles(manifest);
+      const liveBaselines = this.state.liveBaselines[head.deviceId] ??= {};
+      const refsChanged = this.state.importedRefs[head.deviceId] !== head.refsDigest;
+      const prepared = await this.liveWorkspace.prepare(liveFiles, liveBaselines, {
+        restoreAll: refsChanged,
+      });
+      if (bundleFile) gitResult = await this.repository.importBundle(bundleFile, head.deviceId);
       const fileResult = await this.workspace.apply(
         privateFiles,
         this.state.fileBaselines,
         head.deviceId,
       );
+      const liveResult = await this.liveWorkspace.apply(liveFiles, liveBaselines, head.deviceId);
+      const liveConflicts = [
+        ...prepared.conflicts.map((conflict) => ({ ...conflict, kind: 'live' })),
+        ...liveResult.conflicts.map((conflict) => ({ ...conflict, kind: 'live' })),
+      ];
+      const privateConflicts = fileResult.conflicts.map((conflict) => ({ ...conflict, kind: 'private' }));
       const result = {
         ...gitResult,
-        conflicts: [...gitResult.conflicts, ...fileResult.conflicts],
+        conflicts: [...gitResult.conflicts, ...privateConflicts, ...liveConflicts],
         updatedFiles: fileResult.updated,
-        fileConflicts: fileResult.conflicts,
+        fileConflicts: privateConflicts,
+        updatedLiveFiles: [...new Set([...prepared.restored, ...liveResult.updated])].sort(),
+        liveConflicts,
       };
-      this.state.imported[head.deviceId] = head.snapshotId;
+      const retryableGitConflict = gitResult.conflicts.some(
+        (conflict) => conflict.reason === 'working-tree-not-clean',
+      );
+      if (!retryableGitConflict) this.state.imported[head.deviceId] = head.snapshotId;
+      if (gitResult.conflicts.length === 0) this.state.importedRefs[head.deviceId] = head.refsDigest;
       await this.cache.saveState(this.state);
       this.lastResult = result;
       if (result.updated.length > 0) {
@@ -375,13 +463,20 @@ export class RepositorySynchronizer {
       if (result.updatedFiles.length > 0) {
         this.logger.info(`Restored private files: ${result.updatedFiles.join(', ')}`);
       }
+      if (result.updatedLiveFiles.length > 0) {
+        this.logger.info(`Applied live code changes: ${result.updatedLiveFiles.join(', ')}`);
+      }
       for (const conflict of result.conflicts) {
         if (conflict.branch) {
           this.logger.warn(
             `Branch ${conflict.branch} ${conflict.reason}; merge ${conflict.remoteRef} when ready`,
           );
-        } else {
+        } else if (conflict.kind === 'private') {
           this.logger.warn(`Private file ${conflict.path} ${conflict.reason}; incoming copy saved at ${conflict.conflictFile}`);
+        } else if (conflict.conflictFile) {
+          this.logger.warn(`Live file ${conflict.path} ${conflict.reason}; incoming copy saved at ${conflict.conflictFile}`);
+        } else {
+          this.logger.warn(`Live file ${conflict.path} ${conflict.reason}; local copy was left unchanged`);
         }
       }
     } finally {
@@ -445,6 +540,19 @@ export class RepositorySynchronizer {
     return files;
   }
 
+  async #retrieveLiveWorkspaceFiles(manifest) {
+    const files = [];
+    for (const file of manifest.liveFiles) {
+      if (file.deleted) {
+        files.push({ ...file, data: null });
+        continue;
+      }
+      const data = await this.#retrieveChunks(file.chunks, file.size, file.sha256, `Live file ${file.path}`);
+      files.push({ ...file, data });
+    }
+    return files;
+  }
+
   async #retrieveChunks(chunks, expectedSize, expectedDigest, label) {
     const values = [];
     let size = 0;
@@ -489,6 +597,7 @@ export class RepositorySynchronizer {
     const descriptors = [
       ...manifest.chunks,
       ...manifest.files.flatMap((file) => file.chunks),
+      ...manifest.liveFiles.flatMap((file) => file.chunks),
     ];
     const uniqueChunks = new Map(descriptors.map((chunk) => [chunk.sha256, chunk]));
     for (const chunk of uniqueChunks.values()) {
@@ -620,7 +729,61 @@ export class RepositorySynchronizer {
     const calculatedWorkspaceDigest = workspaceDigest(files);
     const filesDigest = extended ? String(value.workspaceDigest ?? '') : calculatedWorkspaceDigest;
     if (!DIGEST.test(filesDigest) || filesDigest !== calculatedWorkspaceDigest) return null;
-    if (extended && snapshotDigest(bundleSha256, filesDigest) !== value.snapshotId) return null;
+
+    const hasLiveWorkspace = Object.prototype.hasOwnProperty.call(value, 'liveWorkspaceDigest')
+      || Object.prototype.hasOwnProperty.call(value, 'liveFiles');
+    const rawLiveFiles = value.liveFiles ?? [];
+    if (!Array.isArray(rawLiveFiles) || rawLiveFiles.length > 100_000) return null;
+    const seenLive = new Set();
+    const liveFiles = [];
+    let totalLiveChunks = 0;
+    try {
+      for (const raw of rawLiveFiles) {
+        const filePath = this.liveWorkspace.normalize(raw?.path);
+        if (seenLive.has(filePath) || typeof raw?.deleted !== 'boolean') return null;
+        seenLive.add(filePath);
+        const deleted = raw.deleted;
+        const size = Number(raw.size);
+        const sha256 = raw.sha256 == null ? null : String(raw.sha256);
+        const baseSha256 = raw.baseSha256 == null ? null : String(raw.baseSha256);
+        const executable = raw.executable === true;
+        if (raw.executable !== true && raw.executable !== false) return null;
+        const fileChunks = Array.isArray(raw.chunks) ? raw.chunks.map((chunk) => ({
+          sha256: String(chunk?.sha256 ?? ''),
+          size: Number(chunk?.size),
+        })) : null;
+        if (!fileChunks || fileChunks.length > 1_000_000) return null;
+        totalLiveChunks += fileChunks.length;
+        if (totalLiveChunks > 1_000_000) return null;
+        if (fileChunks.some((chunk) => !DIGEST.test(chunk.sha256) || !Number.isSafeInteger(chunk.size) || chunk.size < 1)) return null;
+        if (!Number.isSafeInteger(size) || size < 0 || fileChunks.reduce((total, chunk) => total + chunk.size, 0) !== size) return null;
+        if (baseSha256 !== null && !DIGEST.test(baseSha256)) return null;
+        if (deleted) {
+          if (size !== 0 || sha256 !== null || fileChunks.length !== 0 || executable) return null;
+        } else if (!DIGEST.test(sha256 ?? '')) return null;
+        liveFiles.push({
+          path: filePath,
+          deleted,
+          size,
+          sha256,
+          baseSha256,
+          executable,
+          chunks: fileChunks,
+        });
+      }
+    } catch {
+      return null;
+    }
+    liveFiles.sort((left, right) => left.path.localeCompare(right.path));
+    const calculatedLiveWorkspaceDigest = liveWorkspaceDigest(liveFiles);
+    const liveFilesDigest = hasLiveWorkspace
+      ? String(value.liveWorkspaceDigest ?? '')
+      : calculatedLiveWorkspaceDigest;
+    if (!DIGEST.test(liveFilesDigest) || liveFilesDigest !== calculatedLiveWorkspaceDigest) return null;
+    const expectedDigest = hasLiveWorkspace
+      ? snapshotDigest(bundleSha256, filesDigest, liveFilesDigest)
+      : snapshotDigest(bundleSha256, filesDigest);
+    if (extended && expectedDigest !== value.snapshotId) return null;
     return {
       ...value,
       refsDigest,
@@ -628,12 +791,15 @@ export class RepositorySynchronizer {
       workspaceDigest: filesDigest,
       chunks,
       files,
+      liveWorkspaceDigest: liveFilesDigest,
+      liveFiles,
       refs: Array.isArray(value.refs) ? value.refs : [],
     };
   }
 
   #normalizeState(value) {
-    if (!value || typeof value !== 'object') return { heads: {}, imported: {}, fileBaselines: {} };
+    const empty = { heads: {}, imported: {}, fileBaselines: {}, liveBaselines: {}, importedRefs: {} };
+    if (!value || typeof value !== 'object') return empty;
     const fileBaselines = {};
     if (value.fileBaselines && typeof value.fileBaselines === 'object') {
       for (const [file, baseline] of Object.entries(value.fileBaselines)) {
@@ -643,10 +809,34 @@ export class RepositorySynchronizer {
         } catch { /* discard unsafe cached paths */ }
       }
     }
+    const liveBaselines = {};
+    if (value.liveBaselines && typeof value.liveBaselines === 'object') {
+      for (const [deviceId, entries] of Object.entries(value.liveBaselines)) {
+        if (!DEVICE.test(deviceId) || !entries || typeof entries !== 'object') continue;
+        const baselines = {};
+        for (const [file, baseline] of Object.entries(entries)) {
+          try {
+            const normalized = this.liveWorkspace.normalize(file);
+            if (baseline === null || DIGEST.test(String(baseline))) baselines[normalized] = baseline;
+          } catch { /* discard unsafe cached paths */ }
+        }
+        liveBaselines[deviceId] = baselines;
+      }
+    }
+    const importedRefs = {};
+    if (value.importedRefs && typeof value.importedRefs === 'object') {
+      for (const [deviceId, refsDigest] of Object.entries(value.importedRefs)) {
+        if (DEVICE.test(deviceId) && (refsDigest === null || DIGEST.test(String(refsDigest)))) {
+          importedRefs[deviceId] = refsDigest;
+        }
+      }
+    }
     return {
       heads: value.heads && typeof value.heads === 'object' ? value.heads : {},
       imported: value.imported && typeof value.imported === 'object' ? value.imported : {},
       fileBaselines,
+      liveBaselines,
+      importedRefs,
     };
   }
 }

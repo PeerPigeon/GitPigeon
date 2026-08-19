@@ -14,7 +14,7 @@ export class GitCommandError extends Error {
 }
 
 export async function runGit(cwd, args, options = {}) {
-  const { allowFailure = false, input, env } = options;
+  const { allowFailure = false, input, env, encoding = 'utf8' } = options;
   return await new Promise((resolve, reject) => {
     const child = spawn('git', ['-C', cwd, ...args], {
       shell: false,
@@ -28,10 +28,12 @@ export async function runGit(cwd, args, options = {}) {
     child.stderr.on('data', (chunk) => stderr.push(chunk));
     child.on('error', (error) => reject(error));
     child.on('close', (code) => {
+      const stdoutData = Buffer.concat(stdout);
+      const stderrData = Buffer.concat(stderr);
       const result = {
         code: code ?? 1,
-        stdout: Buffer.concat(stdout).toString('utf8'),
-        stderr: Buffer.concat(stderr).toString('utf8'),
+        stdout: encoding === null ? stdoutData : stdoutData.toString(encoding),
+        stderr: encoding === null ? stderrData : stderrData.toString(encoding),
       };
       if (result.code !== 0 && !allowFailure) {
         reject(new GitCommandError(args, result.code, result.stderr));
@@ -120,6 +122,29 @@ export class GitRepository {
       ':(exclude,glob)**/*.tmp',
     ]);
     return result.stdout.split('\0').filter(Boolean).sort();
+  }
+
+  async workingTreeFiles() {
+    if (this.bare) return [];
+    const head = await this.#resolve('HEAD');
+    const tracked = head
+      ? await this.git(['diff', '--no-renames', '--name-only', '-z', 'HEAD', '--'])
+      : await this.git(['ls-files', '-z']);
+    const untracked = await this.git(['ls-files', '--others', '--exclude-standard', '-z']);
+    return [...new Set([
+      ...tracked.stdout.split('\0').filter(Boolean),
+      ...untracked.stdout.split('\0').filter(Boolean),
+    ])].sort();
+  }
+
+  async headFile(filename) {
+    const result = await this.git(['show', `HEAD:${filename}`], { allowFailure: true, encoding: null });
+    return result.code === 0 ? result.stdout : null;
+  }
+
+  async hasStagedChanges(filename) {
+    const result = await this.git(['diff', '--cached', '--quiet', '--', filename], { allowFailure: true });
+    return result.code !== 0;
   }
 
   async createBundle() {

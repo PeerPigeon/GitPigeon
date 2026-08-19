@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -164,6 +164,124 @@ test('syncs private workspace files independently of Git and preserves concurren
   await a.publishLocal();
   await b.refresh();
   await assert.rejects(access(path.join(target.root, '.env')), { code: 'ENOENT' });
+
+  await b.stop();
+  await a.stop();
+});
+
+test('syncs live working-tree CRUD before commit and preserves concurrent code edits', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-live-workspace-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = await createRepository(path.join(root, 'source'), 'base\n');
+  const target = await createRepository(path.join(root, 'target'));
+  const network = new FakeNetwork();
+  const common = {
+    version: 1,
+    repositoryId: '0123456789abcdee',
+    secret: 'abcdefghijklmnopqrstuvwxyz_1234567890-ABCDE',
+    createdAt: new Date().toISOString(),
+  };
+  const a = new RepositorySynchronizer({
+    repository: source,
+    storage: network.store('live-a'),
+    config: { ...common, deviceId: 'device-live-aaaa' },
+  });
+  const b = new RepositorySynchronizer({
+    repository: target,
+    storage: network.store('live-b'),
+    config: { ...common, deviceId: 'device-live-bbbb' },
+  });
+  await a.start();
+  await b.start({ publish: false });
+  await b.refresh();
+
+  // Update and create propagate immediately without moving a Git ref.
+  const refsBefore = await source.refsDigest();
+  await writeFile(path.join(source.root, 'file.txt'), 'live update\n');
+  await writeFile(path.join(source.root, 'new.js'), 'export const live = true;\n');
+  await a.publishLocal();
+  await b.refresh();
+  assert.equal(await source.refsDigest(), refsBefore);
+  assert.equal(await readFile(path.join(target.root, 'file.txt'), 'utf8'), 'live update\n');
+  assert.equal(await readFile(path.join(target.root, 'new.js'), 'utf8'), 'export const live = true;\n');
+
+  // A rename is a live delete plus create, and deleting both tracked and
+  // untracked files is reflected on the other device.
+  await rename(path.join(source.root, 'new.js'), path.join(source.root, 'moved.js'));
+  await a.publishLocal();
+  await b.refresh();
+  await assert.rejects(access(path.join(target.root, 'new.js')), { code: 'ENOENT' });
+  assert.equal(await readFile(path.join(target.root, 'moved.js'), 'utf8'), 'export const live = true;\n');
+  await rm(path.join(source.root, 'moved.js'));
+  await rm(path.join(source.root, 'file.txt'));
+  await a.publishLocal();
+  await b.refresh();
+  await assert.rejects(access(path.join(target.root, 'moved.js')), { code: 'ENOENT' });
+  await assert.rejects(access(path.join(target.root, 'file.txt')), { code: 'ENOENT' });
+
+  // Turning the live overlay into a commit first removes the received overlay,
+  // allowing the normal Git fast-forward to proceed with a clean worktree.
+  await writeFile(path.join(source.root, 'file.txt'), 'now committed\n');
+  await source.git(['add', '-A']);
+  await source.git(['commit', '-m', 'commit live changes']);
+  await a.publishLocal();
+  await b.refresh();
+  assert.equal(await readFile(path.join(target.root, 'file.txt'), 'utf8'), 'now committed\n');
+  assert.equal((await target.git(['status', '--porcelain=v1'])).stdout, '');
+  assert.equal(
+    (await target.git(['rev-parse', 'HEAD'])).stdout.trim(),
+    (await source.git(['rev-parse', 'HEAD'])).stdout.trim(),
+  );
+
+  // Concurrent local code is never overwritten; the peer's version is saved
+  // beside GitPigeon's metadata for an explicit resolution.
+  await writeFile(path.join(target.root, 'file.txt'), 'local target edit\n');
+  await writeFile(path.join(source.root, 'file.txt'), 'incoming peer edit\n');
+  await a.publishLocal();
+  const conflictResult = await b.refresh();
+  assert.equal(await readFile(path.join(target.root, 'file.txt'), 'utf8'), 'local target edit\n');
+  assert.deepEqual(conflictResult.liveConflicts.map(({ path: file }) => file), ['file.txt']);
+  assert.equal(
+    await readFile(path.join(target.gitDir, 'gitpigeon', 'live-conflicts', 'device-live-aaaa', 'file.txt'), 'utf8'),
+    'incoming peer edit\n',
+  );
+
+  await b.stop();
+  await a.stop();
+});
+
+test('publishes deletion of the final live file before the first commit', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-unborn-live-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = await createRepository(path.join(root, 'source'));
+  const target = await createRepository(path.join(root, 'target'));
+  const network = new FakeNetwork();
+  const common = {
+    version: 1,
+    repositoryId: '0123456789abcddd',
+    secret: 'abcdefghijklmnopqrstuvwxyz_1234567890-ABCDE',
+    createdAt: new Date().toISOString(),
+  };
+  const a = new RepositorySynchronizer({
+    repository: source,
+    storage: network.store('unborn-a'),
+    config: { ...common, deviceId: 'device-unborn-a' },
+  });
+  const b = new RepositorySynchronizer({
+    repository: target,
+    storage: network.store('unborn-b'),
+    config: { ...common, deviceId: 'device-unborn-b' },
+  });
+  await writeFile(path.join(source.root, 'first.js'), 'console.log("live");\n');
+  await a.start();
+  await b.start({ publish: false });
+  await b.refresh();
+  assert.equal(await readFile(path.join(target.root, 'first.js'), 'utf8'), 'console.log("live");\n');
+
+  await rm(path.join(source.root, 'first.js'));
+  await a.publishLocal();
+  await b.refresh();
+  await assert.rejects(access(path.join(target.root, 'first.js')), { code: 'ENOENT' });
 
   await b.stop();
   await a.stop();

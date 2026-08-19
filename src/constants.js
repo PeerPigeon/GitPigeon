@@ -5,7 +5,7 @@ export const CONFIG_FILE = 'config.json';
 export const DEFAULT_CHUNK_SIZE = 16 * 1024;
 export const DEFAULT_RETRIEVE_TIMEOUT_MS = 4_000;
 export const DEFAULT_SYNC_WAIT_MS = 5_000;
-export const DEFAULT_POLL_MS = 1_000;
+export const DEFAULT_POLL_MS = 250;
 
 export function storagePrefix(repositoryId) {
   return `gitpigeon/v1/${repositoryId}`;
@@ -26,4 +26,3 @@ export function manifestKey(repositoryId, snapshotId) {
 export function chunkKey(repositoryId, digest) {
   return `${storagePrefix(repositoryId)}/chunk/${digest}`;
 }
-

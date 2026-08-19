@@ -86,9 +86,25 @@ git add .
 git commit -m "Ship it"
 ```
 
-The background watcher detects changed branches, tags, secrets, and local config
-and publishes them immediately. Remove only the current repository from the
-encrypted Pigeon index with either spelling:
+The background watcher detects working-tree changes every 250 ms. Creating,
+editing, renaming, or deleting an ordinary code file is published immediately;
+you do not need to stage or commit it first. Commits still synchronize as native
+Git history, and turning a live change into a commit cleanly replaces the live
+overlay on receiving devices. Changed branches, tags, secrets, and local config
+use the same encrypted PeerPigeon mesh.
+
+Ignored secrets use the private-file channel described below. Ordinary
+Git-tracked files and non-ignored untracked files use the live code channel.
+Dependency, build, cache, and coverage trees are excluded, and an individual
+live file is capped at 5 MiB. If two devices edit the same code concurrently,
+GitPigeon preserves the local file and saves the incoming version under:
+
+```text
+.git/gitpigeon/live-conflicts/<device>/<path>
+```
+
+Remove only the current repository from the encrypted Pigeon index with either
+spelling:
 
 ```bash
 git pigeon unwatch
@@ -212,9 +228,12 @@ git pigeon status --json
 ## How syncing works
 
 GitPigeon creates a complete Git bundle for local branches and tags whenever
-their object IDs change. Private workspace files are captured independently,
-so config-only changes also create snapshots. Bundle and private-file bytes are
-divided into small content-addressed chunks suitable for WebRTC data channels.
+their object IDs change. A live workspace overlay captures uncommitted code
+creates, updates, renames, and deletes independently of Git refs. Private
+workspace files are captured on a separate channel, so code-only and
+config-only changes also create snapshots. Bundle, live-code, and private-file
+bytes are divided into small content-addressed chunks suitable for WebRTC data
+channels.
 
 - Bundle chunks and manifests use PeerPigeon's immutable `frozen` storage
   space.
@@ -223,7 +242,7 @@ divided into small content-addressed chunks suitable for WebRTC data channels.
 - A mergeable device registry lets offline and newly joined devices discover
   every per-device head without forcing concurrent writers onto one ref.
 - PeerPigeon's `sessionId` and `syncSecret` encrypt all storage synchronization
-  envelopes, including private workspace files.
+  envelopes, including live code and private workspace files.
 - GitPigeon keeps a persistent cache in `.git/gitpigeon/` and re-seeds
   PeerPigeon's in-memory Node storage when the watcher restarts.
 - The detached watcher uses an authenticated heartbeat and stop request under
@@ -256,9 +275,10 @@ Git data travels through the PeerPigeon mesh. Storage envelopes are encrypted
 with the invite secret. Anyone who has the invite can join and read the
 repository, so rotate to a new repository identity if an invite is exposed.
 
-Private workspace files remain ordinary plaintext files in each trusted working
-directory. Persistent content chunks under `.git/gitpigeon/` are encrypted with
-the repository secret; restored files and conflict copies are owner-readable.
+Working-tree code and private workspace files remain ordinary plaintext files
+in each trusted working directory. Persistent content chunks under
+`.git/gitpigeon/` are encrypted with the repository secret; restored files and
+conflict copies are owner-readable.
 The invite secret itself is stored in `.git/gitpigeon/config.json` with
 owner-only permissions where the platform supports them. Disk encryption and
 normal operating-system account protections remain important.
@@ -267,9 +287,11 @@ GitPigeon is peer-to-peer rather than a hosted forge. A device holding a wanted
 snapshot must be online for a brand-new device to retrieve it. Once retrieved,
 the new device caches and re-seeds that snapshot too.
 
-The current implementation sends complete Git bundles after ref changes. Git's
-pack format and content-addressed chunk cache avoid corruption, but very large
-monorepositories will benefit from a future incremental pack negotiation layer.
+The current implementation sends complete Git bundles after ref changes; live
+working-tree updates reuse the unchanged bundle and transfer only new
+content-addressed chunks. Git's pack format and chunk cache avoid corruption,
+but very large monorepositories will benefit from a future incremental pack
+negotiation layer.
 
 ## Development
 

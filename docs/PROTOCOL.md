@@ -22,31 +22,34 @@ another's reachable history.
 
 ## Publication order
 
-1. Read branches, tags, and the exact private paths registered in
-   `.git/gitpigeon/tracked-files.json`.
+1. Read branches, tags, live working-tree deviations from `HEAD`, and the exact
+   private paths registered in `.git/gitpigeon/tracked-files.json`.
 2. Run `git bundle create --branches --tags` when Git refs exist.
-3. Split bundle and private-file bytes into 16 KiB chunks.
+3. Split bundle, live-code, and private-file bytes into 16 KiB chunks.
 4. Store chunks in PeerPigeon `frozen` space by SHA-256.
-5. Store a manifest containing the bundle descriptor, private-file descriptors,
-   and deletion tombstones in `frozen` space by the composite snapshot SHA-256.
+5. Store a manifest containing the bundle descriptor, live-code descriptors,
+   private-file descriptors, and deletion tombstones in `frozen` space by the
+   composite snapshot SHA-256.
 6. Update the publishing device's `public` head.
 
 Consumers subscribe to the registry and known head keys. After receiving a new
 head, they explicitly retrieve the manifest and each missing chunk. Every chunk,
-the total bundle size, bundle digest, private-file size, and private-file digest
-are verified before anything is applied. PeerPigeon's storage session encrypts
-the synchronized envelopes with the invite secret.
+the total bundle size, bundle digest, live-file size, private-file size, and all
+file digests are verified before anything is applied. PeerPigeon's storage
+session encrypts the synchronized envelopes with the invite secret.
 
 Persistent content chunks in `.git/gitpigeon/chunks/` are independently sealed
 with AES-256-GCM using a repository-secret-derived local cache key. The content
 SHA-256 is authenticated as associated data. This prevents the cache from
 leaving a second plaintext copy of a private file outside the working tree.
 
-The composite snapshot ID binds the optional Git bundle digest and the private
-workspace digest. A separate head content digest binds Git ref object IDs and
-the workspace digest, allowing the watcher to detect a config-only change
-without generating a Git bundle on every poll. A manifest may contain only
-private files, so repositories without a first commit can still sync config.
+The version-2 composite snapshot ID binds the optional Git bundle digest, the
+private workspace digest, and the live workspace digest. A separate head
+content digest binds Git ref object IDs and both workspace digests, allowing the
+watcher to detect code-only or config-only changes without generating a new Git
+bundle. A manifest may contain only live or private files, so repositories
+without a first commit can synchronize immediately. Readers remain compatible
+with version-1 manifests that have no live workspace fields.
 
 ## Import safety
 
@@ -60,6 +63,27 @@ local branch is updated only when:
 Already-ahead branches are left alone. Divergent branches are left alone and
 reported with the corresponding remote-tracking ref. Tags are created only when
 the local tag does not already exist.
+
+## Live working-tree CRUD safety
+
+Every non-ignored tracked deviation from `HEAD`, plus each non-ignored untracked
+regular file, is represented in the live workspace manifest. A rename is a
+delete plus a create. Generated dependency, build, cache, and coverage trees are
+excluded, as are files larger than 5 MiB. Exact private paths are removed from
+this channel and sent only through the private workspace channel.
+
+Each live descriptor binds its incoming content to the SHA-256 of that path in
+the publisher's `HEAD`. A receiver applies a create, update, or delete only when
+its current file matches that Git baseline, the incoming value, or the last
+live value received from that device. Concurrent local edits are never
+overwritten; incoming bytes are stored under
+`.git/gitpigeon/live-conflicts/<device>/`, with a `.deleted-by-peer` marker for
+an incoming deletion.
+
+When a publishing device commits its live overlay, the receiver first restores
+only unchanged received-overlay paths to its current `HEAD`, performs the
+normal Git fast-forward, and then applies any remaining live descriptors on top
+of the new commit. Staged or independently edited local files are not restored.
 
 ## Private workspace safety
 

@@ -2,6 +2,7 @@ export { GitRepository, GitCommandError, runGit } from './git.js';
 export { RepositorySynchronizer } from './protocol.js';
 export { RepositoryCache } from './cache.js';
 export { WorkspaceFiles, workspaceDigest } from './workspace.js';
+export { LIVE_FILE_LIMIT, LiveWorkspace, liveWorkspaceDigest } from './live-workspace.js';
 export {
   createWatchControl,
   isGitPigeonWatcherCommand,
