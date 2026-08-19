@@ -4,9 +4,12 @@ export { RepositoryCache } from './cache.js';
 export { WorkspaceFiles, workspaceDigest } from './workspace.js';
 export {
   createWatchControl,
+  isGitPigeonWatcherCommand,
+  listGitPigeonWatcherPids,
   readWatchState,
   startWatchDaemon,
   stopWatchDaemon,
+  watcherPidsFromProcessRows,
   watchDaemonStatus,
 } from './daemon.js';
 export {
@@ -22,6 +25,7 @@ export {
   listMachinePigeons,
   loadMachineIndex,
   machineIndexRoot,
+  markMachinePigeonStopped,
   openDashboard,
   pairingUrl,
   registerMachinePigeon,

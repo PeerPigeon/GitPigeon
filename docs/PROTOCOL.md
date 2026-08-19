@@ -92,8 +92,15 @@ state is ignored, and an unresponsive authenticated watcher is terminated when
 the user explicitly requests `unwatch`.
 
 Each active watcher also joins a per-machine PeerPigeon index session. The
-machine directory is stored as an encrypted `public`-space record; `public`
+machine directory is persistent: stopping or restarting watcher processes marks
+entries inactive without removing their repository identity or secret.
+`unwatch` is the explicit removal operation. `stop` enumerates and terminates
+all local GitPigeon watcher processes but leaves the directory intact.
+
+The machine directory is stored as an encrypted `public`-space record; `public`
 describes its ACL inside that session, while PeerPigeon's `syncSecret` encrypts
-the entire synchronization envelope. The first `init` transfers that index
-capability to `gitpigeon.dev` in a URL fragment, which is never sent to the web
-server. No HTTP listener or loopback bridge participates in discovery.
+the entire synchronization envelope. Each directory item includes a live
+watcher count, which is zero while its repository process is stopped. The first
+`init` transfers the index capability to `gitpigeon.dev` in a URL fragment,
+which is never sent to the web server. No HTTP listener or loopback bridge
+participates in discovery.

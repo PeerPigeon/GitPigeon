@@ -9,6 +9,7 @@ import {
   directoryValue,
   listMachinePigeons,
   loadMachineIndex,
+  markMachinePigeonStopped,
   openDashboard,
   registerMachinePigeon,
   unregisterMachinePigeon,
@@ -51,6 +52,32 @@ test('machine index securely groups active repositories for PeerPigeon publicati
 
   assert.equal((await unregisterMachinePigeon(firstRepository, { root: stateRoot })).removed, true);
   assert.deepEqual((await listMachinePigeons({ root: stateRoot })).map(({ repositoryId }) => repositoryId), ['beta-pigeon']);
+});
+
+test('machine index entries persist while their watcher process is stopped', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-persistent-index-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await createRepository(path.join(root, 'repository'));
+  const stateRoot = path.join(root, 'state');
+  const config = createIdentity({
+    repositoryId: 'persistent-pigeon',
+    secret: 'p'.repeat(64),
+    deviceId: 'persistent-device',
+  });
+
+  await registerMachinePigeon(repository, config, { root: stateRoot });
+  assert.equal((await listMachinePigeons({ root: stateRoot })).length, 1);
+  assert.equal((await markMachinePigeonStopped(repository, { root: stateRoot })).changed, true);
+  assert.equal((await listMachinePigeons({ root: stateRoot })).length, 0);
+
+  const persisted = await listMachinePigeons({ root: stateRoot, activeOnly: false });
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0].pid, null);
+  const state = await loadMachineIndex({ root: stateRoot });
+  assert.equal(directoryValue(state, persisted).pigeons[0].watcherCount, 0);
+
+  await registerMachinePigeon(repository, config, { root: stateRoot });
+  assert.equal((await listMachinePigeons({ root: stateRoot })).length, 1);
 });
 
 test('pairing is claimed once and opens without a shell', async (t) => {

@@ -2,16 +2,63 @@ import { randomBytes } from 'node:crypto';
 import { open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { RepositoryCache } from './cache.js';
 
 const ENTRYPOINT = fileURLToPath(new URL('../bin/git-pigeon.js', import.meta.url));
 const START_TIMEOUT_MS = 20_000;
 const HEARTBEAT_STALE_MS = 10_000;
+const execFileAsync = promisify(execFile);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function isGitPigeonWatcherCommand(command) {
+  const value = String(command ?? '');
+  const executable = /(?:^|[\s"'])(?:[^\s"']*[\\/])?git-pigeon(?:\.js)?(?:[\s"']|$)/i.test(value);
+  const watch = /(?:^|\s)watch(?:\s|$)/.test(value);
+  const foreground = /(?:^|\s)--foreground(?:\s|$|=)/.test(value);
+  return executable && watch && foreground;
+}
+
+export function watcherPidsFromProcessRows(rows, currentPid = process.pid) {
+  return [...new Set(rows
+    .filter(({ command }) => isGitPigeonWatcherCommand(command))
+    .map(({ pid }) => Number(pid))
+    .filter((pid) => Number.isSafeInteger(pid) && pid > 0 && pid !== currentPid))];
+}
+
+export async function listGitPigeonWatcherPids({
+  platform = process.platform,
+  run = execFileAsync,
+} = {}) {
+  let rows;
+  if (platform === 'win32') {
+    const script = 'Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress';
+    const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      windowsHide: true,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    const parsed = String(stdout).trim() ? JSON.parse(stdout) : [];
+    rows = (Array.isArray(parsed) ? parsed : [parsed]).map((entry) => ({
+      pid: entry.ProcessId,
+      command: entry.CommandLine,
+    }));
+  } else {
+    const { stdout } = await run('ps', ['-axo', 'pid=,command='], {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    rows = String(stdout).split(/\r?\n/).flatMap((line) => {
+      const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+      return match ? [{ pid: Number(match[1]), command: match[2] }] : [];
+    });
+  }
+  return watcherPidsFromProcessRows(rows);
 }
 
 function paths(gitDir) {

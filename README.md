@@ -52,10 +52,12 @@ exposes it as `git pigeon`.
 
 ## Start a repository
 
-Run one command. If the directory is not already a Git repository, GitPigeon
-initializes Git too:
+Leave the GitPigeon source checkout and change into the repository you actually
+want to synchronize. Then run one command. If that directory is not already a
+Git repository, GitPigeon initializes Git too:
 
 ```bash
+cd path/to/your/repository
 git pigeon init
 ```
 
@@ -96,8 +98,8 @@ git pigeon watch off
 
 Run `git pigeon init` to start it again.
 
-From any directory, list the repositories currently watched on this machine or
-remove one by its displayed name:
+From any directory, list every repository in the persistent machine index,
+including stopped repositories, or remove one by its displayed name:
 
 ```bash
 git pigeon list
@@ -107,15 +109,17 @@ git pigeon unwatch my-project
 If multiple watched repositories have the same name, GitPigeon prints their
 paths and requires you to run `unwatch` from inside the intended repository.
 
-To stop every watcher on this machine and clear the entire encrypted Pigeon
-index:
+To stop every GitPigeon watcher process on this machine without deleting the
+persistent encrypted Pigeon index:
 
 ```bash
 git pigeon stop
 ```
 
-`stop` is machine-wide and can be run from any directory; `unwatch` is always
-scoped to the Git repository containing the current directory.
+`stop` is machine-wide and can be run from any directory. Indexed repositories
+remain available to restart with `git pigeon watch` or `git pigeon init`.
+`unwatch` is always repository-scoped and is the command that removes an entry
+from the persistent index.
 
 ## Automatic encrypted Pigeon index
 
@@ -131,7 +135,8 @@ Repository IDs and encryption secrets travel only inside the encrypted index
 session. Starting or stopping a watcher updates the directory automatically.
 
 `git pigeon unwatch` removes only the selected repository. `git pigeon stop`
-stops every watcher and publishes an empty directory. A different browser
+stops every watcher process but retains the directory, so repository entries
+survive clean exits, crashes, and later process restarts. A different browser
 profile must be paired separately because it does not share the first profile's
 local capability.
 
@@ -182,11 +187,11 @@ override that disables private syncing and removes the Git exclusion.
 | Command | Purpose |
 | --- | --- |
 | `git pigeon init [INVITE] [DIR]` | Create or join a Pigeon and start background syncing. |
-| `git pigeon list` | List every repository watched on this machine. |
+| `git pigeon list` | List every persistent indexed repository and whether its watcher is running. |
 | `git pigeon unwatch` | Stop watching only the current repository and remove it from the encrypted index. |
 | `git pigeon unwatch REPOSITORY` | Stop one watched repository by name from any directory. |
 | `git pigeon watch off` | Repository-scoped alias for `unwatch`. |
-| `git pigeon stop` | Stop every local watcher and clear the entire encrypted Pigeon index. |
+| `git pigeon stop` | Stop every local watcher process without deleting the persistent index. |
 | `git pigeon invite` | Print the existing invite URL. |
 | `git pigeon track FILE...` | Exclude exact files from Git and sync them privately. |
 | `git pigeon untrack FILE...` | Stop private tracking on this device. |

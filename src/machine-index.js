@@ -44,11 +44,11 @@ function validEntry(value) {
   const secret = String(value.secret ?? '');
   const deviceId = String(value.deviceId ?? '');
   const name = String(value.name ?? '').trim().slice(0, 200);
-  const pid = Number(value.pid);
+  const pid = value.pid === null || value.pid === undefined ? null : Number(value.pid);
   const signalingServer = value.signalingServer ? String(value.signalingServer) : undefined;
   if (!path.isAbsolute(repository) || repository.length > 4_096) return null;
   if (!DEVICE.test(repositoryId) || !SECRET.test(secret) || !DEVICE.test(deviceId) || !name) return null;
-  if (!Number.isSafeInteger(pid) || pid < 1) return null;
+  if (pid !== null && (!Number.isSafeInteger(pid) || pid < 1)) return null;
   if (signalingServer && !/^wss?:\/\//i.test(signalingServer)) return null;
   return { repository, repositoryId, secret, deviceId, name, pid, ...(signalingServer ? { signalingServer } : {}) };
 }
@@ -160,6 +160,23 @@ export async function unregisterMachinePigeon(repository, { root = machineIndexR
   });
 }
 
+export async function markMachinePigeonStopped(repository, {
+  root = machineIndexRoot(),
+  pid = process.pid,
+} = {}) {
+  return await withLock(root, async () => {
+    const value = await readState(root);
+    let changed = false;
+    value.entries = value.entries.map((entry) => {
+      if (entry.repository !== repository.root || entry.pid !== pid) return entry;
+      changed = true;
+      return { ...entry, pid: null };
+    });
+    await writeState(root, value);
+    return { changed, state: value };
+  });
+}
+
 export async function clearMachinePigeons({ root = machineIndexRoot() } = {}) {
   return await withLock(root, async () => {
     const value = await readState(root);
@@ -170,6 +187,7 @@ export async function clearMachinePigeons({ root = machineIndexRoot() } = {}) {
 }
 
 export function processIsRunning(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
   try {
     process.kill(pid, 0);
     return true;
@@ -198,17 +216,18 @@ export function directoryKey(indexId) {
 export function directoryValue(index, entries, now = Date.now()) {
   const grouped = new Map();
   for (const entry of entries) {
+    const active = processIsRunning(entry.pid) ? 1 : 0;
     const current = grouped.get(entry.repositoryId);
     if (!current) {
       grouped.set(entry.repositoryId, {
         repositoryId: entry.repositoryId,
         secret: entry.secret,
         name: entry.name,
-        watcherCount: 1,
+        watcherCount: active,
         ...(entry.signalingServer ? { signalingServer: entry.signalingServer } : {}),
       });
     } else {
-      current.watcherCount += 1;
+      current.watcherCount += active;
     }
   }
   return {
@@ -293,8 +312,7 @@ export async function connectMachineIndex(repository, config, logger = {}, {
     publishing = true;
     try {
       const current = await loadMachineIndex({ root });
-      const active = current.entries.filter((entry) => processIsRunning(entry.pid));
-      await storage.put('public', directoryKey(current.indexId), directoryValue(current, active));
+      await storage.put('public', directoryKey(current.indexId), directoryValue(current, current.entries));
     } finally {
       publishing = false;
     }
@@ -303,12 +321,12 @@ export async function connectMachineIndex(repository, config, logger = {}, {
   try {
     await node.start();
   } catch (error) {
-    await unregisterMachinePigeon(repository, { root }).catch(() => {});
+    await markMachinePigeonStopped(repository, { root }).catch(() => {});
     await node.destroy().catch(() => {});
     throw error;
   }
   if (!node.storage) {
-    await unregisterMachinePigeon(repository, { root }).catch(() => {});
+    await markMachinePigeonStopped(repository, { root }).catch(() => {});
     await node.destroy();
     throw new Error('PeerPigeon index storage did not initialize');
   }
@@ -321,11 +339,10 @@ export async function connectMachineIndex(repository, config, logger = {}, {
       if (closed) return;
       clearInterval(timer);
       while (publishing) await sleep(10);
-      await unregisterMachinePigeon(repository, { root });
+      await markMachinePigeonStopped(repository, { root });
       try {
         const current = await loadMachineIndex({ root });
-        const active = current.entries.filter((entry) => processIsRunning(entry.pid));
-        await node.storage?.put('public', directoryKey(current.indexId), directoryValue(current, active));
+        await node.storage?.put('public', directoryKey(current.indexId), directoryValue(current, current.entries));
       } catch (error) {
         logger.error?.(error);
       }

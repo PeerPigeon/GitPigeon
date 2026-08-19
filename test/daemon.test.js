@@ -5,11 +5,37 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   createWatchControl,
+  isGitPigeonWatcherCommand,
+  listGitPigeonWatcherPids,
   startWatchDaemon,
   stopWatchDaemon,
+  watcherPidsFromProcessRows,
   watchDaemonStatus,
 } from '../src/daemon.js';
 import { createRepository } from './helpers.js';
+
+test('finds only GitPigeon foreground watcher processes', async () => {
+  assert.equal(isGitPigeonWatcherCommand('/usr/bin/node /repo/bin/git-pigeon.js watch --foreground --daemon-child=secret'), true);
+  assert.equal(isGitPigeonWatcherCommand('node C:\\repo\\bin\\git-pigeon.js watch --foreground'), true);
+  assert.equal(isGitPigeonWatcherCommand('/usr/bin/node /repo/bin/git-pigeon.js stop'), false);
+  assert.deepEqual(watcherPidsFromProcessRows([
+    { pid: 10, command: '/usr/bin/node /repo/bin/git-pigeon.js watch --foreground' },
+    { pid: 11, command: '/usr/bin/node /repo/bin/git-pigeon.js status' },
+    { pid: 10, command: '/usr/bin/node /repo/bin/git-pigeon.js watch --foreground' },
+  ], 99), [10]);
+
+  assert.deepEqual(await listGitPigeonWatcherPids({
+    platform: 'linux',
+    run: async () => ({ stdout: '  21 /usr/bin/node /repo/bin/git-pigeon.js watch --foreground\n  22 node other.js\n' }),
+  }), [21]);
+  assert.deepEqual(await listGitPigeonWatcherPids({
+    platform: 'win32',
+    run: async () => ({ stdout: JSON.stringify([
+      { ProcessId: 31, CommandLine: 'node C:\\repo\\bin\\git-pigeon.js watch --foreground' },
+      { ProcessId: 32, CommandLine: 'node C:\\repo\\bin\\git-pigeon.js list' },
+    ]) }),
+  }), [31]);
+});
 
 test('watcher control reports status and stops through its authenticated heartbeat channel', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-daemon-test-'));

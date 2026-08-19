@@ -6,6 +6,7 @@ import { RepositoryCache } from './cache.js';
 import { createIdentity, loadConfig, saveConfig } from './config.js';
 import {
   createWatchControl,
+  listGitPigeonWatcherPids,
   startWatchDaemon,
   stopWatchDaemon,
   watchDaemonStatus,
@@ -14,9 +15,9 @@ import { GitRepository } from './git.js';
 import { createInvite, parseInvite } from './invite.js';
 import {
   claimPairingUrl,
-  clearMachinePigeons,
   connectMachineIndex,
   listMachinePigeons,
+  markMachinePigeonStopped,
   openDashboard,
   unregisterMachinePigeon,
 } from './machine-index.js';
@@ -310,6 +311,7 @@ async function commandWatch(args, cwd, verbose) {
 }
 
 function processIsRunning(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
   try {
     process.kill(pid, 0);
     return true;
@@ -337,16 +339,17 @@ function watchedRepositories(registrations) {
 
 async function commandList(args) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
-  const registrations = await listMachinePigeons();
+  const registrations = await listMachinePigeons({ activeOnly: false });
   const repositories = watchedRepositories(registrations);
   if (!repositories.length) {
-    console.log('No repositories are being watched.');
+    console.log('The persistent GitPigeon index is empty.');
     return;
   }
   const nameWidth = Math.max('NAME'.length, ...repositories.map(({ name }) => name.length));
-  console.log(`${'NAME'.padEnd(nameWidth)}  PIGEON      PATH`);
+  console.log(`${'NAME'.padEnd(nameWidth)}  PIGEON      STATUS   PATH`);
   for (const repository of repositories) {
-    console.log(`${repository.name.padEnd(nameWidth)}  ${repository.repositoryId.slice(0, 10)}  ${repository.root}`);
+    const active = repository.registrations.some(({ pid }) => processIsRunning(pid));
+    console.log(`${repository.name.padEnd(nameWidth)}  ${repository.repositoryId.slice(0, 10)}  ${(active ? 'watching' : 'stopped').padEnd(8)} ${repository.root}`);
   }
 }
 
@@ -370,7 +373,7 @@ async function commandUnwatch(args, cwd) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   if (!name) {
     const { repository } = await configuredRepository(cwd);
-    const registrations = (await listMachinePigeons())
+    const registrations = (await listMachinePigeons({ activeOnly: false }))
       .filter((registration) => registration.repository === repository.root);
     await unregisterMachinePigeon(repository);
     const stopped = await stopRepository(repository, registrations);
@@ -379,7 +382,7 @@ async function commandUnwatch(args, cwd) {
     return;
   }
 
-  const registrations = await listMachinePigeons();
+  const registrations = await listMachinePigeons({ activeOnly: false });
   if (!registrations.length) throw new Error('No repositories are being watched. Run `git pigeon init` in a repository first.');
   const matches = watchedRepositories(registrations)
     .filter((repository) => repository.name.toLocaleLowerCase() === name.toLocaleLowerCase());
@@ -394,13 +397,17 @@ async function commandUnwatch(args, cwd) {
   console.log(`Stopped watching ${match.name} and removed it from the encrypted PeerPigeon index.`);
 }
 
-async function commandStop(args) {
+export async function commandStop(args, {
+  indexRoot,
+  findWatcherPids = listGitPigeonWatcherPids,
+} = {}) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
-  const registrations = await listMachinePigeons();
-  if (!registrations.length) {
-    await clearMachinePigeons();
-    console.log('The encrypted GitPigeon index is already empty.');
-    return;
+  const registrations = await listMachinePigeons({ root: indexRoot, activeOnly: false });
+  let discoveredPids;
+  try {
+    discoveredPids = await findWatcherPids();
+  } catch (error) {
+    throw new Error(`Could not enumerate local GitPigeon watcher processes: ${error.message}`);
   }
 
   const repositories = new Map();
@@ -409,6 +416,10 @@ async function commandStop(args) {
     current.push(registration);
     repositories.set(registration.repository, current);
   }
+  const pids = [...new Set([
+    ...registrations.map((registration) => registration.pid),
+    ...discoveredPids,
+  ])].filter((pid) => pid !== process.pid && processIsRunning(pid));
 
   for (const [root, repositoryRegistrations] of repositories) {
     try {
@@ -422,13 +433,30 @@ async function commandStop(args) {
     }
   }
 
-  const pids = [...new Set(registrations.map((registration) => registration.pid))];
+  for (const pid of pids) {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* watcher already exited */ }
+  }
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline && pids.some(processIsRunning)) await sleep(50);
-  const remaining = pids.filter(processIsRunning);
+  let remaining = pids.filter(processIsRunning);
+  for (const pid of remaining) {
+    try { process.kill(pid, 'SIGKILL'); } catch { /* watcher already exited */ }
+  }
+  const forceDeadline = Date.now() + 2_000;
+  while (Date.now() < forceDeadline && remaining.some(processIsRunning)) await sleep(50);
+  remaining = remaining.filter(processIsRunning);
   if (remaining.length) throw new Error(`Could not stop ${remaining.length} local GitPigeon watcher${remaining.length === 1 ? '' : 's'}`);
-  await clearMachinePigeons();
-  console.log(`Stopped ${repositories.size} watched repositor${repositories.size === 1 ? 'y' : 'ies'} and cleared the encrypted PeerPigeon index.`);
+  for (const registration of registrations) {
+    await markMachinePigeonStopped(
+      { root: registration.repository },
+      { root: indexRoot, pid: registration.pid },
+    );
+  }
+  if (!pids.length) {
+    console.log('No GitPigeon watcher processes were running. The persistent encrypted Pigeon index was left intact.');
+    return;
+  }
+  console.log(`Stopped ${pids.length} GitPigeon watcher process${pids.length === 1 ? '' : 'es'}. The persistent encrypted Pigeon index was left intact.`);
 }
 
 async function ensureCloneDirectory(target) {
