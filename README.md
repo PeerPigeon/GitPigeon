@@ -99,8 +99,9 @@ use the same encrypted PeerPigeon mesh.
 
 Ignored secrets use the private-file channel described below. Ordinary
 Git-tracked files and non-ignored untracked files use the live code channel.
-Dependency, build, cache, and coverage trees are excluded, and an individual
-live file is capped at 5 MiB. If two devices edit the same code concurrently,
+Dependency, build, cache, and coverage trees are excluded. Live code has no
+GitPigeon file-size cap; transport is bounded only by available storage and
+runtime resources. If two devices edit the same code concurrently,
 GitPigeon preserves the local file and saves the incoming version under:
 
 ```text

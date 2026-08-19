@@ -69,8 +69,8 @@ the local tag does not already exist.
 Every non-ignored tracked deviation from `HEAD`, plus each non-ignored untracked
 regular file, is represented in the live workspace manifest. A rename is a
 delete plus a create. Generated dependency, build, cache, and coverage trees are
-excluded, as are files larger than 5 MiB. Exact private paths are removed from
-this channel and sent only through the private workspace channel.
+excluded. Live code has no GitPigeon file-size cap. Exact private paths are
+removed from this channel and sent only through the private workspace channel.
 
 Each live descriptor binds its incoming content to the SHA-256 of that path in
 the publisher's `HEAD`. A receiver applies a create, update, or delete only when

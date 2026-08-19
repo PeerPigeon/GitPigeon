@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { chunkKey, presenceKey, presenceLeaseKey, REPOSITORY_PRESENCE_BUCKET_MS } from '../src/constants.js';
+import { LiveWorkspace } from '../src/live-workspace.js';
 import { RepositorySynchronizer } from '../src/protocol.js';
 import { WorkspaceFiles } from '../src/workspace.js';
 import { createRepository } from './helpers.js';
@@ -69,6 +70,21 @@ class FakeStorage {
     return record;
   }
 }
+
+test('does not impose an artificial size cap on live code', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-large-live-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await createRepository(path.join(root, 'source'));
+  const size = 5 * 1024 * 1024 + 1;
+  await writeFile(path.join(repository.root, 'large.js'), Buffer.alloc(size, 97));
+
+  const snapshot = await new LiveWorkspace(repository).snapshot();
+
+  assert.equal(snapshot.skipped.length, 0);
+  assert.equal(snapshot.files.length, 1);
+  assert.equal(snapshot.files[0].path, 'large.js');
+  assert.equal(snapshot.files[0].size, size);
+});
 
 test('publishes and retrieves a repository through PeerPigeon storage semantics', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-protocol-test-'));

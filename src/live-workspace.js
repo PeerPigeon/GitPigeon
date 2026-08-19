@@ -10,7 +10,7 @@ const SKIP_DIRECTORIES = new Set([
   '.nuxt', '.turbo',
 ]);
 const SKIP_FILES = new Set(['.ds_store', 'thumbs.db']);
-export const LIVE_FILE_LIMIT = 5 * 1024 * 1024;
+export const LIVE_FILE_LIMIT = Infinity;
 
 function digest(data) {
   return createHash('sha256').update(data).digest('hex');
@@ -85,7 +85,7 @@ export class LiveWorkspace {
           skipped.push({ path: file, reason: 'not-a-regular-file' });
           continue;
         }
-        if (info.size > this.fileLimit) {
+        if (Number.isFinite(this.fileLimit) && info.size > this.fileLimit) {
           skipped.push({ path: file, reason: 'too-large' });
           continue;
         }

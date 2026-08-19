@@ -719,6 +719,7 @@ export class RepositorySynchronizer {
 
   #manifestFitsChunkSize(manifest) {
     if (!manifest) return false;
+    if (manifest.transportChunkSize !== this.chunkSize) return false;
     const chunks = [
       ...manifest.chunks,
       ...manifest.files.flatMap((file) => file.chunks),
