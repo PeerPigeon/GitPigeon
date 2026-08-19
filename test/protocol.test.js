@@ -3,7 +3,7 @@ import { access, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { chunkKey, presenceKey } from '../src/constants.js';
+import { chunkKey, presenceKey, presenceLeaseKey, REPOSITORY_PRESENCE_BUCKET_MS } from '../src/constants.js';
 import { RepositorySynchronizer } from '../src/protocol.js';
 import { WorkspaceFiles } from '../src/workspace.js';
 import { createRepository } from './helpers.js';
@@ -159,6 +159,9 @@ test('restart re-seeds cached chunks before publishing a fresh presence lease', 
   const lease = await restartedStorage.get('public', presence);
   assert.equal(lease?.value.snapshotId, head.snapshotId);
   assert.equal(lease?.value.name, 'source');
+  const bucket = Math.floor(Date.parse(lease.value.updatedAt) / REPOSITORY_PRESENCE_BUCKET_MS);
+  const bucketedLease = await restartedStorage.get('public', presenceLeaseKey(config.repositoryId, config.deviceId, bucket));
+  assert.equal(bucketedLease?.value.snapshotId, head.snapshotId);
   await restarted.stop();
 });
 

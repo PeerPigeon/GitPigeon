@@ -6,11 +6,14 @@ import {
   DEFAULT_CHUNK_SIZE,
   DEFAULT_RETRIEVE_TIMEOUT_MS,
   PROTOCOL,
+  REPOSITORY_PRESENCE_BUCKET_MS,
   REPOSITORY_PRESENCE_HEARTBEAT_MS,
   chunkKey,
   headKey,
+  snapshotHeadKey,
   manifestKey,
   presenceKey,
+  presenceLeaseKey,
   registryKey,
   storagePrefix,
 } from './constants.js';
@@ -253,6 +256,7 @@ export class RepositorySynchronizer {
         contentDigest: currentContentDigest,
         updatedAt: new Date().toISOString(),
       };
+      await this.#put('public', snapshotHeadKey(this.config.repositoryId, this.config.deviceId, snapshotId), head);
       await this.#put('public', headKey(this.config.repositoryId, this.config.deviceId), head);
       this.state.heads[this.config.deviceId] = head;
       await this.cache.saveState(this.state);
@@ -644,6 +648,14 @@ export class RepositorySynchronizer {
         const validated = this.#validateManifest(manifest, snapshotId);
         if (!this.#manifestFitsChunkSize(validated)) continue;
         await this.#seedManifest(validated);
+        const head = this.#validateHead(this.state.heads[validated.deviceId]);
+        if (head?.snapshotId === snapshotId) {
+          await this.#put(
+            'public',
+            snapshotHeadKey(this.config.repositoryId, head.deviceId, head.snapshotId),
+            head,
+          );
+        }
       } catch (error) {
         this.logger.warn(`Could not re-seed cached snapshot ${snapshotId.slice(0, 12)}: ${error.message}`);
       }
@@ -662,11 +674,22 @@ export class RepositorySynchronizer {
       serviceInstanceId: this.serviceInstanceId,
       updatedAt: new Date().toISOString(),
     };
-    return await this.#put(
+    // A new key each short time bucket makes the liveness lease independent of
+    // mutable-record versions retained by browsers across native restarts.
+    // Publish the bucket first; the legacy mutable key remains for clients
+    // that have not reloaded the newer browser application yet.
+    const bucket = Math.floor(Date.now() / REPOSITORY_PRESENCE_BUCKET_MS);
+    const lease = await this.#put(
+      'public',
+      presenceLeaseKey(this.config.repositoryId, this.config.deviceId, bucket),
+      value,
+    );
+    await this.#put(
       'public',
       presenceKey(this.config.repositoryId, this.config.deviceId),
       value,
     );
+    return lease;
   }
 
   async #reconcileOwnPresence() {
