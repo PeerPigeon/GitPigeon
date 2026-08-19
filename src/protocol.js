@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -6,9 +6,11 @@ import {
   DEFAULT_CHUNK_SIZE,
   DEFAULT_RETRIEVE_TIMEOUT_MS,
   PROTOCOL,
+  REPOSITORY_PRESENCE_HEARTBEAT_MS,
   chunkKey,
   headKey,
   manifestKey,
+  presenceKey,
   registryKey,
   storagePrefix,
 } from './constants.js';
@@ -56,6 +58,7 @@ export class RepositorySynchronizer {
     chunkSize = DEFAULT_CHUNK_SIZE,
     retrieveTimeoutMs = DEFAULT_RETRIEVE_TIMEOUT_MS,
     storageWritePauseMs = 20,
+    presenceHeartbeatMs = REPOSITORY_PRESENCE_HEARTBEAT_MS,
   }) {
     this.repository = repository;
     this.storage = storage;
@@ -67,6 +70,10 @@ export class RepositorySynchronizer {
     this.chunkSize = chunkSize;
     this.retrieveTimeoutMs = retrieveTimeoutMs;
     this.storageWritePauseMs = storageWritePauseMs;
+    this.presenceHeartbeatMs = presenceHeartbeatMs;
+    this.serviceInstanceId = randomBytes(16).toString('hex');
+    this.presenceTimer = null;
+    this.availableSnapshots = new Set();
     this.logger = {
       info: logger.info ?? noop,
       warn: logger.warn ?? noop,
@@ -105,6 +112,8 @@ export class RepositorySynchronizer {
       this.unsubscribe.push(this.storage.subscribe((event) => this.#onStorageChange(event)));
 
       await this.#rehydrateCurrentSnapshots();
+      await this.#reconcileOwnHead();
+      await this.#publishPresence();
       const registry = await this.storage.retrieve(
         'public',
         registryKey(this.config.repositoryId),
@@ -114,6 +123,11 @@ export class RepositorySynchronizer {
       await this.#publishRegistryIfNeeded();
       await this.#refreshKnownHeads();
       if (publish) await this.publishLocal();
+      if (this.presenceHeartbeatMs > 0) {
+        this.presenceTimer = setInterval(() => {
+          this.#enqueue(async () => { await this.#publishPresence(); });
+        }, this.presenceHeartbeatMs);
+      }
       await this.waitForIdle();
     } catch (error) {
       for (const unsubscribe of this.unsubscribe.splice(0)) {
@@ -125,6 +139,8 @@ export class RepositorySynchronizer {
   }
 
   async stop() {
+    if (this.presenceTimer) clearInterval(this.presenceTimer);
+    this.presenceTimer = null;
     await this.waitForIdle();
     for (const unsubscribe of this.unsubscribe.splice(0)) {
       try { unsubscribe?.(); } catch { /* best effort */ }
@@ -243,6 +259,7 @@ export class RepositorySynchronizer {
       await this.#put('public', headKey(this.config.repositoryId, this.config.deviceId), head);
       this.state.heads[this.config.deviceId] = head;
       await this.cache.saveState(this.state);
+      await this.#publishPresence();
       this.logger.info(
         `Published ${refs.length} refs, ${liveFiles.length} live code changes, and ${files.length} private files (${snapshotId.slice(0, 12)})`,
       );
@@ -626,6 +643,7 @@ export class RepositorySynchronizer {
     if (!await this.storage.get('frozen', key)) {
       await this.#put('frozen', key, manifest);
     }
+    this.availableSnapshots.add(manifest.snapshotId);
   }
 
   async #rehydrateCurrentSnapshots() {
@@ -641,6 +659,24 @@ export class RepositorySynchronizer {
         this.logger.warn(`Could not re-seed cached snapshot ${snapshotId.slice(0, 12)}: ${error.message}`);
       }
     }
+  }
+
+  async #publishPresence() {
+    const head = this.#validateHead(this.state.heads[this.config.deviceId]);
+    if (!head || !this.availableSnapshots.has(head.snapshotId)) return null;
+    const value = {
+      protocol: PROTOCOL,
+      repositoryId: this.config.repositoryId,
+      deviceId: this.config.deviceId,
+      snapshotId: head.snapshotId,
+      serviceInstanceId: this.serviceInstanceId,
+      updatedAt: new Date().toISOString(),
+    };
+    return await this.#put(
+      'public',
+      presenceKey(this.config.repositoryId, this.config.deviceId),
+      value,
+    );
   }
 
   async #put(space, key, value) {

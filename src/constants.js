@@ -9,6 +9,7 @@ export const DEFAULT_CHUNK_SIZE = 4 * 1024;
 export const DEFAULT_RETRIEVE_TIMEOUT_MS = 4_000;
 export const DEFAULT_SYNC_WAIT_MS = 5_000;
 export const DEFAULT_POLL_MS = 250;
+export const REPOSITORY_PRESENCE_HEARTBEAT_MS = 3_000;
 
 export function storagePrefix(repositoryId) {
   return `gitpigeon/v1/${repositoryId}`;
@@ -20,6 +21,10 @@ export function registryKey(repositoryId) {
 
 export function headKey(repositoryId, deviceId) {
   return `${storagePrefix(repositoryId)}/head/${deviceId}`;
+}
+
+export function presenceKey(repositoryId, deviceId) {
+  return `${storagePrefix(repositoryId)}/presence/${deviceId}`;
 }
 
 export function manifestKey(repositoryId, snapshotId) {

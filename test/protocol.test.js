@@ -3,6 +3,7 @@ import { access, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { chunkKey, presenceKey } from '../src/constants.js';
 import { RepositorySynchronizer } from '../src/protocol.js';
 import { WorkspaceFiles } from '../src/workspace.js';
 import { createRepository } from './helpers.js';
@@ -11,6 +12,7 @@ class FakeNetwork {
   constructor() {
     this.records = new Map();
     this.stores = new Set();
+    this.puts = [];
   }
   store(id) {
     const store = new FakeStorage(this, id);
@@ -46,6 +48,7 @@ class FakeStorage {
   }
   async put(space, key, value) {
     const pk = this.pk(space, key);
+    this.network.puts.push({ id: this.id, space, key });
     if (space === 'frozen' && this.network.records.has(pk)) {
       const existing = this.network.records.get(pk);
       this.local.set(pk, existing);
@@ -104,6 +107,54 @@ test('publishes and retrieves a repository through PeerPigeon storage semantics'
   );
   await b.stop();
   await a.stop();
+});
+
+test('restart re-seeds cached chunks before publishing a fresh presence lease', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-presence-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = await createRepository(path.join(root, 'source'), 'presence ordering');
+  const network = new FakeNetwork();
+  const config = {
+    version: 1,
+    repositoryId: '0123456789abc123',
+    secret: 'abcdefghijklmnopqrstuvwxyz_1234567890-ABCDE',
+    deviceId: 'device-presence-a',
+    createdAt: new Date().toISOString(),
+  };
+  const initial = new RepositorySynchronizer({
+    repository: source,
+    storage: network.store('initial'),
+    config,
+    presenceHeartbeatMs: 0,
+  });
+  await initial.start();
+  const head = (await initial.status()).heads[config.deviceId];
+  const manifest = JSON.parse(await readFile(path.join(source.gitDir, 'gitpigeon', 'manifests', `${head.snapshotId}.json`), 'utf8'));
+  await initial.stop();
+
+  network.puts = [];
+  const restartedStorage = network.store('restarted');
+  const restarted = new RepositorySynchronizer({
+    repository: source,
+    storage: restartedStorage,
+    config,
+    presenceHeartbeatMs: 0,
+  });
+  await restarted.start({ publish: false });
+
+  const presence = presenceKey(config.repositoryId, config.deviceId);
+  const presenceIndex = network.puts.findIndex((event) => event.id === 'restarted' && event.key === presence);
+  assert.notEqual(presenceIndex, -1);
+  for (const descriptor of manifest.chunks) {
+    const key = chunkKey(config.repositoryId, descriptor.sha256);
+    const chunkIndex = network.puts.findIndex((event) => event.id === 'restarted' && event.key === key);
+    assert.notEqual(chunkIndex, -1);
+    assert.ok(chunkIndex < presenceIndex, `${descriptor.sha256.slice(0, 10)} was seeded after presence`);
+    assert.ok(await restartedStorage.get('frozen', key));
+  }
+  const lease = await restartedStorage.get('public', presence);
+  assert.equal(lease?.value.snapshotId, head.snapshotId);
+  await restarted.stop();
 });
 
 test('syncs private workspace files independently of Git and preserves concurrent edits', async (t) => {
