@@ -346,10 +346,21 @@ async function connectMachineDirectory(index, logger = {}, {
       syncFilter: (_space, key) => String(key).startsWith(prefix),
     },
   });
+  const roomLabel = `index ${index.indexId.slice(0, 10)}`;
+  node.mesh.on('identity:ready', ({ clientId } = {}) => {
+    logger.debug?.(`[${roomLabel}] identity ready as ${String(clientId ?? 'unknown').slice(0, 12)}`);
+  });
+  node.mesh.on('signaling:connected', ({ clientId, signalingServer } = {}) => {
+    logger.debug?.(`[${roomLabel}] signaling connected through ${signalingServer ?? 'a federated relay'} as ${String(clientId ?? 'unknown').slice(0, 12)}`);
+  });
+  node.mesh.on('signaling:disconnected', () => logger.debug?.(`[${roomLabel}] signaling disconnected`));
+  node.mesh.on('signaling:log', ({ message } = {}) => logger.debug?.(`[${roomLabel}] ${message}`));
+  node.mesh.on('peer:discovered', (peerId) => logger.debug?.(`[${roomLabel}] discovered ${String(peerId).slice(0, 12)}`));
   let lastRecoveryAt = Date.now();
   const recover = (reason) => {
     if (node.getConnectedPeers().length > 0 || Date.now() - lastRecoveryAt < 20_000) return;
     lastRecoveryAt = Date.now();
+    logger.debug?.(`[${roomLabel}] recovery: ${node.getDiscoveredPeers().length} discovered, ${node.getActiveSignalingPeers().length} active on relay`);
     node.recoverAfterInactivity(reason);
   };
   node.on('error', (error) => {
@@ -402,11 +413,11 @@ async function connectMachineDirectory(index, logger = {}, {
   };
   node.on('peerConnected', (peerId) => {
     needsReconcile = true;
-    logger.debug?.(`Index peer connected: ${peerId}`);
+    logger.debug?.(`[${roomLabel}] peer connected: ${peerId}`);
     if (ready) publish({ reconcile: true }).catch((error) => logger.error?.(error));
   });
   node.on('peerDisconnected', (peerId) => {
-    logger.debug?.(`Index peer disconnected: ${peerId}`);
+    logger.debug?.(`[${roomLabel}] peer disconnected: ${peerId}`);
     if (node.getConnectedPeers().length === 0) needsReconcile = true;
   });
   try {

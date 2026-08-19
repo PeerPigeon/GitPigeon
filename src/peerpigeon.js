@@ -35,18 +35,29 @@ export async function connectPeerPigeon(config, logger = {}) {
   // nearby relay and FreeRTC federates peers sharing this Network + Room.
   if (config.signalingServer) options.signalingServer = config.signalingServer;
   const node = new PeerPigeonNode(options);
+  const roomLabel = `repository ${config.repositoryId.slice(0, 10)}`;
+  node.mesh.on('identity:ready', ({ clientId } = {}) => {
+    logger.debug?.(`[${roomLabel}] identity ready as ${String(clientId ?? 'unknown').slice(0, 12)}`);
+  });
+  node.mesh.on('signaling:connected', ({ clientId, signalingServer } = {}) => {
+    logger.debug?.(`[${roomLabel}] signaling connected through ${signalingServer ?? 'a federated relay'} as ${String(clientId ?? 'unknown').slice(0, 12)}`);
+  });
+  node.mesh.on('signaling:disconnected', () => logger.debug?.(`[${roomLabel}] signaling disconnected`));
+  node.mesh.on('signaling:log', ({ message } = {}) => logger.debug?.(`[${roomLabel}] ${message}`));
+  node.mesh.on('peer:discovered', (peerId) => logger.debug?.(`[${roomLabel}] discovered ${String(peerId).slice(0, 12)}`));
   let lastRecoveryAt = Date.now();
   const recover = (reason) => {
     if (node.getConnectedPeers().length > 0 || Date.now() - lastRecoveryAt < 20_000) return;
     lastRecoveryAt = Date.now();
+    logger.debug?.(`[${roomLabel}] recovery: ${node.getDiscoveredPeers().length} discovered, ${node.getActiveSignalingPeers().length} active on relay`);
     node.recoverAfterInactivity(reason);
   };
   node.on('error', (error) => {
     logger.error?.(error);
     recover('GitPigeon native repository connection error');
   });
-  node.on('peerConnected', (peerId) => logger.debug?.(`Peer connected: ${peerId}`));
-  node.on('peerDisconnected', (peerId) => logger.debug?.(`Peer disconnected: ${peerId}`));
+  node.on('peerConnected', (peerId) => logger.debug?.(`[${roomLabel}] peer connected: ${peerId}`));
+  node.on('peerDisconnected', (peerId) => logger.debug?.(`[${roomLabel}] peer disconnected: ${peerId}`));
   try {
     await node.start();
   } catch (error) {
