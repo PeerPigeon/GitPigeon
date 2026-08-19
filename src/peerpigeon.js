@@ -35,7 +35,16 @@ export async function connectPeerPigeon(config, logger = {}) {
   // nearby relay and FreeRTC federates peers sharing this Network + Room.
   if (config.signalingServer) options.signalingServer = config.signalingServer;
   const node = new PeerPigeonNode(options);
-  node.on('error', (error) => logger.error?.(error));
+  let lastRecoveryAt = 0;
+  const recover = (reason) => {
+    if (node.getConnectedPeers().length > 0 || Date.now() - lastRecoveryAt < 5_000) return;
+    lastRecoveryAt = Date.now();
+    node.recoverAfterInactivity(reason);
+  };
+  node.on('error', (error) => {
+    logger.error?.(error);
+    recover('GitPigeon native repository connection error');
+  });
   node.on('peerConnected', (peerId) => logger.debug?.(`Peer connected: ${peerId}`));
   node.on('peerDisconnected', (peerId) => logger.debug?.(`Peer disconnected: ${peerId}`));
   try {
@@ -48,6 +57,9 @@ export async function connectPeerPigeon(config, logger = {}) {
     await node.destroy();
     throw new Error('PeerPigeon storage did not initialize');
   }
+  const recoveryTimer = setInterval(() => {
+    recover('GitPigeon native repository peer retry');
+  }, 1_000);
   return {
     node,
     storage: node.storage,
@@ -70,6 +82,7 @@ export async function connectPeerPigeon(config, logger = {}) {
       });
     },
     async close() {
+      clearInterval(recoveryTimer);
       await node.destroy();
     },
   };

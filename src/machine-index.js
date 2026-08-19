@@ -346,7 +346,16 @@ async function connectMachineDirectory(index, logger = {}, {
       syncFilter: (_space, key) => String(key).startsWith(prefix),
     },
   });
-  node.on('error', (error) => logger.error?.(error));
+  let lastRecoveryAt = 0;
+  const recover = (reason) => {
+    if (node.getConnectedPeers().length > 0 || Date.now() - lastRecoveryAt < 5_000) return;
+    lastRecoveryAt = Date.now();
+    node.recoverAfterInactivity(reason);
+  };
+  node.on('error', (error) => {
+    logger.error?.(error);
+    recover('GitPigeon native index connection error');
+  });
   let closed = false;
   let ready = false;
   let needsReconcile = true;
@@ -415,7 +424,10 @@ async function connectMachineDirectory(index, logger = {}, {
   if (node.getConnectedPeers().length > 0) {
     publish({ reconcile: true }).catch((error) => logger.error?.(error));
   }
-  const timer = setInterval(() => { publish().catch((error) => logger.error?.(error)); }, heartbeatMs);
+  const timer = setInterval(() => {
+    recover('GitPigeon native index peer retry');
+    publish().catch((error) => logger.error?.(error));
+  }, heartbeatMs);
   return {
     index,
     node,
