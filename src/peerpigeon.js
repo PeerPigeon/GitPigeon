@@ -35,9 +35,9 @@ export async function connectPeerPigeon(config, logger = {}) {
   // nearby relay and FreeRTC federates peers sharing this Network + Room.
   if (config.signalingServer) options.signalingServer = config.signalingServer;
   const node = new PeerPigeonNode(options);
-  let lastRecoveryAt = 0;
+  let lastRecoveryAt = Date.now();
   const recover = (reason) => {
-    if (node.getConnectedPeers().length > 0 || Date.now() - lastRecoveryAt < 5_000) return;
+    if (node.getConnectedPeers().length > 0 || Date.now() - lastRecoveryAt < 20_000) return;
     lastRecoveryAt = Date.now();
     node.recoverAfterInactivity(reason);
   };

@@ -346,9 +346,9 @@ async function connectMachineDirectory(index, logger = {}, {
       syncFilter: (_space, key) => String(key).startsWith(prefix),
     },
   });
-  let lastRecoveryAt = 0;
+  let lastRecoveryAt = Date.now();
   const recover = (reason) => {
-    if (node.getConnectedPeers().length > 0 || Date.now() - lastRecoveryAt < 5_000) return;
+    if (node.getConnectedPeers().length > 0 || Date.now() - lastRecoveryAt < 20_000) return;
     lastRecoveryAt = Date.now();
     node.recoverAfterInactivity(reason);
   };
