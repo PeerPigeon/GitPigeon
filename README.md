@@ -14,11 +14,10 @@ The human- and machine-readable pin is also recorded in
 
 ## Project status
 
-GitPigeon is currently a private pre-release. The
-[`PeerPigeon/GitPigeon`](https://github.com/PeerPigeon/GitPigeon) source
-repository is private, and no npm package or GitHub release has been published
-yet. [`gitpigeon.dev`](https://gitpigeon.dev) is live for paired development
-installations.
+GitPigeon is public pre-release software under the MIT license. Install it from
+the source repository below. An npm package and packaged GitHub release are not
+available yet. [`gitpigeon.dev`](https://gitpigeon.dev) is the live browser for
+paired GitPigeon installations.
 
 ## Platform support
 
@@ -31,9 +30,9 @@ argument arrays, paths use the platform path API, ref discovery is polled for
 consistent behavior across operating systems, and all repository state lives
 inside the Git directory.
 
-## Install from the private source checkout
+## Install from source
 
-Authorized contributors can install the current checkout locally:
+Clone the public repository and expose its `git-pigeon` executable to Git:
 
 ```bash
 git clone https://github.com/PeerPigeon/GitPigeon.git
@@ -42,11 +41,11 @@ npm ci
 npm link
 ```
 
-This is a source-checkout workflow, not an npm-published GitPigeon install.
-`npm ci` installs the checkout's locked dependencies. PeerPigeon is fetched
-directly from the pinned GitHub commit above, not from the npm registry. The
-repository's `.npmrc` disables dependency lifecycle scripts so PeerPigeon and
-FreeRTC stay at their locked revisions.
+`npm ci` installs the repository's locked dependencies; it does not download a
+published GitPigeon package. PeerPigeon is fetched directly from the pinned
+GitHub commit above, not from the npm registry. The repository's `.npmrc`
+disables dependency lifecycle scripts so PeerPigeon and FreeRTC stay at their
+locked revisions.
 
 The installed executable is named `git-pigeon`, which means Git automatically
 exposes it as `git pigeon`.
