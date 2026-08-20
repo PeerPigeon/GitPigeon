@@ -1,8 +1,8 @@
 {
   "repository": "https://github.com/PeerPigeon/PeerPigeon",
-  "commit": "6f5adffbe351fff8555ddd0f10d4ca825506a164",
-  "committedAt": "2026-08-20T20:15:29Z",
-  "commitMessage": "Use localStorage only as a cross-tab fallback",
+  "commit": "b5a05296c53875861c8fc2a555185c7bfb042e8e",
+  "committedAt": "2026-08-20T20:50:55Z",
+  "commitMessage": "Use localStorage only as a cross-tab fallback (#10)",
   "packageVersion": "1.0.0",
   "transitivePins": {
     "freertc": {
@@ -10,5 +10,5 @@
       "commit": "614254cf4b5185da917dca714ba7f65581191aae"
     }
   },
-  "resolvedAt": "2026-08-20T20:15:29Z"
+  "resolvedAt": "2026-08-20T20:50:55Z"
 }
