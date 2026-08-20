@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { createIdentity } from '../src/config.js';
 import {
+  adoptMachineIndexCapability,
   claimDashboardPairing,
   completeDashboardPairing,
   directoryValue,
@@ -150,4 +151,27 @@ test('version-2 launched state retries enrollment because it did not prove ackno
   assert.equal(pairing.rotated, false);
   assert.equal(pairing.index.secret, secret);
   assert.equal(pairing.index.pairingComplete, false);
+});
+
+test('an approved fresh device adopts the shared encrypted index without replacing registered repositories', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-adopt-index-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const adopted = await adoptMachineIndexCapability({
+    indexId: 'c'.repeat(32),
+    secret: 'approved-index-secret-that-is-long-enough',
+  }, { root });
+  assert.equal(adopted.indexId, 'c'.repeat(32));
+  assert.equal(adopted.secret, 'approved-index-secret-that-is-long-enough');
+  assert.equal(adopted.pairingComplete, false);
+
+  const repository = await createRepository(path.join(root, 'repository'));
+  await registerMachinePigeon(repository, createIdentity({
+    repositoryId: 'adopted-pigeon',
+    secret: 'd'.repeat(64),
+    deviceId: 'adopted-device',
+  }), { root });
+  await assert.rejects(
+    adoptMachineIndexCapability({ indexId: 'e'.repeat(32), secret: 'e'.repeat(43) }, { root }),
+    /different GitPigeon index/,
+  );
 });

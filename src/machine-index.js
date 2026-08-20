@@ -165,6 +165,30 @@ export async function loadMachineIndex({ root = machineIndexRoot(), create = tru
   });
 }
 
+export async function adoptMachineIndexCapability(capability, { root = machineIndexRoot() } = {}) {
+  const indexId = String(capability?.indexId ?? '');
+  const secret = String(capability?.secret ?? '');
+  if (!INDEX_ID.test(indexId) || !SECRET.test(secret)) throw new Error('Invalid approved GitPigeon index capability');
+  return await withLock(root, async () => {
+    let value;
+    try {
+      value = await readState(root, { create: false });
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      value = freshState();
+    }
+    if (value.entries.length > 0 && (value.indexId !== indexId || value.secret !== secret)) {
+      throw new Error('This device already belongs to a different GitPigeon index with registered repositories');
+    }
+    value.indexId = indexId;
+    value.secret = secret;
+    value.pairingMode = 'secure';
+    value.pairingComplete = false;
+    await writeState(root, value);
+    return value;
+  });
+}
+
 export async function registerMachinePigeon(repository, config, { root = machineIndexRoot(), pid = process.pid } = {}) {
   return await withLock(root, async () => {
     const value = await readState(root);

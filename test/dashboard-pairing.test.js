@@ -78,3 +78,18 @@ test('enrolls a browser without exposing the permanent machine secret in the URL
   assert.equal(plaintext.secret, index.secret);
   assert.equal(plaintext.browserId, browserId);
 });
+
+test('automatic enrollment carries only the persistent native public key and needs no code', () => {
+  const nativeDevice = createECDH('prime256v1');
+  const nativeDevicePublicKey = nativeDevice.generateKeys().toString('base64url');
+  const index = { indexId: 'b'.repeat(32), secret: 'index-secret-that-stays-inside-the-encrypted-grant' };
+  const enrollment = createDashboardEnrollment(index, 'https://gitpigeon.dev/', {
+    automatic: true,
+    nativeDevicePublicKey,
+  });
+  assert.equal(enrollment.automatic, true);
+  assert.equal(enrollment.nativeDevicePublicKey, nativeDevicePublicKey);
+  assert.match(enrollment.url, /\.auto\./);
+  assert.equal(enrollment.url.includes(index.indexId), false);
+  assert.equal(enrollment.url.includes(index.secret), false);
+});

@@ -17,6 +17,7 @@
     "LICENSE"
   ],
   "scripts": {
+    "build:native": "node scripts/build-native.mjs",
     "test": "node --test",
     "test:watch": "node --test --watch",
     "check": "node --check bin/git-pigeon.js && node --test"
@@ -37,5 +38,9 @@
   },
   "overrides": {
     "freertc": "git+https://github.com/draeder/freertc.git#614254cf4b5185da917dca714ba7f65581191aae"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12",
+    "postject": "^1.0.0-alpha.6"
   }
 }

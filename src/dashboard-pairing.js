@@ -74,14 +74,24 @@ function openSealed(key, envelope, aad) {
   ]).toString('utf8'));
 }
 
-export function createDashboardEnrollment(index, baseUrl = 'https://gitpigeon.dev/') {
+export function createDashboardEnrollment(index, baseUrl = 'https://gitpigeon.dev/', {
+  automatic = false,
+  nativeDevicePublicKey = null,
+} = {}) {
   const pairingId = randomBytes(16).toString('hex');
   const pairingSecret = randomBytes(32).toString('base64url');
   const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
   const ecdh = createECDH('prime256v1');
   const nativePublicKey = ecdh.generateKeys().toString('base64url');
   const url = new URL(baseUrl);
-  url.hash = `enroll=${encodeURIComponent(`${pairingId}.${pairingSecret}.${nativePublicKey}`)}`;
+  const enrollmentValue = [
+    pairingId,
+    pairingSecret,
+    nativePublicKey,
+    ...(nativeDevicePublicKey ? [automatic ? 'auto' : 'manual', String(nativeDevicePublicKey)] : []),
+  ].join('.');
+  if (nativeDevicePublicKey) decodePublicDeviceKey(nativeDevicePublicKey);
+  url.hash = `enroll=${encodeURIComponent(enrollmentValue)}`;
   return {
     protocol: PAIRING_PROTOCOL,
     pairingId,
@@ -89,11 +99,19 @@ export function createDashboardEnrollment(index, baseUrl = 'https://gitpigeon.de
     nativePublicKey,
     code,
     displayCode: `${code.slice(0, 3)} ${code.slice(3)}`,
+    automatic,
+    nativeDevicePublicKey: nativeDevicePublicKey ? String(nativeDevicePublicKey) : null,
     expiresAt: Date.now() + PAIRING_TTL_MS,
     index,
     ecdh,
     url: url.toString(),
   };
+}
+
+function decodePublicDeviceKey(value) {
+  const bytes = Buffer.from(String(value ?? ''), 'base64url');
+  if (bytes.length !== PUBLIC_KEY_BYTES) throw new Error('Invalid native device key for automatic browser enrollment');
+  return bytes;
 }
 
 export function decryptEnrollmentClaim(enrollment, claim) {
@@ -198,7 +216,8 @@ export async function serveDashboardEnrollment(enrollment, {
       }
       const supplied = Buffer.from(String(accepted.value?.code ?? ''), 'utf8');
       const expected = Buffer.from(enrollment.code, 'utf8');
-      if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+      if (!enrollment.automatic
+        && (supplied.length !== expected.length || !timingSafeEqual(supplied, expected))) {
         await node.storage.put('public', responseKey(enrollment.pairingId, accepted.browserId), {
           protocol: PAIRING_PROTOCOL,
           pairingId: enrollment.pairingId,

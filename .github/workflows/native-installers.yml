@@ -1,0 +1,89 @@
+name: Native installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            artifact: macos-arm64
+            installer: GitPigeon-macos-arm64.pkg
+          - os: macos-15-intel
+            artifact: macos-x64
+            installer: GitPigeon-macos-x64.pkg
+          - os: ubuntu-24.04
+            artifact: linux
+            installer: GitPigeon-linux-amd64.deb
+          - os: windows-2025
+            artifact: windows
+            installer: GitPigeon-windows-x64-Setup.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build standalone executable
+        shell: bash
+        run: npm run build:native -- --output "dist/git-pigeon${{ runner.os == 'Windows' && '.exe' || '' }}"
+      - name: Verify standalone executable
+        shell: bash
+        run: "dist/git-pigeon${{ runner.os == 'Windows' && '.exe' || '' }} --help"
+      - name: Build macOS package
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          chmod +x packaging/macos/build-pkg.sh
+          packaging/macos/build-pkg.sh dist/git-pigeon "dist/${{ matrix.installer }}" "$(node -p "require('./package.json').version")"
+      - name: Build Debian package
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          chmod +x packaging/linux/build-deb.sh
+          packaging/linux/build-deb.sh dist/git-pigeon "dist/${{ matrix.installer }}" "$(node -p "require('./package.json').version")" amd64
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:GITPIGEON_BINARY = (Resolve-Path "dist/git-pigeon.exe")
+          $env:GITPIGEON_OUTPUT_DIR = (Resolve-Path "dist")
+          $env:GITPIGEON_VERSION = node -p "require('./package.json').version"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging/windows/GitPigeon.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gitpigeon-${{ matrix.artifact }}
+          path: |
+            dist/*.pkg
+            dist/*.deb
+            dist/*-Setup.exe
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Publish installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" release/* --generate-notes --verify-tag

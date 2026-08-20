@@ -14,23 +14,43 @@ The human- and machine-readable pin is also recorded in
 
 ## Project status
 
-GitPigeon is public pre-release software under the MIT license. Install it from
-the source repository below. An npm package and packaged GitHub release are not
-available yet. [`gitpigeon.dev`](https://gitpigeon.dev) is the live browser for
-paired GitPigeon installations.
+GitPigeon is public pre-release software under the MIT license. Native macOS,
+Windows, and Linux installers are published from tagged builds on the
+[`GitPigeon releases`](https://github.com/PeerPigeon/GitPigeon/releases) page.
+[`gitpigeon.dev`](https://gitpigeon.dev) is the live browser for paired
+GitPigeon installations.
 
 ## Platform support
 
 - macOS, Linux, and Windows
-- Node.js 20.12 or newer
 - Git 2.31 or newer on `PATH`
+
+The native installers include GitPigeon and its runtime. Node.js 20.12 or newer
+is required only when running directly from a source checkout.
 
 There are no shell-script assumptions in the sync engine: Git is launched with
 argument arrays, paths use the platform path API, ref discovery is polled for
 consistent behavior across operating systems, and all repository state lives
 inside the Git directory.
 
-## Install from source
+## Install
+
+Download and run the installer for your operating system from the
+[`GitPigeon releases`](https://github.com/PeerPigeon/GitPigeon/releases) page.
+It installs the real `git-pigeon` executable on `PATH`, which makes Git expose
+it as the ordinary `git pigeon` subcommand. It also registers encrypted
+`gitpigeon://` clone links with the operating system.
+
+On a new device, the installer broadcasts a short-lived approval request only
+to the local LAN. An already-approved browser displays the device name and
+operating system in a confirmation modal. After approval, the browser encrypts
+the Pigeon-index capability directly to the new device's public key. The
+existing watcher forwards that ciphertext but cannot decrypt it. The new
+device then opens its own browser and completes enrollment automatically—there
+is no code, invite URL, secret copying, localhost bridge, or shared relay
+requirement.
+
+Installing from source remains available for contributors:
 
 Clone the public repository and expose its `git-pigeon` executable to Git:
 
@@ -41,14 +61,15 @@ npm ci
 npm link
 ```
 
-`npm ci` installs the repository's locked dependencies; it does not download a
+`npm ci` installs the source repository's locked dependencies; it does not download a
 published GitPigeon package. PeerPigeon is fetched directly from the pinned
 GitHub commit above, not from the npm registry. The repository's `.npmrc`
 disables dependency lifecycle scripts so PeerPigeon and FreeRTC stay at their
 locked revisions.
 
-The installed executable is named `git-pigeon`, which means Git automatically
-exposes it as `git pigeon`.
+The contributor install exposes the same `git-pigeon` executable. Run
+`git pigeon install` afterward to register the native URL handler; a fresh
+device also begins LAN approval automatically.
 
 ## Start a repository
 
@@ -72,16 +93,20 @@ PeerPigeon and FreeRTC; no relay argument is required. The invite contains the
 repository identity and encryption secret, so treat it like a repository
 password.
 
-On a second device, while at least one existing device is online:
+On an approved second device, open [`gitpigeon.dev`](https://gitpigeon.dev) and
+press **Clone** on any Pigeon. The browser creates a five-minute, one-time
+capability encrypted to that device's native key and opens the registered
+`gitpigeon://` handler. GitPigeon decrypts it locally, creates a real native Git
+repository below `~/GitPigeon`, registers it in the persistent index, and
+starts the single watcher service. Repository IDs and secrets never appear in
+the URL as plaintext.
+
+The invite form remains available for collaborators who are not joining
+through an approved browser:
 
 ```bash
 git pigeon init 'gitpigeon://sync/REPOSITORY_ID#SECRET' my-project
 ```
-
-That creates `my-project`, initializes native Git, joins the Pigeon, retrieves
-the live snapshot, and keeps watching in the background. There is no separate
-clone or watch step. Running `git pigeon init` again is safe and simply ensures
-the watcher is running.
 
 Continue using Git normally on either device:
 
@@ -162,6 +187,19 @@ and the next `init` creates a fresh enrollment. From then on, opening the bare
 site joins the encrypted PeerPigeon index and automatically displays every
 indexed Pigeon.
 
+The enrollment also stores the local install's persistent public key in that
+browser. Clone buttons therefore send only a short-lived encrypted capability
+to the installed native handler. The private device key remains in the
+per-user GitPigeon state directory and is never sent to the browser.
+
+For a newly installed device, LAN discovery uses multicast only to announce a
+short-lived public key and device description. The existing native watcher
+publishes that request into the already-encrypted PeerPigeon index, where an
+approved browser can authorize it. Approval ciphertext returns through the
+same encrypted index and LAN forwarder. Repository synchronization and
+cross-relay recovery continue to use PeerPigeon and FreeRTC; the LAN path is
+only the local trust prompt.
+
 Pair another browser with a fresh one-time session, or deliberately rotate the
 machine-index secret and invalidate every previously paired browser:
 
@@ -234,6 +272,8 @@ override that disables private syncing and removes the Git exclusion.
 | Command | Purpose |
 | --- | --- |
 | `git pigeon init [INVITE] [DIR]` | Create or join a Pigeon and start background syncing. |
+| `git pigeon install` | Install the subcommand and OS URL handler; enroll a fresh device through LAN approval. |
+| `git pigeon enroll` | Request approval for this native device from an already-approved browser on the LAN. |
 | `git pigeon list` | List every persistent indexed repository and whether the service is watching it. |
 | `git pigeon pair` | Securely approve another browser with a two-minute six-digit enrollment. |
 | `git pigeon pair --rotate` | Rotate the machine-index secret and invalidate earlier browser capabilities. |

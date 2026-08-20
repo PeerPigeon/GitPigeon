@@ -6,7 +6,12 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
-const ENTRYPOINT = fileURLToPath(new URL('../bin/git-pigeon.js', import.meta.url));
+const STANDALONE = typeof __GITPIGEON_STANDALONE__ === 'boolean'
+  ? __GITPIGEON_STANDALONE__
+  : process.env.GITPIGEON_STANDALONE === '1';
+const ENTRYPOINT = STANDALONE
+  ? process.execPath
+  : fileURLToPath(new URL('../bin/git-pigeon.js', import.meta.url));
 const START_TIMEOUT_MS = 20_000;
 const HEARTBEAT_STALE_MS = 10_000;
 const START_LOCK_STALE_MS = 30_000;
@@ -175,7 +180,7 @@ export async function startWatchService({
     let child;
     try {
       const args = [
-        entrypoint,
+        ...(STANDALONE ? [] : [entrypoint]),
         'watch',
         '--foreground',
         `--service-child=${token}`,

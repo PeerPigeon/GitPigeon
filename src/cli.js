@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { mkdir, readdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { DEFAULT_POLL_MS, DEFAULT_SYNC_WAIT_MS } from './constants.js';
@@ -16,6 +17,7 @@ import { GitRepository } from './git.js';
 import { createInvite, parseInvite } from './invite.js';
 import { createDashboardEnrollment, serveDashboardEnrollment } from './dashboard-pairing.js';
 import {
+  adoptMachineIndexCapability,
   claimDashboardPairing,
   completeDashboardPairing,
   connectMachineIndexService,
@@ -28,6 +30,14 @@ import {
   registerMachinePigeon,
   unregisterMachinePigeon,
 } from './machine-index.js';
+import {
+  loadOrCreateNativeDeviceIdentity,
+  openDeviceGrant,
+  parseNativeCloneUrl,
+  validateNativeClonePayload,
+} from './device-grants.js';
+import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
+import { installNativeIntegration } from './native-install.js';
 import { connectPeerPigeon } from './peerpigeon.js';
 import { RepositorySynchronizer } from './protocol.js';
 import { WorkspaceFiles } from './workspace.js';
@@ -36,6 +46,8 @@ const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
 
 Usage:
   git pigeon init [INVITE] [DIRECTORY]
+  git pigeon install [--enroll | --no-enroll]
+  git pigeon enroll
   git pigeon list
   git pigeon pair [--rotate]
   git pigeon unwatch [REPOSITORY]
@@ -225,6 +237,8 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   const sessions = new Map();
   let control;
   let machineIndex;
+  let lanApprovals;
+  let lastApprovalBrowserOpen = 0;
   let reconciliationTimer;
   let reconciling = false;
 
@@ -297,6 +311,23 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     control = await createWatchServiceControl(root, token, stop);
     await reconcile();
     machineIndex = await connectMachineIndexService(log, { root, serviceInstanceId });
+    try {
+      lanApprovals = await startLanApprovalService(machineIndex, {
+        logger: log,
+        onDeviceRequest: (request) => {
+          log.info(`Approval requested by ${request.deviceName} on the local LAN`);
+          if (Date.now() - lastApprovalBrowserOpen >= 30_000) {
+            lastApprovalBrowserOpen = Date.now();
+            openDashboard(process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/');
+          }
+        },
+      });
+      log.debug('LAN device approval listener is ready');
+    } catch (error) {
+      // Multicast may be disabled by an OS firewall or network policy. The
+      // repository watcher and all already-approved devices must keep working.
+      log.warn(`LAN device approval is unavailable: ${error.message}`);
+    }
     reconciliationTimer = setInterval(() => { reconcile().catch((error) => log.error(error)); }, 500);
     await control.ready();
     log.info(`GitPigeon service is watching ${sessions.size} ${sessions.size === 1 ? 'repository' : 'repositories'} as PID ${process.pid}`);
@@ -308,6 +339,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     while (reconciling) await sleep(10);
     for (const record of sessions.values()) await stopSession(record);
     await markMachinePigeonsStopped({ root, pid: process.pid });
+    if (lanApprovals) await lanApprovals.close();
     if (machineIndex) await machineIndex.close();
     if (control) await control.close();
   }
@@ -397,13 +429,23 @@ async function commandInit(args, cwd, verbose) {
   console.log('Stop the machine-wide GitPigeon service with `git pigeon stop`.');
 }
 
-async function runDashboardPairing(pairing, verbose = false) {
+async function runDashboardPairing(pairing, verbose = false, {
+  automatic = false,
+  nativeDevicePublicKey = null,
+} = {}) {
+  const persistentDeviceKey = nativeDevicePublicKey
+    ?? (await loadOrCreateNativeDeviceIdentity({ root: pairing.root })).publicKey;
   const enrollment = createDashboardEnrollment(
     pairing.index,
     process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/',
+    { automatic, nativeDevicePublicKey: persistentDeviceKey },
   );
-  console.log(`Browser approval code: ${enrollment.displayCode}`);
-  console.log('Enter this code at gitpigeon.dev within two minutes.');
+  if (automatic) {
+    console.log('Opening gitpigeon.dev to finish this approved device automatically.');
+  } else {
+    console.log(`Browser approval code: ${enrollment.displayCode}`);
+    console.log('Enter this code at gitpigeon.dev within two minutes.');
+  }
   const result = await serveDashboardEnrollment(enrollment, {
     logger: logger(verbose),
     onReady: () => {
@@ -418,6 +460,51 @@ async function runDashboardPairing(pairing, verbose = false) {
   });
   await completeDashboardPairing(pairing.index, { root: pairing.root });
   console.log(`Securely paired browser ${result.browserId.slice(0, 16)}…; the permanent index secret was never placed in the URL.`);
+}
+
+async function commandEnroll(args, verbose) {
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  const root = machineIndexRoot();
+  const identity = await loadOrCreateNativeDeviceIdentity({ root });
+  console.log('Looking for an approved GitPigeon browser on this LAN…');
+  const { request, grant } = await requestLanDeviceApproval(identity, {
+    logger: logger(verbose),
+    onRequest: (value) => {
+      console.log(`Authorize “${value.deviceName}” in an already-approved GitPigeon browser.`);
+    },
+  });
+  if (grant.requestId !== request.requestId || !grant.index) {
+    throw new Error('The approved device grant did not contain a GitPigeon index capability');
+  }
+  await stopWatchService(root);
+  const index = await adoptMachineIndexCapability(grant.index, { root });
+  const pairing = await claimDashboardPairing({ root, force: true });
+  await startWatchService({ root, verbose });
+  await runDashboardPairing(pairing, verbose, {
+    automatic: true,
+    nativeDevicePublicKey: identity.publicKey,
+  });
+  console.log(`This device is now approved for GitPigeon index ${index.indexId.slice(0, 10)}.`);
+}
+
+async function commandInstall(args, verbose) {
+  const enroll = takeFlag(args, '--enroll');
+  const noEnroll = takeFlag(args, '--no-enroll');
+  if (enroll && noEnroll) throw new Error('--enroll and --no-enroll cannot be combined');
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  await loadOrCreateNativeDeviceIdentity();
+  const installed = await installNativeIntegration();
+  console.log(`Installed the native git pigeon command at ${installed.commandPath}.`);
+  console.log('Registered gitpigeon:// clone links with this operating system.');
+  let existing = null;
+  try { existing = await loadMachineIndex({ create: false }); } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  if (noEnroll || (!enroll && existing?.pairingComplete)) {
+    if (existing) await startWatchService({ root: machineIndexRoot(), verbose });
+    return;
+  }
+  await commandEnroll([], verbose);
 }
 
 async function commandPair(args, verbose) {
@@ -660,6 +747,50 @@ async function commandClone(args, cwd, verbose) {
   return await commandInit([inviteValue, target], cwd, verbose);
 }
 
+function safeRepositoryDirectoryName(value, repositoryId) {
+  const fallback = `pigeon-${repositoryId.slice(0, 10)}`;
+  const name = String(value || fallback)
+    .normalize('NFKC')
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-')
+    .replace(/^\.+|[. ]+$/g, '')
+    .trim()
+    .slice(0, 120);
+  return name || fallback;
+}
+
+async function availableCloneTarget(base, name) {
+  for (let suffix = 1; suffix < 1_000; suffix += 1) {
+    const target = path.join(base, suffix === 1 ? name : `${name}-${suffix}`);
+    try {
+      const entries = await readdir(target);
+      if (entries.length === 0) return target;
+    } catch (error) {
+      if (error?.code === 'ENOENT') return target;
+      throw error;
+    }
+  }
+  throw new Error(`Could not choose an unused clone directory below ${base}`);
+}
+
+async function commandProtocol(args, verbose) {
+  const value = args.shift();
+  if (!value) throw new Error('The GitPigeon protocol handler requires an encrypted clone URL');
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  const identity = await loadOrCreateNativeDeviceIdentity();
+  const envelope = parseNativeCloneUrl(value);
+  const grant = openDeviceGrant(identity, envelope, { purpose: 'clone' });
+  const repository = validateNativeClonePayload(grant);
+  const base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), 'GitPigeon'));
+  await mkdir(base, { recursive: true });
+  const target = await availableCloneTarget(
+    base,
+    safeRepositoryDirectoryName(repository.name, repository.repositoryId),
+  );
+  const invite = createInvite(repository);
+  await commandInit([invite, target], process.cwd(), verbose);
+  console.log(`Cloned ${repository.name} to ${target}.`);
+}
+
 async function commandStatus(args, cwd) {
   const json = takeFlag(args, '--json');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
@@ -723,6 +854,8 @@ export async function main(argv = process.argv.slice(2), options = {}) {
     return;
   }
   if (command === 'init') return await commandInit(args, cwd, verbose);
+  if (command === 'install') return await commandInstall(args, verbose);
+  if (command === 'enroll') return await commandEnroll(args, verbose);
   if (command === 'list') return await commandList(args);
   if (command === 'pair') return await commandPair(args, verbose);
   if (command === 'invite') return await commandInvite(args, cwd);
@@ -734,6 +867,7 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   if (command === 'unwatch') return await commandUnwatch(args, cwd);
   if (command === 'stop') return await commandStop(args);
   if (command === 'clone') return await commandClone(args, cwd, verbose);
+  if (command === 'protocol') return await commandProtocol(args, verbose);
   if (command === 'status') return await commandStatus(args, cwd);
   if (command === 'doctor') return await commandDoctor(args, cwd);
   throw new Error(`Unknown command: ${command}\n\n${HELP}`);

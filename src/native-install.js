@@ -1,0 +1,140 @@
+import { spawn } from 'node:child_process';
+import { chmod, mkdir, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import process from 'node:process';
+
+const execFile = (command, args) => new Promise((resolve, reject) => {
+  const child = spawn(command, args, { windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+  const output = [];
+  const errors = [];
+  child.stdout?.on('data', (data) => output.push(data));
+  child.stderr?.on('data', (data) => errors.push(data));
+  child.once('error', reject);
+  child.once('exit', (code) => code === 0
+    ? resolve(Buffer.concat(output).toString('utf8'))
+    : reject(new Error(`${command} exited with ${code}: ${Buffer.concat(errors).toString('utf8').trim()}`)));
+});
+
+const STANDALONE = typeof __GITPIGEON_STANDALONE__ === 'boolean'
+  ? __GITPIGEON_STANDALONE__
+  : process.env.GITPIGEON_STANDALONE === '1';
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`;
+}
+
+function desktopQuote(value) {
+  return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+}
+
+export function currentGitPigeonInvocation({
+  execPath = process.execPath,
+  argv = process.argv,
+} = {}) {
+  if (STANDALONE) return [execPath];
+  const script = argv[1] && /git-pigeon(?:\.js)?$/i.test(path.basename(argv[1]))
+    ? path.resolve(argv[1])
+    : null;
+  return script ? [execPath, script] : [execPath];
+}
+
+function shellCommand(invocation, trailing = '') {
+  return `${invocation.map(shellQuote).join(' ')}${trailing}`;
+}
+
+async function installMacOS(invocation, home, run) {
+  const localBin = path.join(home, '.local', 'bin');
+  const commandPath = path.join(localBin, 'git-pigeon');
+  const appRoot = path.join(home, 'Applications', 'GitPigeon.app');
+  const contents = path.join(appRoot, 'Contents');
+  const macos = path.join(contents, 'MacOS');
+  await mkdir(localBin, { recursive: true, mode: 0o755 });
+  await mkdir(macos, { recursive: true, mode: 0o755 });
+  await writeFile(commandPath, `#!/bin/sh\nexec ${shellCommand(invocation, ' "$@"')}\n`, { mode: 0o755 });
+  await chmod(commandPath, 0o755);
+  const handlerPath = path.join(macos, 'git-pigeon-handler');
+  await writeFile(handlerPath, `#!/bin/sh\nexec ${shellCommand(invocation, ' protocol "$1"')}\n`, { mode: 0o755 });
+  await chmod(handlerPath, 0o755);
+  await writeFile(path.join(contents, 'Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleDisplayName</key><string>GitPigeon</string>
+<key>CFBundleExecutable</key><string>git-pigeon-handler</string>
+<key>CFBundleIdentifier</key><string>dev.gitpigeon.native</string>
+<key>CFBundleName</key><string>GitPigeon</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleURLTypes</key><array><dict>
+<key>CFBundleURLName</key><string>dev.gitpigeon.clone</string>
+<key>CFBundleURLSchemes</key><array><string>gitpigeon</string></array>
+</dict></array>
+</dict></plist>\n`, { mode: 0o644 });
+  const launchServices = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister';
+  await run(launchServices, ['-f', appRoot]);
+  return { commandPath, handler: appRoot };
+}
+
+async function installLinux(invocation, home, run) {
+  const localBin = path.join(home, '.local', 'bin');
+  const commandPath = path.join(localBin, 'git-pigeon');
+  const applications = path.join(home, '.local', 'share', 'applications');
+  const desktop = path.join(applications, 'gitpigeon.desktop');
+  await mkdir(localBin, { recursive: true, mode: 0o755 });
+  await mkdir(applications, { recursive: true, mode: 0o755 });
+  await writeFile(commandPath, `#!/bin/sh\nexec ${shellCommand(invocation, ' "$@"')}\n`, { mode: 0o755 });
+  await chmod(commandPath, 0o755);
+  await writeFile(desktop, `[Desktop Entry]
+Name=GitPigeon
+Comment=Clone an encrypted GitPigeon repository
+Exec=${desktopQuote(commandPath)} protocol %u
+Terminal=false
+Type=Application
+MimeType=x-scheme-handler/gitpigeon;
+NoDisplay=true
+Categories=Development;
+`, { mode: 0o644 });
+  try { await run('xdg-mime', ['default', 'gitpigeon.desktop', 'x-scheme-handler/gitpigeon']); } catch { /* desktop session may register it later */ }
+  try { await run('update-desktop-database', [applications]); } catch { /* optional */ }
+  return { commandPath, handler: desktop };
+}
+
+async function windowsUserPath(run) {
+  try {
+    const output = await run('reg.exe', ['query', 'HKCU\\Environment', '/v', 'Path']);
+    return output.split(/\r?\n/).map((line) => line.trim()).find((line) => /^Path\s+REG_/i.test(line))
+      ?.replace(/^Path\s+REG_\w+\s+/i, '') ?? '';
+  } catch {
+    return '';
+  }
+}
+
+async function installWindows(invocation, environment, run) {
+  const root = path.join(environment.LOCALAPPDATA ?? environment.APPDATA ?? os.homedir(), 'GitPigeon', 'bin');
+  const commandPath = path.join(root, 'git-pigeon.cmd');
+  await mkdir(root, { recursive: true });
+  const command = invocation.map((part) => `"${String(part).replaceAll('"', '""')}"`).join(' ');
+  await writeFile(commandPath, `@echo off\r\n${command} %*\r\n`);
+  const handler = `${command} protocol "%1"`;
+  await run('reg.exe', ['add', 'HKCU\\Software\\Classes\\gitpigeon', '/ve', '/d', 'URL:GitPigeon Protocol', '/f']);
+  await run('reg.exe', ['add', 'HKCU\\Software\\Classes\\gitpigeon', '/v', 'URL Protocol', '/d', '', '/f']);
+  await run('reg.exe', ['add', 'HKCU\\Software\\Classes\\gitpigeon\\shell\\open\\command', '/ve', '/d', handler, '/f']);
+  const currentPath = await windowsUserPath(run);
+  const pieces = currentPath.split(';').filter(Boolean);
+  if (!pieces.some((entry) => entry.toLocaleLowerCase() === root.toLocaleLowerCase())) {
+    await run('reg.exe', ['add', 'HKCU\\Environment', '/v', 'Path', '/t', 'REG_EXPAND_SZ', '/d', [...pieces, root].join(';'), '/f']);
+  }
+  return { commandPath, handler: 'HKCU\\Software\\Classes\\gitpigeon' };
+}
+
+export async function installNativeIntegration({
+  platform = process.platform,
+  home = os.homedir(),
+  environment = process.env,
+  invocation = currentGitPigeonInvocation(),
+  run = execFile,
+} = {}) {
+  if (platform === 'darwin') return await installMacOS(invocation, home, run);
+  if (platform === 'win32') return await installWindows(invocation, environment, run);
+  return await installLinux(invocation, home, run);
+}

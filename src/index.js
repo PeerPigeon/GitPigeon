@@ -32,6 +32,7 @@ export {
   clearMachinePigeons,
   connectMachineIndex,
   connectMachineIndexService,
+  adoptMachineIndexCapability,
   directoryKey,
   directoryValue,
   listMachinePigeons,
@@ -43,6 +44,9 @@ export {
   registerMachinePigeon,
   unregisterMachinePigeon,
 } from './machine-index.js';
+export * from './device-grants.js';
+export * from './lan-enrollment.js';
+export * from './native-install.js';
 export { connectPeerPigeon } from './peerpigeon.js';
 export { installNativeWebRTC } from './webrtc.js';
 export { createIdentity, loadConfig, saveConfig, validateConfig } from './config.js';
