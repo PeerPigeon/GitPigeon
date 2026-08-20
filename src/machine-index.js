@@ -386,17 +386,9 @@ async function connectMachineDirectory(index, logger = {}, {
   node.mesh.on('signaling:disconnected', () => logger.debug?.(`[${roomLabel}] signaling disconnected`));
   node.mesh.on('signaling:log', ({ message } = {}) => logger.debug?.(`[${roomLabel}] ${message}`));
   node.mesh.on('peer:discovered', (peerId) => logger.debug?.(`[${roomLabel}] discovered ${String(peerId).slice(0, 12)}`));
-  let lastRecoveryAt = Date.now();
-  const recover = (reason) => {
-    if (node.getConnectedPeers().length > 0 || Date.now() - lastRecoveryAt < 20_000) return;
-    lastRecoveryAt = Date.now();
-    logger.debug?.(`[${roomLabel}] recovery: ${node.getDiscoveredPeers().length} discovered, ${node.getActiveSignalingPeers().length} active on relay`);
-    node.recoverAfterInactivity(reason);
-  };
-  node.on('error', (error) => {
-    logger.error?.(error);
-    recover('GitPigeon native index connection error');
-  });
+  // PeerPigeon and FreeRTC own signaling recovery. A GitPigeon-side recovery
+  // call can interrupt their in-flight cross-relay negotiation.
+  node.on('error', (error) => logger.error?.(error));
   let closed = false;
   let ready = false;
   let needsReconcile = true;
@@ -479,7 +471,6 @@ async function connectMachineDirectory(index, logger = {}, {
     publish({ reconcile: true }).catch((error) => logger.error?.(error));
   }
   const timer = setInterval(() => {
-    recover('GitPigeon native index peer retry');
     publish().catch((error) => logger.error?.(error));
   }, heartbeatMs);
   return {

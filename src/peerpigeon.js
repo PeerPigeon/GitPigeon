@@ -66,17 +66,10 @@ export async function connectPeerPigeon(config, logger = {}) {
   node.mesh.on('signaling:disconnected', () => logger.debug?.(`[${roomLabel}] signaling disconnected`));
   node.mesh.on('signaling:log', ({ message } = {}) => logger.debug?.(`[${roomLabel}] ${message}`));
   node.mesh.on('peer:discovered', (peerId) => logger.debug?.(`[${roomLabel}] discovered ${String(peerId).slice(0, 12)}`));
-  let lastRecoveryAt = Date.now();
-  const recover = (reason) => {
-    if (node.getConnectedPeers().length > 0 || Date.now() - lastRecoveryAt < 20_000) return;
-    lastRecoveryAt = Date.now();
-    logger.debug?.(`[${roomLabel}] recovery: ${node.getDiscoveredPeers().length} discovered, ${node.getActiveSignalingPeers().length} active on relay`);
-    node.recoverAfterInactivity(reason);
-  };
-  node.on('error', (error) => {
-    logger.error?.(error);
-    recover('GitPigeon native repository connection error');
-  });
+  // PeerPigeon and FreeRTC own signaling recovery, federation, and redial.
+  // Calling recoverAfterInactivity from GitPigeon while a negotiation is in
+  // progress tears down the healthy transport and creates a reconnect loop.
+  node.on('error', (error) => logger.error?.(error));
   node.on('peerConnected', (peerId) => logger.debug?.(`[${roomLabel}] peer connected: ${peerId}`));
   node.on('peerDisconnected', (peerId) => logger.debug?.(`[${roomLabel}] peer disconnected: ${peerId}`));
   try {
@@ -89,9 +82,6 @@ export async function connectPeerPigeon(config, logger = {}) {
     await node.destroy();
     throw new Error('PeerPigeon storage did not initialize');
   }
-  const recoveryTimer = setInterval(() => {
-    recover('GitPigeon native repository peer retry');
-  }, 1_000);
   return {
     node,
     storage: node.storage,
@@ -114,7 +104,6 @@ export async function connectPeerPigeon(config, logger = {}) {
       });
     },
     async close() {
-      clearInterval(recoveryTimer);
       await node.destroy();
     },
   };
