@@ -2,6 +2,24 @@ import { NETWORK_ID, storagePrefix } from './constants.js';
 import { productionSignalingServers } from './relay-policy.js';
 import { installNativeWebRTC } from './webrtc.js';
 
+const PEERPIGEON_START_TIMEOUT_MS = 15_000;
+
+async function startPeerPigeonNode(node, label) {
+  let timer;
+  try {
+    await Promise.race([
+      node.start(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} did not finish PeerPigeon startup within ${PEERPIGEON_START_TIMEOUT_MS / 1_000} seconds`));
+        }, PEERPIGEON_START_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function connectPeerPigeon(config, logger = {}) {
   await installNativeWebRTC();
   let PeerPigeonNode;
@@ -62,7 +80,7 @@ export async function connectPeerPigeon(config, logger = {}) {
   node.on('peerConnected', (peerId) => logger.debug?.(`[${roomLabel}] peer connected: ${peerId}`));
   node.on('peerDisconnected', (peerId) => logger.debug?.(`[${roomLabel}] peer disconnected: ${peerId}`));
   try {
-    await node.start();
+    await startPeerPigeonNode(node, roomLabel);
   } catch (error) {
     try { await node.destroy(); } catch { /* preserve the startup error */ }
     throw error;
