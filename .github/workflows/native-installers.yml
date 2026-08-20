@@ -86,4 +86,21 @@ jobs:
       - name: Publish installers
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" release/* --generate-notes --verify-tag
+        run: gh release create "${GITHUB_REF_NAME}" release/* --generate-notes --verify-tag --repo "${GITHUB_REPOSITORY}"
+      - name: Verify published installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          assets="$(gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+          for expected in \
+            GitPigeon-macos-arm64.pkg \
+            GitPigeon-macos-x64.pkg \
+            GitPigeon-linux-amd64.deb \
+            GitPigeon-windows-x64-Setup.exe
+          do
+            grep -Fxq "${expected}" <<<"${assets}" || {
+              echo "Missing release asset: ${expected}" >&2
+              exit 1
+            }
+          done
