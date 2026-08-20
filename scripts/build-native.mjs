@@ -52,7 +52,7 @@ await copyFile(process.execPath, output);
 if (process.platform === "darwin") {
   await run("codesign", ["--remove-signature", output]).catch(() => {});
 }
-const postject = path.join(root, "node_modules", ".bin", process.platform === "win32" ? "postject.cmd" : "postject");
+const postject = path.join(root, "node_modules", "postject", "dist", "cli.js");
 const injection = [
   output,
   "NODE_SEA_BLOB",
@@ -61,7 +61,7 @@ const injection = [
   "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2",
 ];
 if (process.platform === "darwin") injection.push("--macho-segment-name", "NODE_SEA");
-await run(postject, injection);
+await run(process.execPath, [postject, ...injection]);
 if (process.platform === "darwin") await run("codesign", ["--sign", "-", output]);
 await rm(work, { recursive: true, force: true });
 console.log(`Built standalone GitPigeon executable: ${output}`);
