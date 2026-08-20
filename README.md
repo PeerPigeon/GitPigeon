@@ -41,7 +41,7 @@ executable on `PATH`, registers encrypted `gitpigeon://` clone links, and starts
 device approval:
 
 ```bash
-curl -fsSL https://gitpigeon.dev/install.sh | sh
+curl -fsSL 'https://gitpigeon.dev/install.sh?v=1' | sh
 ```
 
 This bootstrap path does not require an Apple Developer ID and does not use the
