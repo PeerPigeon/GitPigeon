@@ -32,7 +32,7 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "peerpigeon": "git+https://github.com/PeerPigeon/PeerPigeon.git#ee07a5934bda5d05cf9b0f364a13456ba3438a1c",
+    "peerpigeon": "git+https://github.com/PeerPigeon/PeerPigeon.git#6f5adffbe351fff8555ddd0f10d4ca825506a164",
     "werift": "0.24.4",
     "ws": "8.21.3"
   },

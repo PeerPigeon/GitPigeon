@@ -1,8 +1,8 @@
 {
   "repository": "https://github.com/PeerPigeon/PeerPigeon",
-  "commit": "ee07a5934bda5d05cf9b0f364a13456ba3438a1c",
-  "committedAt": "2026-08-17T04:03:11Z",
-  "commitMessage": "Coordinate capacity edge teardown",
+  "commit": "6f5adffbe351fff8555ddd0f10d4ca825506a164",
+  "committedAt": "2026-08-20T20:15:29Z",
+  "commitMessage": "Use localStorage only as a cross-tab fallback",
   "packageVersion": "1.0.0",
   "transitivePins": {
     "freertc": {
@@ -10,5 +10,5 @@
       "commit": "614254cf4b5185da917dca714ba7f65581191aae"
     }
   },
-  "resolvedAt": "2026-08-18T00:00:00Z"
+  "resolvedAt": "2026-08-20T20:15:29Z"
 }
