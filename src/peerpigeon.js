@@ -39,8 +39,11 @@ export async function connectPeerPigeon(config, logger = {}) {
     networkId: NETWORK_ID,
     sessionId: config.repositoryId,
     minPeers: 1,
-    maxPeers: 4,
-    tolerantPeers: 1,
+    // Repository rooms are intentionally close to a full mesh at normal
+    // GitPigeon scale. This keeps the native watcher connected even when
+    // several browser tabs are also present in the same room.
+    maxPeers: 32,
+    tolerantPeers: 0,
     autoDiscover: true,
     autoConnect: true,
     signalingServers: productionSignalingServers(defaultSignalingServers),

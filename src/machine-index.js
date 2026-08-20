@@ -363,8 +363,11 @@ async function connectMachineDirectory(index, logger = {}, {
     networkId: INDEX_NETWORK_ID,
     sessionId: index.indexId,
     minPeers: 1,
-    maxPeers: 4,
-    tolerantPeers: 1,
+    // Keep every normal browser/device member directly reachable. A tiny
+    // partial mesh can otherwise fill with browser peers and shed the only
+    // native index publisher while it rebalances.
+    maxPeers: 32,
+    tolerantPeers: 0,
     autoDiscover: true,
     autoConnect: true,
     signalingServers: productionSignalingServers(DEFAULT_SIGNALING_SERVERS),
