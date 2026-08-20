@@ -463,15 +463,16 @@ async function connectMachineDirectory(index, logger = {}, {
   let needsReconcile = true;
   let publishQueue = Promise.resolve();
   let lastDirectoryFingerprint = null;
+  let lastRosterReconcileAt = 0;
   const rosterKey = indexPublishersKey(index.indexId);
   const publisherKey = publisherDirectoryKey(index.indexId, index.publisherId);
   const publish = ({ reconcile = false } = {}) => {
     const operation = publishQueue.then(async () => {
       if (closed || !ready) return;
-      if (node.getConnectedPeers().length === 0) return;
       const storage = node.storage;
       if (!storage) return;
-      if (reconcile || needsReconcile) {
+      const connected = node.getConnectedPeers().length > 0;
+      if (connected && (reconcile || needsReconcile || Date.now() - lastRosterReconcileAt >= 10_000)) {
         // Node storage is memory-backed while the browser keeps its IndexedDB
         // record across native process restarts. Import that higher version
         // before the first write or the browser will reject the live update as
@@ -487,6 +488,7 @@ async function connectMachineDirectory(index, logger = {}, {
         const settled = await storage.get('public', rosterKey);
         logger.debug?.(`Index publisher roster reconciled at version ${settled?.version ?? roster?.version ?? 'none'}`);
         needsReconcile = false;
+        lastRosterReconcileAt = Date.now();
       }
       const current = await loadMachineIndex({ root });
       const entries = await Promise.all(current.entries.map(async (entry) => ({
@@ -496,11 +498,16 @@ async function connectMachineDirectory(index, logger = {}, {
       const value = publisherDirectoryValue(current, entries, Date.now(), serviceInstanceId);
       const fingerprint = JSON.stringify(value.pigeons);
       const directoryChanged = fingerprint !== lastDirectoryFingerprint;
-      const existingRoster = await storage.get('public', rosterKey);
-      const roster = publisherRosterValue(current, existingRoster?.value);
-      if (!existingRoster || JSON.stringify(existingRoster.value?.publishers) !== JSON.stringify(roster.publishers)) {
-        await storage.put('public', rosterKey, roster);
+      if (connected) {
+        const existingRoster = await storage.get('public', rosterKey);
+        const roster = publisherRosterValue(current, existingRoster?.value);
+        if (!existingRoster || JSON.stringify(existingRoster.value?.publishers) !== JSON.stringify(roster.publishers)) {
+          await storage.put('public', rosterKey, roster);
+        }
       }
+      // Keep the per-device heartbeat current even while PeerPigeon is
+      // renegotiating. Storage will carry the newest record to every browser
+      // as soon as the mesh reconnects instead of exposing a stale watcher.
       const record = await storage.put('public', publisherKey, value);
       lastDirectoryFingerprint = fingerprint;
       if (directoryChanged) logger.debug?.(`Publisher directory updated at version ${record?.version ?? 'unknown'} with ${current.entries.length} ${current.entries.length === 1 ? 'repository' : 'repositories'}`);

@@ -15,7 +15,7 @@ const ENTRYPOINT = STANDALONE
 const START_TIMEOUT_MS = 20_000;
 const HEARTBEAT_STALE_MS = 10_000;
 const START_LOCK_STALE_MS = 30_000;
-export const SERVICE_PROTOCOL_VERSION = 3;
+export const SERVICE_PROTOCOL_VERSION = 4;
 const execFileAsync = promisify(execFile);
 
 function sleep(ms) {
