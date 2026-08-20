@@ -19,6 +19,7 @@ export {
   readWatchServiceState,
   startWatchService,
   stopWatchService,
+  waitForWatchServiceRepository,
   watcherPidsFromProcessRows,
   watchServiceStatus,
 } from './daemon.js';
@@ -45,6 +46,7 @@ export {
   unregisterMachinePigeon,
 } from './machine-index.js';
 export * from './device-grants.js';
+export * from './device-approval-mesh.js';
 export * from './lan-enrollment.js';
 export * from './native-install.js';
 export { connectPeerPigeon } from './peerpigeon.js';

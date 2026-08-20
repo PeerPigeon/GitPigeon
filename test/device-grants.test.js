@@ -4,6 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
+  DEVICE_APPROVAL_NETWORK_ID,
+  DEVICE_APPROVAL_SESSION_ID,
+  startDeviceApprovalRequester,
+} from '../src/device-approval-mesh.js';
+import {
   DEVICE_GRANT_PROTOCOL,
   createDeviceEnrollmentRequest,
   loadOrCreateNativeDeviceIdentity,
@@ -13,6 +18,39 @@ import {
   validateDeviceEnrollmentRequest,
   validateNativeClonePayload,
 } from '../src/device-grants.js';
+
+class FakeApprovalNode {
+  constructor(options) {
+    this.options = options;
+    this.listeners = new Map();
+    this.broadcasts = [];
+    this.destroyed = false;
+  }
+
+  on(event, listener) {
+    const listeners = this.listeners.get(event) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(event, listeners);
+  }
+
+  off(event, listener) {
+    this.listeners.get(event)?.delete(listener);
+  }
+
+  async init() {}
+
+  broadcast(value) {
+    this.broadcasts.push(value);
+  }
+
+  emit(event, value) {
+    for (const listener of this.listeners.get(event) ?? []) listener(value);
+  }
+
+  async destroy() {
+    this.destroyed = true;
+  }
+}
 
 test('encrypts device enrollment so only the requested native identity can open it', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'gitpigeon-device-grant-'));
@@ -57,6 +95,38 @@ test('native clone URLs contain ciphertext and decrypt into a validated reposito
     assert.equal(url.toString().includes(secret), false);
     const opened = openDeviceGrant(identity, parseNativeCloneUrl(url), { purpose: 'clone' });
     assert.deepEqual(validateNativeClonePayload(opened), { repositoryId, secret, name: 'Example repository' });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('discovers an approved browser directly through PeerPigeon without a watcher bridge', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'gitpigeon-mesh-approval-'));
+  try {
+    const identity = await loadOrCreateNativeDeviceIdentity({ root });
+    const request = createDeviceEnrollmentRequest(identity, { port: 41_717 });
+    let fake;
+    let resolveGrant;
+    const received = new Promise((resolve) => { resolveGrant = resolve; });
+    const session = await startDeviceApprovalRequester(identity, request, {
+      signalingServers: ['wss://relay.example/ws'],
+      nodeFactory: (options) => {
+        fake = new FakeApprovalNode(options);
+        return fake;
+      },
+      onGrant: (_envelope, grant) => resolveGrant(grant),
+    });
+    assert.equal(fake.options.networkId, DEVICE_APPROVAL_NETWORK_ID);
+    assert.equal(fake.options.sessionId, DEVICE_APPROVAL_SESSION_ID);
+    assert.deepEqual(fake.broadcasts, [JSON.stringify(request)]);
+
+    const envelope = sealDeviceGrant(identity.publicKey, request.requestId, {
+      index: { indexId: 'c'.repeat(32), secret: 'z'.repeat(43) },
+    });
+    fake.emit('peer:data', { data: JSON.stringify(envelope) });
+    assert.equal((await received).index.indexId, 'c'.repeat(32));
+    await session.close();
+    assert.equal(fake.destroyed, true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

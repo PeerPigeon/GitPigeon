@@ -10,6 +10,7 @@ import {
   openDeviceGrant,
   validateDeviceEnrollmentRequest,
 } from './device-grants.js';
+import { startDeviceApprovalRequester } from './device-approval-mesh.js';
 
 const REQUEST_BUCKET_MS = 5_000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -57,6 +58,7 @@ export async function requestLanDeviceApproval(identity, {
   let settled = false;
   let interval;
   let timeout;
+  let meshSessionPromise;
   const result = new Promise((resolve, reject) => {
     const finish = (error, value) => {
       if (settled) return;
@@ -64,22 +66,32 @@ export async function requestLanDeviceApproval(identity, {
       if (interval) clearInterval(interval);
       if (timeout) clearTimeout(timeout);
       socket.close();
+      meshSessionPromise?.then((session) => session?.close()).catch(() => {});
       if (error) reject(error);
       else resolve(value);
     };
-    socket.on('message', (data, remote) => {
-      const envelope = decodeMessage(data);
+    const accept = (envelope, source) => {
       if (envelope?.protocol !== DEVICE_GRANT_PROTOCOL || envelope.requestId !== request.requestId) return;
       try {
         const grant = openDeviceGrant(identity, envelope, { purpose: 'enrollment' });
-        logger.debug?.(`Encrypted device approval received from ${remote.address}`);
+        logger.debug?.(`Encrypted device approval received through ${source}`);
         finish(null, { request, grant });
       } catch (error) {
-        logger.debug?.(`Ignored invalid LAN approval: ${error.message}`);
+        logger.debug?.(`Ignored invalid device approval: ${error.message}`);
       }
+    };
+    socket.on('message', (data, remote) => {
+      accept(decodeMessage(data), `LAN ${remote.address}`);
+    });
+    meshSessionPromise = startDeviceApprovalRequester(identity, request, {
+      logger,
+      onGrant: (envelope) => accept(envelope, 'PeerPigeon mesh'),
+    }).catch((error) => {
+      logger.debug?.(`PeerPigeon device approval discovery: ${error.message}`);
+      return null;
     });
     socket.on('error', (error) => finish(error));
-    timeout = setTimeout(() => finish(new Error('No approved GitPigeon browser authorized this device before the LAN request expired')), Math.max(1, deadline - Date.now()));
+    timeout = setTimeout(() => finish(new Error('No approved GitPigeon browser authorized this device before the request expired')), Math.max(1, deadline - Date.now()));
   });
   const advertise = () => send(socket, request, LAN_MULTICAST_PORT, LAN_MULTICAST_ADDRESS)
     .catch((error) => logger.debug?.(`LAN enrollment advertisement: ${error.message}`));

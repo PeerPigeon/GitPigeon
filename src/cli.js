@@ -11,6 +11,7 @@ import {
   listGitPigeonWatcherPids,
   startWatchService,
   stopWatchService,
+  waitForWatchServiceRepository,
   watchServiceStatus,
 } from './daemon.js';
 import { GitRepository } from './git.js';
@@ -145,10 +146,9 @@ function repositorySessionSignature(config) {
   });
 }
 
-async function prepareRepositorySession(entry, indexRoot) {
+async function prepareRepositorySession(entry) {
   const repository = await GitRepository.discover(entry.repository);
   const config = await loadConfig(repository.gitDir);
-  await registerMachinePigeon(repository, config, { root: indexRoot, pid: process.pid });
   return { repository, config, signature: repositorySessionSignature(config) };
 }
 
@@ -235,12 +235,23 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   process.once('SIGTERM', stop);
 
   const sessions = new Map();
+  const repositoryErrors = new Map();
   let control;
   let machineIndex;
   let lanApprovals;
   let lastApprovalBrowserOpen = 0;
   let reconciliationTimer;
   let reconciling = false;
+
+  const publishServiceRepositoryState = async () => {
+    if (!control) return;
+    await control.setRepositoryState(
+      [...sessions.entries()]
+        .filter(([, record]) => record.session && !record.cancelled)
+        .map(([repositoryRoot]) => repositoryRoot),
+      Object.fromEntries(repositoryErrors),
+    );
+  };
 
   const stopSession = async (record) => {
     record.cancelled = true;
@@ -258,8 +269,10 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     if (existing?.signature === desiredSignature && !existing.cancelled) return;
     let prepared;
     try {
-      prepared = await prepareRepositorySession(entry, root);
+      prepared = await prepareRepositorySession(entry);
     } catch (error) {
+      repositoryErrors.set(entry.repository, error.message);
+      await publishServiceRepositoryState();
       log.error(new Error(`Could not watch ${entry.repository}: ${error.message}`));
       return;
     }
@@ -268,22 +281,33 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       await stopSession(existing);
     }
     const record = {
+      prepared,
       signature: prepared.signature,
       cancelled: false,
       session: null,
       opening: null,
     };
     sessions.set(entry.repository, record);
+    repositoryErrors.delete(entry.repository);
+    await publishServiceRepositoryState();
     record.opening = openRepositorySession(prepared, pollMs, log, serviceInstanceId, machineIndexId)
       .then(async (session) => {
         record.session = session;
-        if (record.cancelled) await session.close();
+        if (record.cancelled) {
+          await session.close();
+        } else {
+          await registerMachinePigeon(prepared.repository, prepared.config, { root, pid: process.pid });
+          repositoryErrors.delete(entry.repository);
+        }
+        await publishServiceRepositoryState();
         return session;
       })
       .catch(async (error) => {
+        repositoryErrors.set(entry.repository, error.message);
         log.error(new Error(`Watcher failed for ${entry.repository}: ${error.message}`));
         if (sessions.get(entry.repository) === record) sessions.delete(entry.repository);
         await markMachinePigeonStopped(prepared.repository, { root, pid: process.pid });
+        await publishServiceRepositoryState();
         return null;
       });
   };
@@ -297,9 +321,11 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       for (const [repositoryRoot, record] of sessions) {
         if (desired.has(repositoryRoot)) continue;
         sessions.delete(repositoryRoot);
+        repositoryErrors.delete(repositoryRoot);
         await stopSession(record);
       }
       for (const entry of entries) await launchSession(entry);
+      await publishServiceRepositoryState();
     } catch (error) {
       log.error(error);
     } finally {
@@ -391,12 +417,11 @@ async function commandInit(args, cwd, verbose) {
   const workspace = new WorkspaceFiles(repository);
   await workspace.init();
   const indexRoot = machineIndexRoot();
-  const currentService = await watchServiceStatus(indexRoot);
   const wasRegistered = (await listMachinePigeons({ root: indexRoot, activeOnly: false }))
     .some((entry) => entry.repository === repository.root);
   await registerMachinePigeon(repository, config, {
     root: indexRoot,
-    pid: currentService.running ? currentService.pid : null,
+    pid: null,
   });
   const pairing = await claimDashboardPairing();
   if (pairing) {
@@ -405,6 +430,7 @@ async function commandInit(args, cwd, verbose) {
     await stopWatchService(indexRoot);
   }
   const watcher = await startIndexedWatchService({ verbose });
+  await waitForWatchServiceRepository(indexRoot, repository.root);
   if (pairing) {
     await runDashboardPairing(pairing, verbose);
   }
@@ -466,7 +492,7 @@ async function commandEnroll(args, verbose) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const root = machineIndexRoot();
   const identity = await loadOrCreateNativeDeviceIdentity({ root });
-  console.log('Looking for an approved GitPigeon browser on this LAN…');
+  console.log('Looking for an approved GitPigeon browser on the PeerPigeon mesh…');
   const { request, grant } = await requestLanDeviceApproval(identity, {
     logger: logger(verbose),
     onRequest: (value) => {
@@ -597,14 +623,14 @@ async function commandWatch(args, cwd, verbose) {
 
   const { repository, config } = await configuredRepository(cwd);
   const root = machineIndexRoot();
-  const current = await watchServiceStatus(root);
   const wasRegistered = (await listMachinePigeons({ root, activeOnly: false }))
     .some((entry) => entry.repository === repository.root);
   await registerMachinePigeon(repository, config, {
     root,
-    pid: current.running ? current.pid : null,
+    pid: null,
   });
   const result = await startWatchService({ root, pollMs, verbose });
+  await waitForWatchServiceRepository(root, repository.root);
   console.log(result.started
     ? 'GitPigeon started the machine-wide background service and is now watching this repository.'
     : wasRegistered

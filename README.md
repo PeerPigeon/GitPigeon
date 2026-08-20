@@ -50,14 +50,15 @@ download the native installer from the
 [`GitPigeon releases`](https://github.com/PeerPigeon/GitPigeon/releases) page.
 All three paths expose GitPigeon as the ordinary `git pigeon` subcommand.
 
-On a new device, the installer broadcasts a short-lived approval request only
-to the local LAN. An already-approved browser displays the device name and
-operating system in a confirmation modal. After approval, the browser encrypts
-the Pigeon-index capability directly to the new device's public key. The
-existing watcher forwards that ciphertext but cannot decrypt it. The new
-device then opens its own browser and completes enrollment automatically—there
-is no code, invite URL, secret copying, localhost bridge, or shared relay
-requirement.
+On a new device, the installer broadcasts a short-lived approval request on a
+dedicated PeerPigeon discovery mesh. Every already-approved browser listens for
+these requests directly and displays the device name and operating system in a
+confirmation modal—even when no native watcher is connected to that browser.
+After approval, the browser encrypts the Pigeon-index capability to the new
+device's public key and sends it directly to that native peer. The new device
+then opens its own browser and completes enrollment automatically—there is no
+code, invite URL, secret copying, localhost bridge, watcher bridge, or manually
+selected signaling server.
 
 Installing from source remains available for contributors:
 
@@ -78,7 +79,7 @@ locked revisions.
 
 The contributor install exposes the same `git-pigeon` executable. Run
 `git pigeon install` afterward to register the native URL handler; a fresh
-device also begins LAN approval automatically.
+device also begins PeerPigeon approval discovery automatically.
 
 ## Start a repository
 
@@ -201,13 +202,14 @@ browser. Clone buttons therefore send only a short-lived encrypted capability
 to the installed native handler. The private device key remains in the
 per-user GitPigeon state directory and is never sent to the browser.
 
-For a newly installed device, LAN discovery uses multicast only to announce a
-short-lived public key and device description. The existing native watcher
-publishes that request into the already-encrypted PeerPigeon index, where an
-approved browser can authorize it. Approval ciphertext returns through the
-same encrypted index and LAN forwarder. Repository synchronization and
-cross-relay recovery continue to use PeerPigeon and FreeRTC; the LAN path is
-only the local trust prompt.
+For a newly installed device, approval discovery uses a separate public
+PeerPigeon room only to announce a short-lived public key and device
+description. The permanent index capability never enters that room in
+plaintext: an approved browser encrypts it specifically to the requesting
+device and returns the ciphertext with PeerPigeon's routed direct messaging.
+FreeRTC performs automatic signaling discovery and federation. LAN multicast
+and the encrypted index forwarder remain as a compatibility fallback for older
+installations, but neither is required for the browser modal or approval.
 
 Pair another browser with a fresh one-time session, or deliberately rotate the
 machine-index secret and invalidate every previously paired browser:
@@ -281,8 +283,8 @@ override that disables private syncing and removes the Git exclusion.
 | Command | Purpose |
 | --- | --- |
 | `git pigeon init [INVITE] [DIR]` | Create or join a Pigeon and start background syncing. |
-| `git pigeon install` | Install the subcommand and OS URL handler; enroll a fresh device through LAN approval. |
-| `git pigeon enroll` | Request approval for this native device from an already-approved browser on the LAN. |
+| `git pigeon install` | Install the subcommand and OS URL handler; enroll a fresh device through direct PeerPigeon browser approval. |
+| `git pigeon enroll` | Request approval for this native device from an already-approved browser on the PeerPigeon mesh. |
 | `git pigeon list` | List every persistent indexed repository and whether the service is watching it. |
 | `git pigeon pair` | Securely approve another browser with a two-minute six-digit enrollment. |
 | `git pigeon pair --rotate` | Rotate the machine-index secret and invalidate earlier browser capabilities. |
@@ -295,7 +297,7 @@ override that disables private syncing and removes the Git exclusion.
 | `git pigeon untrack FILE...` | Stop private tracking on this device. |
 | `git pigeon tracked` | List private workspace files. |
 | `git pigeon sync` | Publish, wait briefly for peers, retrieve, and exit. |
-| `git pigeon watch` | Register the current repository and ensure the one background service is running. |
+| `git pigeon watch` | Register the current repository, replace a stale service build, and return only after the one background service acknowledges the repository session. |
 | `git pigeon status` | Show local identity and cached sync state without joining the network. |
 | `git pigeon doctor` | Check Node, Git, and the PeerPigeon dependency. |
 

@@ -10,6 +10,7 @@ import {
   startWatchService,
   stopWatchService,
   watcherPidsFromProcessRows,
+  waitForWatchServiceRepository,
   watchServiceStatus,
 } from '../src/daemon.js';
 
@@ -49,7 +50,12 @@ test('service control reports status and stops through its authenticated heartbe
 
   const status = await watchServiceStatus(root);
   assert.equal(status.running, true);
+  assert.equal(status.compatible, true);
   assert.equal(status.pid, process.pid);
+  const repository = path.join(root, 'repository');
+  const pending = waitForWatchServiceRepository(root, repository);
+  await control.setRepositoryState([repository]);
+  assert.equal((await pending).activeRepositories[0], repository);
   assert.deepEqual(await stopWatchService(root), { stopped: true });
   assert.equal(closeError, undefined);
   assert.equal((await watchServiceStatus(root)).running, false);

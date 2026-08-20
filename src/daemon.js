@@ -15,6 +15,7 @@ const ENTRYPOINT = STANDALONE
 const START_TIMEOUT_MS = 20_000;
 const HEARTBEAT_STALE_MS = 10_000;
 const START_LOCK_STALE_MS = 30_000;
+export const SERVICE_PROTOCOL_VERSION = 2;
 const execFileAsync = promisify(execFile);
 
 function sleep(ms) {
@@ -135,9 +136,30 @@ export async function watchServiceStatus(root) {
   const state = await readWatchServiceState(root);
   if (!state) return { running: false };
   if (processIsRunning(state.pid) && Date.now() - Date.parse(state.heartbeatAt) <= HEARTBEAT_STALE_MS) {
-    return { running: true, ...state };
+    return {
+      running: true,
+      compatible: state.serviceProtocol === SERVICE_PROTOCOL_VERSION,
+      ...state,
+    };
   }
   return { running: false, stale: true, ...state };
+}
+
+export async function waitForWatchServiceRepository(root, repository, {
+  timeoutMs = START_TIMEOUT_MS,
+} = {}) {
+  const target = path.resolve(repository);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const status = await watchServiceStatus(root);
+    if (!status.running) throw new Error('The GitPigeon watcher service stopped before it loaded this repository');
+    if (!status.compatible) throw new Error('The running GitPigeon watcher service is from an incompatible build');
+    if (status.activeRepositories?.includes(target)) return status;
+    const failure = status.repositoryErrors?.[target];
+    if (failure) throw new Error(`GitPigeon could not watch ${target}: ${failure}`);
+    await sleep(50);
+  }
+  throw new Error(`The GitPigeon watcher service did not load ${target} within ${timeoutMs}ms`);
 }
 
 async function terminateWatcherPids(pids) {
@@ -165,12 +187,15 @@ export async function startWatchService({
   if (!root) throw new Error('GitPigeon service state root is required');
   return await withServiceStartLock(root, async () => {
     const current = await watchServiceStatus(root);
-    if (current.running) return { started: false, ...current };
+    if (current.running && current.compatible) return { started: false, ...current };
 
     // Replace every legacy per-repository watcher before creating the one
     // machine service. The startup lock prevents two callers from spawning it.
     const legacyPids = await findWatcherPids();
-    await terminateWatcherPids(legacyPids);
+    await terminateWatcherPids([
+      ...(Number.isSafeInteger(current.pid) ? [current.pid] : []),
+      ...legacyPids,
+    ]);
     const service = servicePaths(root);
     await rm(service.state, { force: true });
     await rm(service.command, { force: true });
@@ -254,12 +279,15 @@ export async function createWatchServiceControl(root, token, stop) {
   let stopping = false;
   const state = {
     version: 1,
+    serviceProtocol: SERVICE_PROTOCOL_VERSION,
     pid: process.pid,
     token,
     ready: false,
     startedAt: new Date().toISOString(),
     heartbeatAt: new Date().toISOString(),
     logFile: service.log,
+    activeRepositories: [],
+    repositoryErrors: {},
   };
   await writeState(service.state, state);
   const poll = async () => {
@@ -284,11 +312,26 @@ export async function createWatchServiceControl(root, token, stop) {
     }
   };
   const timer = setInterval(() => { poll().catch(() => {}); }, 250);
+  const updateState = async (change) => {
+    while (working) await sleep(10);
+    working = true;
+    try {
+      Object.assign(state, change);
+      state.heartbeatAt = new Date().toISOString();
+      await writeState(service.state, state);
+    } finally {
+      working = false;
+    }
+  };
   return {
     async ready() {
-      while (working) await sleep(10);
-      state.ready = true;
-      await writeState(service.state, state);
+      await updateState({ ready: true });
+    },
+    async setRepositoryState(activeRepositories, repositoryErrors = {}) {
+      await updateState({
+        activeRepositories: [...new Set(activeRepositories.map((repository) => path.resolve(repository)))].sort(),
+        repositoryErrors,
+      });
     },
     async close() {
       if (closed) return;
