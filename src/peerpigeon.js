@@ -1,4 +1,4 @@
-import { NETWORK_ID, storagePrefix } from './constants.js';
+import { NETWORK_ID, repositoryRoomTopology, storagePrefix } from './constants.js';
 import { productionSignalingServers } from './relay-policy.js';
 import { installNativeWebRTC } from './webrtc.js';
 
@@ -38,11 +38,10 @@ export async function connectPeerPigeon(config, logger = {}) {
     crypto: false,
     networkId: NETWORK_ID,
     sessionId: config.repositoryId,
-    minPeers: 1,
-    // Repository rooms are intentionally close to a full mesh at normal
-    // GitPigeon scale. This keeps the native watcher connected even when
-    // several browser tabs are also present in the same room.
-    maxPeers: 32,
+    // Keep small repository rooms fully meshed. A minimum of one makes every
+    // browser stop dialing as soon as it reaches this watcher, producing a
+    // star in which browsers cannot see one another.
+    ...repositoryRoomTopology(),
     tolerantPeers: 0,
     autoDiscover: true,
     autoConnect: true,
