@@ -386,9 +386,9 @@ async function connectMachineDirectory(index, logger = {}, {
   node.mesh.on('signaling:disconnected', () => logger.debug?.(`[${roomLabel}] signaling disconnected`));
   node.mesh.on('signaling:log', ({ message } = {}) => logger.debug?.(`[${roomLabel}] ${message}`));
   node.mesh.on('peer:discovered', (peerId) => logger.debug?.(`[${roomLabel}] discovered ${String(peerId).slice(0, 12)}`));
-  let lastRecoveryAt = 0;
+  let lastRecoveryAt = Date.now();
   const recover = (reason) => {
-    if (node.getConnectedPeers().length > 0 || Date.now() - lastRecoveryAt < 5_000) return;
+    if (node.getConnectedPeers().length > 0 || Date.now() - lastRecoveryAt < 20_000) return;
     lastRecoveryAt = Date.now();
     logger.debug?.(`[${roomLabel}] recovery: ${node.getDiscoveredPeers().length} discovered, ${node.getActiveSignalingPeers().length} active on relay`);
     node.recoverAfterInactivity(reason);
@@ -473,7 +473,6 @@ async function connectMachineDirectory(index, logger = {}, {
     await node.destroy();
     throw new Error('PeerPigeon index storage did not initialize');
   }
-  recover('GitPigeon native initial federated index discovery');
   node.storage.subscribeKey('public', directoryKey(index.indexId));
   ready = true;
   if (node.getConnectedPeers().length > 0) {
