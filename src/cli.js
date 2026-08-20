@@ -12,6 +12,7 @@ import {
   startWatchService,
   stopWatchService,
   waitForWatchServiceRepository,
+  watchServiceHasRepository,
   watchServiceStatus,
 } from './daemon.js';
 import { GitRepository } from './git.js';
@@ -266,7 +267,20 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   const launchSession = async (entry) => {
     const existing = sessions.get(entry.repository);
     const desiredSignature = repositorySessionSignature(entry);
-    if (existing?.signature === desiredSignature && !existing.cancelled) return;
+    if (existing?.signature === desiredSignature && !existing.cancelled) {
+      // `git pigeon watch` refreshes the durable registration with a null PID
+      // before asking this service to load it. If this session is already open,
+      // restore the service PID instead of leaving the index/browser view stale.
+      if (existing.session && entry.pid !== process.pid) {
+        await registerMachinePigeon(existing.prepared.repository, existing.prepared.config, {
+          root,
+          pid: process.pid,
+        });
+        repositoryErrors.delete(entry.repository);
+        await publishServiceRepositoryState();
+      }
+      return;
+    }
     let prepared;
     try {
       prepared = await prepareRepositorySession(entry);
@@ -677,7 +691,7 @@ async function commandList(args) {
   const nameWidth = Math.max('NAME'.length, ...repositories.map(({ name }) => name.length));
   console.log(`${'NAME'.padEnd(nameWidth)}  PIGEON      STATUS   PATH`);
   for (const repository of repositories) {
-    const active = service.running && repository.registrations.some(({ pid }) => pid === service.pid);
+    const active = watchServiceHasRepository(service, repository.root);
     console.log(`${repository.name.padEnd(nameWidth)}  ${repository.repositoryId.slice(0, 10)}  ${(active ? 'watching' : 'stopped').padEnd(8)} ${repository.root}`);
   }
 }
@@ -825,10 +839,7 @@ async function commandStatus(args, cwd) {
   const trackedFiles = await new WorkspaceFiles(repository, cache).list();
   const state = await cache.loadState();
   const watcher = await watchServiceStatus(machineIndexRoot());
-  const registrations = await listMachinePigeons({ activeOnly: false });
-  const registered = registrations.some((entry) => (
-    entry.repository === repository.root && entry.pid === watcher.pid
-  ));
+  const registered = watchServiceHasRepository(watcher, repository.root);
   const value = {
     repository: repository.root,
     repositoryId: config.repositoryId,

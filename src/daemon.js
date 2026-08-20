@@ -145,6 +145,14 @@ export async function watchServiceStatus(root) {
   return { running: false, stale: true, ...state };
 }
 
+export function watchServiceHasRepository(status, repository) {
+  return Boolean(
+    status?.running
+    && status.compatible
+    && status.activeRepositories?.includes(path.resolve(repository)),
+  );
+}
+
 export async function waitForWatchServiceRepository(root, repository, {
   timeoutMs = START_TIMEOUT_MS,
 } = {}) {
@@ -154,7 +162,7 @@ export async function waitForWatchServiceRepository(root, repository, {
     const status = await watchServiceStatus(root);
     if (!status.running) throw new Error('The GitPigeon watcher service stopped before it loaded this repository');
     if (!status.compatible) throw new Error('The running GitPigeon watcher service is from an incompatible build');
-    if (status.activeRepositories?.includes(target)) return status;
+    if (watchServiceHasRepository(status, target)) return status;
     const failure = status.repositoryErrors?.[target];
     if (failure) throw new Error(`GitPigeon could not watch ${target}: ${failure}`);
     await sleep(50);
