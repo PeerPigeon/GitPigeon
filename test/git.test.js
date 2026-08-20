@@ -12,6 +12,7 @@ test('imports a bundle into native remote refs and fast-forwards an empty checko
   const target = await createRepository(path.join(root, 'target'));
   const bundle = await source.createBundle();
   t.after(bundle.dispose);
+  assert.ok(bundle.packIndex.length > 0);
   const filename = path.join(root, 'snapshot.bundle');
   await writeFile(filename, bundle.data);
 

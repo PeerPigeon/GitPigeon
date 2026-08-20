@@ -85,9 +85,31 @@ export class RepositorySynchronizer {
     this.machineIndexId = MACHINE_INDEX.test(String(machineIndexId ?? '')) ? String(machineIndexId) : null;
     this.streamTransport = streamTransport;
     this.snapshotStream = streamTransport
-      ? new SnapshotStreamServer({ mesh: streamTransport, cache, secret: config.secret, logger })
+      ? new SnapshotStreamServer({
+        mesh: streamTransport,
+        cache,
+        secret: config.secret,
+        logger,
+        getMetadata: async () => {
+          const head = this.state?.heads?.[config.deviceId];
+          if (!head?.snapshotId) return null;
+          const manifest = await cache.readManifest(head.snapshotId);
+          if (!manifest) return null;
+          return {
+            protocol: PROTOCOL,
+            repositoryId: config.repositoryId,
+            repositoryName: path.basename(repository.root).slice(0, 200),
+            serviceInstanceId: this.serviceInstanceId,
+            machineIndexId: this.machineIndexId,
+            head,
+            manifest,
+          };
+        },
+      })
       : null;
     this.presenceTimer = null;
+    this.lastPresenceBucket = null;
+    this.lastPresenceIdentity = null;
     this.availableSnapshots = new Set();
     this.logger = {
       info: logger.info ?? noop,
@@ -193,22 +215,24 @@ export class RepositorySynchronizer {
       ? this.#validateManifest(await this.cache.readManifest(previous.snapshotId), previous.snapshotId)
       : null;
     const previousTransportCompatible = previousManifest && this.#manifestFitsChunkSize(previousManifest);
-    if (!force && previous?.contentDigest === currentContentDigest && previousTransportCompatible) return previous;
+    if (!force && previous?.contentDigest === currentContentDigest && previousTransportCompatible && previousManifest.packIndex) return previous;
 
     let bundle = null;
     try {
-      const cachedManifest = previous?.refsDigest === refsDigest && previousTransportCompatible
+      const cachedManifest = previous?.refsDigest === refsDigest && previousTransportCompatible && previousManifest.packIndex
         ? previousManifest
         : null;
       let bundleSize;
       let bundleSha256;
       let chunks;
       let refs;
+      let packIndex;
       if (cachedManifest) {
         bundleSize = cachedManifest.bundleSize;
         bundleSha256 = cachedManifest.bundleSha256;
         chunks = cachedManifest.chunks;
         refs = cachedManifest.refs;
+        packIndex = cachedManifest.packIndex;
       } else {
         bundle = await this.repository.createBundle();
         const bundleData = bundle?.data ?? Buffer.alloc(0);
@@ -216,6 +240,13 @@ export class RepositorySynchronizer {
         bundleSha256 = bundle ? digest(bundleData) : null;
         chunks = await this.#cacheChunks(bundleData);
         refs = bundle?.refs ?? [];
+        const indexData = bundle?.packIndex ?? null;
+        packIndex = indexData ? {
+          encoding: 'base64',
+          size: indexData.length,
+          sha256: digest(indexData),
+          data: indexData.toString('base64'),
+        } : null;
       }
       const files = [];
       for (const file of workspace.files) {
@@ -249,6 +280,7 @@ export class RepositorySynchronizer {
         transportChunkSize: this.chunkSize,
         bundleSize,
         bundleSha256,
+        packIndex,
         refsDigest,
         refs,
         chunks,
@@ -678,6 +710,18 @@ export class RepositorySynchronizer {
   async #publishPresence() {
     const head = this.#validateHead(this.state.heads[this.config.deviceId]);
     if (!head || !this.availableSnapshots.has(head.snapshotId)) return null;
+    const peerId = DEVICE.test(String(this.streamTransport?.getClientId?.() ?? ''))
+      ? this.streamTransport.getClientId()
+      : null;
+    const identity = JSON.stringify({
+      snapshotId: head.snapshotId,
+      peerId,
+      serviceInstanceId: this.serviceInstanceId,
+      machineIndexId: this.machineIndexId,
+    });
+    const bucket = Math.floor(Date.now() / REPOSITORY_PRESENCE_BUCKET_MS);
+    const identityChanged = identity !== this.lastPresenceIdentity;
+    if (!identityChanged && bucket === this.lastPresenceBucket) return null;
     const value = {
       protocol: PROTOCOL,
       repositoryId: this.config.repositoryId,
@@ -685,9 +729,7 @@ export class RepositorySynchronizer {
       name: path.basename(this.repository.root).slice(0, 200),
       snapshotId: head.snapshotId,
       serviceInstanceId: this.serviceInstanceId,
-      ...(DEVICE.test(String(this.streamTransport?.getClientId?.() ?? ''))
-        ? { peerId: this.streamTransport.getClientId() }
-        : {}),
+      ...(peerId ? { peerId } : {}),
       ...(this.machineIndexId ? { machineIndexId: this.machineIndexId } : {}),
       updatedAt: new Date().toISOString(),
     };
@@ -695,17 +737,20 @@ export class RepositorySynchronizer {
     // mutable-record versions retained by browsers across native restarts.
     // Publish the bucket first; the legacy mutable key remains for clients
     // that have not reloaded the newer browser application yet.
-    const bucket = Math.floor(Date.now() / REPOSITORY_PRESENCE_BUCKET_MS);
     const lease = await this.#put(
       'public',
       presenceLeaseKey(this.config.repositoryId, this.config.deviceId, bucket),
       value,
     );
-    await this.#put(
-      'public',
-      presenceKey(this.config.repositoryId, this.config.deviceId),
-      value,
-    );
+    if (identityChanged) {
+      await this.#put(
+        'public',
+        presenceKey(this.config.repositoryId, this.config.deviceId),
+        value,
+      );
+    }
+    this.lastPresenceBucket = bucket;
+    this.lastPresenceIdentity = identity;
     return lease;
   }
 
@@ -797,6 +842,16 @@ export class RepositorySynchronizer {
       : String(value.snapshotId);
     if ((value.bundleSize === 0) !== (bundleSha256 === null)) return null;
     if (bundleSha256 !== null && !DIGEST.test(bundleSha256)) return null;
+    let packIndex = null;
+    if (value.packIndex != null) {
+      const encoded = String(value.packIndex.data ?? '');
+      const indexData = Buffer.from(encoded, 'base64');
+      const indexSize = Number(value.packIndex.size);
+      const indexDigest = String(value.packIndex.sha256 ?? '');
+      if (value.packIndex.encoding !== 'base64' || !Number.isSafeInteger(indexSize) || indexSize < 1
+        || !DIGEST.test(indexDigest) || indexData.length !== indexSize || digest(indexData) !== indexDigest) return null;
+      packIndex = { encoding: 'base64', size: indexSize, sha256: indexDigest, data: encoded };
+    }
     if (value.bundleSize > 0 && refsDigest === null) return null;
     if (value.bundleSize === 0 && chunks.length > 0) return null;
     if (value.bundleSize > 0 && chunks.length === 0) return null;
@@ -897,6 +952,7 @@ export class RepositorySynchronizer {
       ...value,
       refsDigest,
       bundleSha256,
+      packIndex,
       workspaceDigest: filesDigest,
       chunks,
       files,

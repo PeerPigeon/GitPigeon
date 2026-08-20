@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -155,8 +155,18 @@ export class GitRepository {
     try {
       await this.git(['bundle', 'create', filename, '--branches', '--tags']);
       await this.git(['bundle', 'verify', filename]);
+      const data = await readFile(filename);
+      const boundary = data.indexOf(Buffer.from('\n\n'));
+      if (boundary < 0 || !data.subarray(boundary + 2, boundary + 6).equals(Buffer.from('PACK'))) {
+        throw new Error('Git produced a bundle without a readable packfile');
+      }
+      const packFilename = path.join(directory, 'repository.pack');
+      const indexFilename = path.join(directory, 'repository.idx');
+      await writeFile(packFilename, data.subarray(boundary + 2));
+      await this.git(['index-pack', '--index-version=2', '-o', indexFilename, packFilename]);
       return {
-        data: await readFile(filename),
+        data,
+        packIndex: await readFile(indexFilename),
         refs,
         dispose: async () => await rm(directory, { recursive: true, force: true }),
       };

@@ -23,6 +23,32 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function repositorySnapshotHint(entry, serviceInstanceId, machineIndexId) {
+  try {
+    const root = path.join(entry.repository, '.git', 'gitpigeon');
+    const state = JSON.parse(await readFile(path.join(root, 'state.json'), 'utf8'));
+    const head = state?.heads?.[entry.deviceId];
+    if (!head || head.repositoryId !== entry.repositoryId || head.deviceId !== entry.deviceId
+      || !/^[a-f0-9]{64}$/.test(String(head.snapshotId ?? ''))) return null;
+    const manifest = JSON.parse(await readFile(path.join(root, 'manifests', `${head.snapshotId}.json`), 'utf8'));
+    if (manifest?.protocol !== 'gitpigeon/1' || manifest.repositoryId !== entry.repositoryId
+      || manifest.snapshotId !== head.snapshotId || manifest.deviceId !== entry.deviceId) return null;
+    return {
+      devices: [entry.deviceId],
+      heads: [head],
+      manifests: [manifest],
+      selectedHead: head,
+      selectedManifest: manifest,
+      repositoryName: entry.name,
+      serviceInstanceIds: serviceInstanceId ? [serviceInstanceId] : [],
+      serviceInstances: serviceInstanceId ? [{ serviceInstanceId, machineIndexId }] : [],
+      browserInstanceIds: [],
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function machineIndexRoot(environment = process.env, platform = process.platform) {
   if (environment.GITPIGEON_STATE_DIR) return path.resolve(environment.GITPIGEON_STATE_DIR);
   if (platform === 'win32') {
@@ -255,9 +281,11 @@ export function directoryValue(index, entries, now = Date.now(), serviceInstance
         watcherCount: active,
         ...(active && serviceInstanceId ? { watcherServiceId: serviceInstanceId } : {}),
         ...(entry.signalingServer ? { signalingServer: entry.signalingServer } : {}),
+        ...(entry.snapshot ? { snapshot: entry.snapshot } : {}),
       });
     } else {
       current.watcherCount += active;
+      if (!current.snapshot && entry.snapshot) current.snapshot = entry.snapshot;
     }
   }
   return {
@@ -358,9 +386,9 @@ async function connectMachineDirectory(index, logger = {}, {
   node.mesh.on('signaling:disconnected', () => logger.debug?.(`[${roomLabel}] signaling disconnected`));
   node.mesh.on('signaling:log', ({ message } = {}) => logger.debug?.(`[${roomLabel}] ${message}`));
   node.mesh.on('peer:discovered', (peerId) => logger.debug?.(`[${roomLabel}] discovered ${String(peerId).slice(0, 12)}`));
-  let lastRecoveryAt = Date.now();
+  let lastRecoveryAt = 0;
   const recover = (reason) => {
-    if (node.getConnectedPeers().length > 0 || Date.now() - lastRecoveryAt < 20_000) return;
+    if (node.getConnectedPeers().length > 0 || Date.now() - lastRecoveryAt < 5_000) return;
     lastRecoveryAt = Date.now();
     logger.debug?.(`[${roomLabel}] recovery: ${node.getDiscoveredPeers().length} discovered, ${node.getActiveSignalingPeers().length} active on relay`);
     node.recoverAfterInactivity(reason);
@@ -373,6 +401,8 @@ async function connectMachineDirectory(index, logger = {}, {
   let ready = false;
   let needsReconcile = true;
   let publishQueue = Promise.resolve();
+  let lastDirectoryFingerprint = null;
+  let lastLiveBucket = null;
   const publish = ({ reconcile = false } = {}) => {
     const operation = publishQueue.then(async () => {
       if (closed || !ready) return;
@@ -394,33 +424,44 @@ async function connectMachineDirectory(index, logger = {}, {
         needsReconcile = false;
       }
       const current = await loadMachineIndex({ root });
-      const value = directoryValue(current, current.entries, Date.now(), serviceInstanceId);
-      const record = await storage.put(
-        'public',
-        directoryKey(current.indexId),
-        value,
-      );
+      const entries = await Promise.all(current.entries.map(async (entry) => ({
+        ...entry,
+        snapshot: await repositorySnapshotHint(entry, serviceInstanceId, current.indexId),
+      })));
+      const value = directoryValue(current, entries, Date.now(), serviceInstanceId);
+      const fingerprint = JSON.stringify(value.pigeons);
+      const directoryChanged = fingerprint !== lastDirectoryFingerprint;
+      let record = null;
+      if (directoryChanged) {
+        record = await storage.put(
+          'public',
+          directoryKey(current.indexId),
+          value,
+        );
+        lastDirectoryFingerprint = fingerprint;
+        logger.debug?.(`Index directory published at version ${record?.version ?? 'unknown'} with ${current.entries.length} ${current.entries.length === 1 ? 'repository' : 'repositories'}`);
+      }
       if (serviceInstanceId) {
         const bucket = Math.floor(Date.now() / INDEX_PRESENCE_BUCKET_MS);
-        await storage.put('public', liveDirectoryKey(current.indexId, bucket), {
-          ...value,
-          kind: 'live-directory',
-          watcherServiceId: serviceInstanceId,
-        });
+        if (directoryChanged || bucket !== lastLiveBucket) {
+          await storage.put('public', liveDirectoryKey(current.indexId, bucket), {
+            ...value,
+            kind: 'live-directory',
+            watcherServiceId: serviceInstanceId,
+          });
+          lastLiveBucket = bucket;
+        }
       }
-      logger.debug?.(`Index directory published at version ${record?.version ?? 'unknown'} with ${current.entries.length} ${current.entries.length === 1 ? 'repository' : 'repositories'}`);
     });
     publishQueue = operation.catch(() => {});
     return operation;
   };
   node.on('peerConnected', (peerId) => {
-    needsReconcile = true;
     logger.debug?.(`[${roomLabel}] peer connected: ${peerId}`);
-    if (ready) publish({ reconcile: true }).catch((error) => logger.error?.(error));
+    if (ready) publish().catch((error) => logger.error?.(error));
   });
   node.on('peerDisconnected', (peerId) => {
     logger.debug?.(`[${roomLabel}] peer disconnected: ${peerId}`);
-    if (node.getConnectedPeers().length === 0) needsReconcile = true;
   });
   try {
     await node.start();
@@ -432,6 +473,7 @@ async function connectMachineDirectory(index, logger = {}, {
     await node.destroy();
     throw new Error('PeerPigeon index storage did not initialize');
   }
+  recover('GitPigeon native initial federated index discovery');
   node.storage.subscribeKey('public', directoryKey(index.indexId));
   ready = true;
   if (node.getConnectedPeers().length > 0) {

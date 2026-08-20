@@ -101,9 +101,13 @@ export class RepositoryCache {
   async writeManifest(manifest) {
     const filename = this.manifestPath(manifest.snapshotId);
     try {
-      await access(filename);
+      const current = JSON.parse(await readFile(filename, 'utf8'));
+      if (manifest.packIndex && !current?.packIndex) {
+        await this.#writeReplace(filename, Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`));
+      }
       return filename;
-    } catch {
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
       await this.#writeOnce(filename, Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`));
       return filename;
     }

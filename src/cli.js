@@ -111,6 +111,7 @@ async function openNetwork(repository, config, log, serviceInstanceId, machineIn
     serviceInstanceId,
     machineIndexId,
     streamTransport: runtime.node.mesh,
+    storageWritePauseMs: 0,
     // Browser peers retain PeerPigeon records in IndexedDB while the native
     // process starts with memory storage. Let every response merge before the
     // watcher advances mutable repository records.
@@ -166,7 +167,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   };
 
   const activate = async () => {
-    if (started || starting || stopped || runtime.node.getConnectedPeers().length === 0) return;
+    if (started || starting || stopped) return;
     starting = true;
     try {
       await synchronizer.start();
@@ -190,7 +191,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       }
     }, 250);
   });
-  if (runtime.node.getConnectedPeers().length > 0) activate().catch((error) => log.error(error));
+  activate().catch((error) => log.error(error));
   log.info(`Watching ${repository.root} as ${config.deviceId.slice(0, 8)}`);
 
   return {

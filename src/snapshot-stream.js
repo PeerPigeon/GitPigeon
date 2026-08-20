@@ -10,6 +10,8 @@ const TYPE_ACK = 3;
 const TYPE_END = 4;
 const TYPE_ERROR = 5;
 const TYPE_CANCEL = 6;
+const TYPE_METADATA_REQUEST = 7;
+const TYPE_METADATA = 8;
 const SEND_WINDOW = 32;
 const DIGEST = /^[a-f0-9]{64}$/;
 
@@ -50,7 +52,7 @@ function decodeFrame(key, value) {
   if (!frame.subarray(0, MAGIC.length).equals(MAGIC)) return null;
   const header = frame.subarray(0, HEADER_SIZE);
   const type = header[MAGIC.length];
-  if (![TYPE_REQUEST, TYPE_DATA, TYPE_ACK, TYPE_END, TYPE_ERROR, TYPE_CANCEL].includes(type)) return null;
+  if (![TYPE_REQUEST, TYPE_DATA, TYPE_ACK, TYPE_END, TYPE_ERROR, TYPE_CANCEL, TYPE_METADATA_REQUEST, TYPE_METADATA].includes(type)) return null;
   const requestId = Buffer.from(header.subarray(MAGIC.length + 1, MAGIC.length + 17));
   const sequence = header.readUInt32BE(MAGIC.length + 17);
   const ivStart = HEADER_SIZE;
@@ -81,10 +83,11 @@ function parseRequest(frame) {
 }
 
 export class SnapshotStreamServer {
-  constructor({ mesh, cache, secret, logger = {} }) {
+  constructor({ mesh, cache, secret, getMetadata = null, logger = {} }) {
     this.mesh = mesh;
     this.cache = cache;
     this.key = streamKey(secret);
+    this.getMetadata = getMetadata;
     this.logger = logger;
     this.transfers = new Map();
     this.onData = ({ peerId, data }) => { this.#handle(peerId, data).catch((error) => logger.debug?.(error.message)); };
@@ -103,6 +106,19 @@ export class SnapshotStreamServer {
   async #handle(peerId, data) {
     const frame = decodeFrame(this.key, data);
     if (!frame) return;
+    if (frame.type === TYPE_METADATA_REQUEST) {
+      const metadata = await this.getMetadata?.();
+      if (metadata) {
+        this.#send(peerId, encodeFrame(
+          this.key,
+          TYPE_METADATA,
+          frame.requestId,
+          0,
+          Buffer.from(JSON.stringify(metadata)),
+        ));
+      }
+      return;
+    }
     const id = requestKey(peerId, frame.requestId);
     if (frame.type === TYPE_CANCEL) {
       const transfer = this.transfers.get(id);
@@ -214,6 +230,8 @@ export const snapshotStreamWire = {
   TYPE_END,
   TYPE_ERROR,
   TYPE_CANCEL,
+  TYPE_METADATA_REQUEST,
+  TYPE_METADATA,
   encodeFrame,
   decodeFrame,
   streamKey,
