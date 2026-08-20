@@ -223,7 +223,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
 async function runWatchService({ root, token, pollMs, verbose = false }) {
   const log = logger(verbose);
   const serviceInstanceId = randomBytes(16).toString('hex');
-  const machineIndexId = (await loadMachineIndex({ root })).indexId;
+  const machineIndexId = (await loadMachineIndex({ root })).publisherId;
   let resolveStop;
   const stopped = new Promise((resolve) => { resolveStop = resolve; });
   let stopping = false;
@@ -240,7 +240,6 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let control;
   let machineIndex;
   let lanApprovals;
-  let lastApprovalBrowserOpen = 0;
   let reconciliationTimer;
   let reconciling = false;
 
@@ -356,10 +355,6 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
         logger: log,
         onDeviceRequest: (request) => {
           log.info(`Approval requested by ${request.deviceName} on the local LAN`);
-          if (Date.now() - lastApprovalBrowserOpen >= 30_000) {
-            lastApprovalBrowserOpen = Date.now();
-            openDashboard(process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/');
-          }
         },
       });
       log.debug('LAN device approval listener is ready');

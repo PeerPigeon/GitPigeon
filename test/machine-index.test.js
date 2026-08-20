@@ -9,11 +9,15 @@ import {
   claimDashboardPairing,
   completeDashboardPairing,
   directoryValue,
+  indexPublishersKey,
   liveDirectoryKey,
   listMachinePigeons,
   loadMachineIndex,
   markMachinePigeonStopped,
   openDashboard,
+  publisherDirectoryKey,
+  publisherDirectoryValue,
+  publisherRosterValue,
   registerMachinePigeon,
   unregisterMachinePigeon,
 } from '../src/machine-index.js';
@@ -54,6 +58,22 @@ test('machine index securely groups active repositories for PeerPigeon publicati
     { repositoryId: 'beta-pigeon', secret: 'b'.repeat(64), name: 'beta', watcherCount: 1, watcherServiceId },
   ]);
   assert.equal(liveDirectoryKey(state.indexId, 340_000_000), `gitpigeon/index/v1/${state.indexId}/live/340000000`);
+  assert.equal(indexPublishersKey(state.indexId), `gitpigeon/index/v1/${state.indexId}/publishers`);
+  assert.equal(
+    publisherDirectoryKey(state.indexId, state.publisherId),
+    `gitpigeon/index/v1/${state.indexId}/publisher/${state.publisherId}`,
+  );
+  const roster = publisherRosterValue(state, {
+    protocol: 'gitpigeon-index/1',
+    kind: 'publishers',
+    indexId: state.indexId,
+    publishers: ['1'.repeat(32)],
+  }, 1_700_000_000_000);
+  assert.deepEqual(roster.publishers, ['1'.repeat(32), state.publisherId].sort());
+  const publisher = publisherDirectoryValue(state, active, 1_700_000_000_000, watcherServiceId);
+  assert.equal(publisher.kind, 'publisher-directory');
+  assert.equal(publisher.publisherId, state.publisherId);
+  assert.equal(publisher.serviceInstanceId, watcherServiceId);
 
   assert.equal((await unregisterMachinePigeon(firstRepository, { root: stateRoot })).removed, true);
   assert.deepEqual((await listMachinePigeons({ root: stateRoot })).map(({ repositoryId }) => repositoryId), ['beta-pigeon']);

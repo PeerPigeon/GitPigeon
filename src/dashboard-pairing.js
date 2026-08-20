@@ -138,6 +138,7 @@ export function encryptEnrollmentGrant(enrollment, accepted) {
     protocol: PAIRING_PROTOCOL,
     indexId: enrollment.index.indexId,
     secret: enrollment.index.secret,
+    publisherId: enrollment.index.publisherId,
     browserId: accepted.browserId,
     issuedAt: new Date().toISOString(),
   };

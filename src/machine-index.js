@@ -13,8 +13,9 @@ export const INDEX_HEARTBEAT_MS = 3_000;
 export const INDEX_STALE_MS = 12_000;
 export const INDEX_PRESENCE_BUCKET_MS = 5_000;
 
-const STATE_VERSION = 3;
+const STATE_VERSION = 4;
 const INDEX_ID = /^[a-f0-9]{32}$/;
+const PUBLISHER_ID = /^[a-f0-9]{32}$/;
 const SECRET = /^[a-zA-Z0-9_-]{32,256}$/;
 const DEVICE = /^[a-zA-Z0-9_-]{8,128}$/;
 const LOCK_STALE_MS = 10_000;
@@ -82,7 +83,7 @@ function validEntry(value) {
 }
 
 function validateState(value) {
-  if (!value || ![1, 2, STATE_VERSION].includes(value.version)
+  if (!value || ![1, 2, 3, STATE_VERSION].includes(value.version)
     || !INDEX_ID.test(String(value.indexId)) || !SECRET.test(String(value.secret))) {
     throw new Error('Invalid GitPigeon machine index');
   }
@@ -91,10 +92,13 @@ function validateState(value) {
     version: STATE_VERSION,
     indexId: String(value.indexId),
     secret: String(value.secret),
+    publisherId: PUBLISHER_ID.test(String(value.publisherId ?? ''))
+      ? String(value.publisherId)
+      : randomBytes(16).toString('hex'),
     // Version 2 recorded pairingLaunched before the browser acknowledged its
     // grant. It cannot prove enrollment completed, so migrate it to pending and
     // let the next `git pigeon init` retry without rotating the capability.
-    pairingComplete: value.version === STATE_VERSION && value.pairingComplete === true,
+    pairingComplete: value.version >= 3 && value.pairingComplete === true,
     pairingMode: value.version === 1 ? 'legacy' : value.pairingMode === 'secure' ? 'secure' : 'legacy',
     entries,
   };
@@ -105,6 +109,7 @@ function freshState() {
     version: STATE_VERSION,
     indexId: randomBytes(16).toString('hex'),
     secret: randomBytes(32).toString('base64url'),
+    publisherId: randomBytes(16).toString('hex'),
     pairingComplete: false,
     pairingMode: 'secure',
     entries: [],
@@ -292,6 +297,15 @@ export function liveDirectoryKey(indexId, bucket) {
   return `gitpigeon/index/v1/${indexId}/live/${bucket}`;
 }
 
+export function indexPublishersKey(indexId) {
+  return `gitpigeon/index/v1/${indexId}/publishers`;
+}
+
+export function publisherDirectoryKey(indexId, publisherId) {
+  if (!PUBLISHER_ID.test(String(publisherId))) throw new Error('Invalid GitPigeon publisher ID');
+  return `gitpigeon/index/v1/${indexId}/publisher/${publisherId}`;
+}
+
 export function directoryValue(index, entries, now = Date.now(), serviceInstanceId = null) {
   const grouped = new Map();
   for (const entry of entries) {
@@ -317,6 +331,34 @@ export function directoryValue(index, entries, now = Date.now(), serviceInstance
     indexId: index.indexId,
     updatedAt: new Date(now).toISOString(),
     pigeons: [...grouped.values()].sort((left, right) => left.name.localeCompare(right.name)),
+  };
+}
+
+export function publisherRosterValue(index, previous, now = Date.now()) {
+  const publishers = new Set(
+    previous?.protocol === INDEX_PROTOCOL
+      && previous?.kind === 'publishers'
+      && previous?.indexId === index.indexId
+      && Array.isArray(previous.publishers)
+      ? previous.publishers.filter((publisherId) => PUBLISHER_ID.test(String(publisherId)))
+      : [],
+  );
+  publishers.add(index.publisherId);
+  return {
+    protocol: INDEX_PROTOCOL,
+    kind: 'publishers',
+    indexId: index.indexId,
+    updatedAt: new Date(now).toISOString(),
+    publishers: [...publishers].sort(),
+  };
+}
+
+export function publisherDirectoryValue(index, entries, now = Date.now(), serviceInstanceId = null) {
+  return {
+    ...directoryValue(index, entries, now, serviceInstanceId),
+    kind: 'publisher-directory',
+    publisherId: index.publisherId,
+    ...(serviceInstanceId ? { serviceInstanceId } : {}),
   };
 }
 
@@ -396,7 +438,7 @@ async function connectMachineDirectory(index, logger = {}, {
     autoConnect: true,
     signalingServers: productionSignalingServers(DEFAULT_SIGNALING_SERVERS),
     storage: {
-      userId: `index-service-${index.indexId}`,
+      userId: `index-publisher-${index.publisherId}`,
       sessionId: `${INDEX_NETWORK_ID}:${index.indexId}`,
       syncSecret: index.secret,
       dbName: `gitpigeon-index-${index.indexId}`,
@@ -421,7 +463,8 @@ async function connectMachineDirectory(index, logger = {}, {
   let needsReconcile = true;
   let publishQueue = Promise.resolve();
   let lastDirectoryFingerprint = null;
-  let lastLiveBucket = null;
+  const rosterKey = indexPublishersKey(index.indexId);
+  const publisherKey = publisherDirectoryKey(index.indexId, index.publisherId);
   const publish = ({ reconcile = false } = {}) => {
     const operation = publishQueue.then(async () => {
       if (closed || !ready) return;
@@ -433,13 +476,16 @@ async function connectMachineDirectory(index, logger = {}, {
         // record across native process restarts. Import that higher version
         // before the first write or the browser will reject the live update as
         // stale. This must run only after PeerPigeonStorage.init() completes.
-        const retrieved = await storage.retrieve('public', directoryKey(index.indexId), { timeoutMs: 2_000 });
+        const [roster] = await Promise.all([
+          storage.retrieve('public', rosterKey, { timeoutMs: 2_000 }),
+          storage.retrieve('public', publisherKey, { timeoutMs: 2_000 }),
+        ]);
         // retrieve() resolves after the first peer responds, but other paired
         // browsers may answer with a higher persisted version. Let all of
         // those responses merge before advancing the record locally.
         await sleep(1_000);
-        const settled = await storage.get('public', directoryKey(index.indexId));
-        logger.debug?.(`Index directory reconciled at version ${settled?.version ?? retrieved?.version ?? 'none'}`);
+        const settled = await storage.get('public', rosterKey);
+        logger.debug?.(`Index publisher roster reconciled at version ${settled?.version ?? roster?.version ?? 'none'}`);
         needsReconcile = false;
       }
       const current = await loadMachineIndex({ root });
@@ -447,30 +493,17 @@ async function connectMachineDirectory(index, logger = {}, {
         ...entry,
         snapshot: await repositorySnapshotHint(entry, serviceInstanceId, current.indexId),
       })));
-      const value = directoryValue(current, entries, Date.now(), serviceInstanceId);
+      const value = publisherDirectoryValue(current, entries, Date.now(), serviceInstanceId);
       const fingerprint = JSON.stringify(value.pigeons);
       const directoryChanged = fingerprint !== lastDirectoryFingerprint;
-      let record = null;
-      if (directoryChanged) {
-        record = await storage.put(
-          'public',
-          directoryKey(current.indexId),
-          value,
-        );
-        lastDirectoryFingerprint = fingerprint;
-        logger.debug?.(`Index directory published at version ${record?.version ?? 'unknown'} with ${current.entries.length} ${current.entries.length === 1 ? 'repository' : 'repositories'}`);
+      const existingRoster = await storage.get('public', rosterKey);
+      const roster = publisherRosterValue(current, existingRoster?.value);
+      if (!existingRoster || JSON.stringify(existingRoster.value?.publishers) !== JSON.stringify(roster.publishers)) {
+        await storage.put('public', rosterKey, roster);
       }
-      if (serviceInstanceId) {
-        const bucket = Math.floor(Date.now() / INDEX_PRESENCE_BUCKET_MS);
-        if (directoryChanged || bucket !== lastLiveBucket) {
-          await storage.put('public', liveDirectoryKey(current.indexId, bucket), {
-            ...value,
-            kind: 'live-directory',
-            watcherServiceId: serviceInstanceId,
-          });
-          lastLiveBucket = bucket;
-        }
-      }
+      const record = await storage.put('public', publisherKey, value);
+      lastDirectoryFingerprint = fingerprint;
+      if (directoryChanged) logger.debug?.(`Publisher directory updated at version ${record?.version ?? 'unknown'} with ${current.entries.length} ${current.entries.length === 1 ? 'repository' : 'repositories'}`);
     });
     publishQueue = operation.catch(() => {});
     return operation;
@@ -492,7 +525,8 @@ async function connectMachineDirectory(index, logger = {}, {
     await node.destroy();
     throw new Error('PeerPigeon index storage did not initialize');
   }
-  node.storage.subscribeKey('public', directoryKey(index.indexId));
+  node.storage.subscribeKey('public', rosterKey);
+  node.storage.subscribeKey('public', publisherKey);
   ready = true;
   if (node.getConnectedPeers().length > 0) {
     publish({ reconcile: true }).catch((error) => logger.error?.(error));
@@ -511,11 +545,9 @@ async function connectMachineDirectory(index, logger = {}, {
       try {
         const current = await loadMachineIndex({ root });
         if (node.getConnectedPeers().length > 0) {
-          await node.storage?.put(
-            'public',
-            directoryKey(current.indexId),
-            directoryValue(current, current.entries, Date.now(), serviceInstanceId),
-          );
+          const existingRoster = await node.storage?.get('public', rosterKey);
+          await node.storage?.put('public', rosterKey, publisherRosterValue(current, existingRoster?.value));
+          await node.storage?.put('public', publisherKey, publisherDirectoryValue(current, current.entries, Date.now(), serviceInstanceId));
         }
       } catch (error) {
         logger.error?.(error);
