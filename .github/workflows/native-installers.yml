@@ -41,12 +41,10 @@ jobs:
       - name: Verify standalone executable
         shell: bash
         run: "dist/git-pigeon${{ runner.os == 'Windows' && '.exe' || '' }} --help"
-      - name: Build macOS package
+      - name: Build macOS bootstrap archive
         if: runner.os == 'macOS'
         shell: bash
-        run: |
-          chmod +x packaging/macos/build-pkg.sh
-          packaging/macos/build-pkg.sh dist/git-pigeon "dist/${{ matrix.installer }}" "$(node -p "require('./package.json').version")"
+        run: tar -C dist -czf "dist/GitPigeon-${{ matrix.artifact }}.tar.gz" git-pigeon
       - name: Build Debian package
         if: runner.os == 'Linux'
         shell: bash
@@ -69,8 +67,8 @@ jobs:
         with:
           name: gitpigeon-${{ matrix.artifact }}
           path: |
-            dist/*.pkg
             dist/*.deb
+            dist/*.tar.gz
             dist/*-Setup.exe
           if-no-files-found: error
 
@@ -83,6 +81,11 @@ jobs:
         with:
           path: release
           merge-multiple: true
+      - name: Write release checksums
+        shell: bash
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS
       - name: Publish installers
         env:
           GH_TOKEN: ${{ github.token }}
@@ -94,10 +97,11 @@ jobs:
         run: |
           assets="$(gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
           for expected in \
-            GitPigeon-macos-arm64.pkg \
-            GitPigeon-macos-x64.pkg \
+            GitPigeon-macos-arm64.tar.gz \
+            GitPigeon-macos-x64.tar.gz \
             GitPigeon-linux-amd64.deb \
-            GitPigeon-windows-x64-Setup.exe
+            GitPigeon-windows-x64-Setup.exe \
+            SHA256SUMS
           do
             grep -Fxq "${expected}" <<<"${assets}" || {
               echo "Missing release asset: ${expected}" >&2

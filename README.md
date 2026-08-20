@@ -14,8 +14,8 @@ The human- and machine-readable pin is also recorded in
 
 ## Project status
 
-GitPigeon is public pre-release software under the MIT license. Native macOS,
-Windows, and Linux installers are published from tagged builds on the
+GitPigeon is public pre-release software under the MIT license. Native macOS
+bootstrap archives and Windows and Linux installers are published from tagged builds on the
 [`GitPigeon releases`](https://github.com/PeerPigeon/GitPigeon/releases) page.
 [`gitpigeon.dev`](https://gitpigeon.dev) is the live browser for paired
 GitPigeon installations.
@@ -25,7 +25,7 @@ GitPigeon installations.
 - macOS, Linux, and Windows
 - Git 2.31 or newer on `PATH`
 
-The native installers include GitPigeon and its runtime. Node.js 20.12 or newer
+The native distributions include GitPigeon and its runtime. Node.js 20.12 or newer
 is required only when running directly from a source checkout.
 
 There are no shell-script assumptions in the sync engine: Git is launched with
@@ -35,11 +35,20 @@ inside the Git directory.
 
 ## Install
 
-Download and run the installer for your operating system from the
+On macOS, paste this once into Terminal. It downloads the build for the current
+CPU, verifies its published SHA-256 checksum, installs the real `git-pigeon`
+executable on `PATH`, registers encrypted `gitpigeon://` clone links, and starts
+device approval:
+
+```bash
+curl -fsSL https://gitpigeon.dev/install.sh | sh
+```
+
+This bootstrap path does not require an Apple Developer ID and does not use the
+unsigned `.pkg` format that Gatekeeper blocks. Windows and Linux users can
+download the native installer from the
 [`GitPigeon releases`](https://github.com/PeerPigeon/GitPigeon/releases) page.
-It installs the real `git-pigeon` executable on `PATH`, which makes Git expose
-it as the ordinary `git pigeon` subcommand. It also registers encrypted
-`gitpigeon://` clone links with the operating system.
+All three paths expose GitPigeon as the ordinary `git pigeon` subcommand.
 
 On a new device, the installer broadcasts a short-lived approval request only
 to the local LAN. An already-approved browser displays the device name and
