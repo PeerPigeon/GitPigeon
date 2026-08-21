@@ -151,7 +151,7 @@ export class LiveWorkspace {
       const baseSha256 = baseData === null ? null : digest(baseData);
       if (current !== baseSha256) {
         if (baseData === null) await rm(this.#absolute(file), { force: true });
-        else await this.#writeReplace(this.#absolute(file), baseData);
+        else await this.repository.restoreWorkingTreeFile(file);
         restored.push(file);
       }
       delete baselines[file];
@@ -170,8 +170,17 @@ export class LiveWorkspace {
       const current = await this.currentDigest(file);
       const next = incoming.deleted ? null : incoming.sha256;
       const hasBaseline = Object.prototype.hasOwnProperty.call(baselines, file);
+      const staged = await this.repository.hasStagedChanges(file);
+      let cleanHead = false;
+      if (incoming.baseSha256 !== null && !staged) {
+        const head = await this.repository.headFile(file);
+        cleanHead = head !== null
+          && digest(head) === incoming.baseSha256
+          && !await this.repository.hasWorkingTreeChanges(file);
+      }
       const safe = current === next
-        || current === incoming.baseSha256
+        || (!staged && current === incoming.baseSha256)
+        || cleanHead
         || (hasBaseline && current === baselines[file]);
       if (!safe) {
         const conflictFile = await this.#writeConflict(file, incoming, deviceId);

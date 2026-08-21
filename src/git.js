@@ -147,6 +147,15 @@ export class GitRepository {
     return result.code !== 0;
   }
 
+  async hasWorkingTreeChanges(filename) {
+    const result = await this.git(['diff', '--quiet', '--', filename], { allowFailure: true });
+    return result.code !== 0;
+  }
+
+  async restoreWorkingTreeFile(filename) {
+    await this.git(['checkout', '--', filename]);
+  }
+
   async createBundle() {
     const refs = await this.refs();
     if (refs.length === 0) return null;
