@@ -48,6 +48,9 @@ test('service control reports status and stops through its authenticated heartbe
     control.close().catch((error) => { closeError = error; });
   });
   await control.ready();
+  const initialHeartbeat = (await watchServiceStatus(root)).heartbeatAt;
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  assert.equal((await watchServiceStatus(root)).heartbeatAt, initialHeartbeat);
 
   const status = await watchServiceStatus(root);
   assert.equal(status.running, true);

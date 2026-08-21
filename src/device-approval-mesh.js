@@ -68,8 +68,8 @@ export async function startDeviceApprovalRequester(identity, requestValue, {
     const options = {
       networkId: DEVICE_APPROVAL_NETWORK_ID,
       sessionId: DEVICE_APPROVAL_SESSION_ID,
-      minPeers: 32,
-      maxPeers: 32,
+      minPeers: 1,
+      maxPeers: 5,
       tolerantPeers: 0,
       autoDiscover: true,
       autoConnect: true,
