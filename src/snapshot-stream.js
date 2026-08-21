@@ -103,6 +103,10 @@ export class SnapshotStreamServer {
     this.transfers.clear();
   }
 
+  activeSnapshotIds() {
+    return [...new Set([...this.transfers.values()].map((transfer) => transfer.manifest.snapshotId))];
+  }
+
   async #handle(peerId, data) {
     const frame = decodeFrame(this.key, data);
     if (!frame) return;

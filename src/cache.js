@@ -6,6 +6,23 @@ const SAFE_NAME = /^[a-f0-9]{64}$/;
 const CHUNK_MAGIC = Buffer.from('GPCH1\0', 'ascii');
 const IV_SIZE = 12;
 const TAG_SIZE = 16;
+const CACHE_IO_CONCURRENCY = 16;
+const DEFAULT_RETAINED_SNAPSHOTS = 4;
+
+async function mapConcurrent(values, concurrency, mapper) {
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.min(concurrency, values.length) },
+    async () => {
+      while (cursor < values.length) {
+        const index = cursor;
+        cursor += 1;
+        await mapper(values[index], index);
+      }
+    },
+  );
+  await Promise.all(workers);
+}
 
 export class RepositoryCache {
   constructor(gitDir) {
@@ -131,6 +148,82 @@ export class RepositoryCache {
     await this.init();
     const names = await readdir(this.manifestDirectory);
     return names.filter((name) => /^[a-f0-9]{64}\.json$/.test(name)).map((name) => name.slice(0, -5));
+  }
+
+  async prune({ keepSnapshotIds = [], retainSnapshots = DEFAULT_RETAINED_SNAPSHOTS } = {}) {
+    await this.init();
+    const protectedIds = new Set(
+      keepSnapshotIds.map(String).filter((snapshotId) => SAFE_NAME.test(snapshotId)),
+    );
+    const manifestIds = await this.listManifests();
+    const manifests = new Array(manifestIds.length);
+    await mapConcurrent(manifestIds, CACHE_IO_CONCURRENCY, async (snapshotId, index) => {
+      try {
+        const value = JSON.parse(await readFile(this.manifestPath(snapshotId), 'utf8'));
+        const parsedCreatedAt = Date.parse(value?.createdAt);
+        manifests[index] = {
+          snapshotId,
+          value,
+          createdAt: Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : 0,
+        };
+      } catch {
+        manifests[index] = { snapshotId, value: null, createdAt: 0 };
+      }
+    });
+
+    const unreadableProtected = manifests.some(
+      ({ snapshotId, value }) => protectedIds.has(snapshotId) && !value,
+    );
+    if (unreadableProtected) {
+      return {
+        skipped: true,
+        removedManifests: 0,
+        removedChunks: 0,
+        retainedManifests: manifestIds.length,
+      };
+    }
+
+    const retained = manifests
+      .filter(({ value }) => value)
+      .sort((left, right) => right.createdAt - left.createdAt
+        || right.snapshotId.localeCompare(left.snapshotId))
+      .slice(0, Math.max(0, Number.parseInt(retainSnapshots, 10) || 0));
+    for (const { snapshotId } of retained) protectedIds.add(snapshotId);
+
+    const keptManifests = manifests.filter(
+      ({ snapshotId, value }) => value && protectedIds.has(snapshotId),
+    );
+    const referencedChunks = new Set();
+    const addChunks = (chunks) => {
+      if (!Array.isArray(chunks)) return;
+      for (const chunk of chunks) {
+        const sha256 = String(chunk?.sha256 ?? '');
+        if (SAFE_NAME.test(sha256)) referencedChunks.add(sha256);
+      }
+    };
+    for (const { value } of keptManifests) {
+      addChunks(value.chunks);
+      for (const file of Array.isArray(value.files) ? value.files : []) addChunks(file?.chunks);
+      for (const file of Array.isArray(value.liveFiles) ? value.liveFiles : []) addChunks(file?.chunks);
+    }
+
+    const staleManifests = manifests.filter(({ snapshotId }) => !protectedIds.has(snapshotId));
+    await mapConcurrent(staleManifests, CACHE_IO_CONCURRENCY, async ({ snapshotId }) => {
+      await rm(this.manifestPath(snapshotId), { force: true });
+    });
+
+    const chunkNames = (await readdir(this.chunkDirectory)).filter((name) => SAFE_NAME.test(name));
+    const staleChunks = chunkNames.filter((digest) => !referencedChunks.has(digest));
+    await mapConcurrent(staleChunks, CACHE_IO_CONCURRENCY, async (digest) => {
+      await rm(this.chunkPath(digest), { force: true });
+    });
+
+    return {
+      skipped: false,
+      removedManifests: staleManifests.length,
+      removedChunks: staleChunks.length,
+      retainedManifests: keptManifests.length,
+    };
   }
 
   async #writeOnce(filename, data) {

@@ -165,6 +165,7 @@ export class RepositorySynchronizer {
       for (const deviceId of Object.keys(this.state.heads)) {
         if (DEVICE.test(deviceId)) this.devices.add(deviceId);
       }
+      await this.#pruneCache();
 
       this.unsubscribe.push(this.storage.subscribeKey('public', registryKey(this.config.repositoryId)));
       this.unsubscribe.push(this.storage.subscribe((event) => this.#onStorageChange(event)));
@@ -325,6 +326,7 @@ export class RepositorySynchronizer {
       await this.#put('public', headKey(this.config.repositoryId, this.config.deviceId), head);
       this.state.heads[this.config.deviceId] = head;
       await this.cache.saveState(this.state);
+      await this.#pruneCache();
       await this.#publishPresence();
       this.logger.info(
         `Published ${refs.length} refs, ${liveFiles.length} live code changes, and ${files.length} private files (${snapshotId.slice(0, 12)})`,
@@ -758,6 +760,21 @@ export class RepositorySynchronizer {
     this.lastPresenceBucket = bucket;
     this.lastPresenceIdentity = identity;
     return lease;
+  }
+
+  async #pruneCache() {
+    if (typeof this.cache.prune !== 'function') return;
+    const keepSnapshotIds = [
+      ...Object.values(this.state.heads).map((head) => head?.snapshotId).filter(Boolean),
+      ...(this.snapshotStream?.activeSnapshotIds?.() ?? []),
+    ];
+    const result = await this.cache.prune({ keepSnapshotIds });
+    if (result?.removedManifests || result?.removedChunks) {
+      this.logger.info(
+        'Pruned ' + result.removedManifests + ' stale snapshot manifests and '
+          + result.removedChunks + ' unreferenced cache chunks',
+      );
+    }
   }
 
   async #reconcileOwnPresence() {
