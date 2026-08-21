@@ -322,8 +322,8 @@ export async function createWatchServiceControl(root, token, stop) {
     }
   };
   const commandWatcher = watchFilesystem(root, (_event, filename) => {
-    const changed = String(filename ?? '');
-    if (!changed || changed === path.basename(service.command)) poll().catch(() => {});
+    const changed = filename === null ? null : String(filename);
+    if (changed === path.basename(service.command)) poll().catch(() => {});
   });
   commandWatcher.on('error', () => {});
   const timer = setInterval(() => { poll().catch(() => {}); }, HEARTBEAT_INTERVAL_MS);
