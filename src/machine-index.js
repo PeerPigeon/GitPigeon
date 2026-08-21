@@ -9,7 +9,7 @@ import { installNativeWebRTC } from './webrtc.js';
 
 export const INDEX_PROTOCOL = 'gitpigeon-index/1';
 export const INDEX_NETWORK_ID = 'gitpigeon-index-v1';
-export const INDEX_HEARTBEAT_MS = 3_000;
+export const INDEX_HEARTBEAT_MS = 10_000;
 export const INDEX_STALE_MS = 12_000;
 export const INDEX_PRESENCE_BUCKET_MS = 5_000;
 
@@ -420,6 +420,7 @@ async function connectMachineDirectory(index, logger = {}, {
   heartbeatMs = INDEX_HEARTBEAT_MS,
   serviceInstanceId = null,
   onClose = async () => {},
+  onRemoteRepositories = async () => {},
 } = {}) {
   await installNativeWebRTC();
   const { PeerPigeonNode, DEFAULT_SIGNALING_SERVERS } = await import('peerpigeon');
@@ -432,7 +433,7 @@ async function connectMachineDirectory(index, logger = {}, {
     // Keep every normal browser/device member directly reachable. A tiny
     // partial mesh can otherwise fill with browser peers and shed the only
     // native index publisher while it rebalances.
-    maxPeers: 32,
+    maxPeers: 5,
     tolerantPeers: 0,
     autoDiscover: true,
     autoConnect: true,
@@ -466,6 +467,42 @@ async function connectMachineDirectory(index, logger = {}, {
   let lastRosterReconcileAt = 0;
   const rosterKey = indexPublishersKey(index.indexId);
   const publisherKey = publisherDirectoryKey(index.indexId, index.publisherId);
+  const publisherSubscriptions = new Map();
+  let remoteSyncTimer = null;
+  let remoteQueue = Promise.resolve();
+  const syncRemoteRepositories = () => {
+    const operation = remoteQueue.then(async () => {
+      if (closed || !ready || !node.storage || node.getConnectedPeers().length === 0) return;
+      const roster = await node.storage.retrieve("public", rosterKey, { timeoutMs: 2_000 });
+      const publisherIds = Array.isArray(roster?.value?.publishers)
+        ? [...new Set(roster.value.publishers.map(String).filter((value) => PUBLISHER_ID.test(value)))]
+        : [];
+      const capabilities = [];
+      for (const publisherId of publisherIds) {
+        if (publisherId === index.publisherId) continue;
+        const key = publisherDirectoryKey(index.indexId, publisherId);
+        if (!publisherSubscriptions.has(key)) {
+          publisherSubscriptions.set(key, node.storage.subscribeKey("public", key));
+        }
+        const record = await node.storage.retrieve("public", key, { timeoutMs: 2_000 });
+        const value = record?.value;
+        if (value?.protocol !== INDEX_PROTOCOL || value.kind !== "publisher-directory"
+          || value.indexId !== index.indexId || value.publisherId !== publisherId
+          || !Array.isArray(value.pigeons)) continue;
+        capabilities.push(...value.pigeons);
+      }
+      if (capabilities.length) await onRemoteRepositories(capabilities);
+    });
+    remoteQueue = operation.catch((error) => logger.error?.(error));
+    return operation;
+  };
+  const scheduleRemoteRepositorySync = () => {
+    if (closed || remoteSyncTimer) return;
+    remoteSyncTimer = setTimeout(() => {
+      remoteSyncTimer = null;
+      syncRemoteRepositories().catch((error) => logger.error?.(error));
+    }, 100);
+  };
   const publish = ({ reconcile = false } = {}) => {
     const operation = publishQueue.then(async () => {
       if (closed || !ready) return;
@@ -517,7 +554,10 @@ async function connectMachineDirectory(index, logger = {}, {
   };
   node.on('peerConnected', (peerId) => {
     logger.debug?.(`[${roomLabel}] peer connected: ${peerId}`);
-    if (ready) publish().catch((error) => logger.error?.(error));
+    if (ready) {
+      publish().catch((error) => logger.error?.(error));
+      syncRemoteRepositories().catch((error) => logger.error?.(error));
+    }
   });
   node.on('peerDisconnected', (peerId) => {
     logger.debug?.(`[${roomLabel}] peer disconnected: ${peerId}`);
@@ -532,11 +572,18 @@ async function connectMachineDirectory(index, logger = {}, {
     await node.destroy();
     throw new Error('PeerPigeon index storage did not initialize');
   }
-  node.storage.subscribeKey('public', rosterKey);
-  node.storage.subscribeKey('public', publisherKey);
+  const rosterSubscription = node.storage.subscribeKey('public', rosterKey);
+  const publisherSubscription = node.storage.subscribeKey('public', publisherKey);
+  const storageSubscription = node.storage.subscribe((event) => {
+    if (event?.origin !== 'remote' || event.op !== 'upsert' || event.space !== 'public') return;
+    if (event.key === rosterKey || publisherSubscriptions.has(event.key)) {
+      scheduleRemoteRepositorySync();
+    }
+  });
   ready = true;
   if (node.getConnectedPeers().length > 0) {
     publish({ reconcile: true }).catch((error) => logger.error?.(error));
+    syncRemoteRepositories().catch((error) => logger.error?.(error));
   }
   const timer = setInterval(() => {
     publish().catch((error) => logger.error?.(error));
@@ -547,7 +594,15 @@ async function connectMachineDirectory(index, logger = {}, {
     async close() {
       if (closed) return;
       clearInterval(timer);
+      if (remoteSyncTimer) clearTimeout(remoteSyncTimer);
+      remoteSyncTimer = null;
+      rosterSubscription();
+      publisherSubscription();
+      storageSubscription();
+      for (const unsubscribe of publisherSubscriptions.values()) unsubscribe();
+      publisherSubscriptions.clear();
       await publishQueue;
+      await remoteQueue;
       await onClose();
       try {
         const current = await loadMachineIndex({ root });

@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { watch as watchFilesystem } from 'node:fs';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
@@ -14,8 +15,9 @@ const ENTRYPOINT = STANDALONE
   : fileURLToPath(new URL('../bin/git-pigeon.js', import.meta.url));
 const START_TIMEOUT_MS = 20_000;
 const HEARTBEAT_STALE_MS = 10_000;
+const HEARTBEAT_INTERVAL_MS = 3_000;
 const START_LOCK_STALE_MS = 30_000;
-export const SERVICE_PROTOCOL_VERSION = 4;
+export const SERVICE_PROTOCOL_VERSION = 5;
 const execFileAsync = promisify(execFile);
 
 function sleep(ms) {
@@ -319,7 +321,12 @@ export async function createWatchServiceControl(root, token, stop) {
       working = false;
     }
   };
-  const timer = setInterval(() => { poll().catch(() => {}); }, 250);
+  const commandWatcher = watchFilesystem(root, (_event, filename) => {
+    const changed = filename === null ? null : String(filename);
+    if (changed === path.basename(service.command)) poll().catch(() => {});
+  });
+  commandWatcher.on('error', () => {});
+  const timer = setInterval(() => { poll().catch(() => {}); }, HEARTBEAT_INTERVAL_MS);
   const updateState = async (change) => {
     while (working) await sleep(10);
     working = true;
@@ -344,6 +351,7 @@ export async function createWatchServiceControl(root, token, stop) {
     async close() {
       if (closed) return;
       closed = true;
+      commandWatcher.close();
       clearInterval(timer);
       while (working) await sleep(10);
       const current = await readWatchServiceState(root);

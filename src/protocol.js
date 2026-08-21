@@ -27,6 +27,26 @@ const DEVICE = /^[a-zA-Z0-9_-]{8,128}$/;
 const MACHINE_INDEX = /^[a-f0-9]{32}$/;
 const noop = () => {};
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const CHUNK_CACHE_CONCURRENCY = 4;
+const CHUNK_RETRIEVE_CONCURRENCY = 8;
+const CHUNK_SEED_CONCURRENCY = 2;
+
+async function mapConcurrent(values, concurrency, mapper) {
+  const results = new Array(values.length);
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.min(concurrency, values.length) },
+    async () => {
+      while (cursor < values.length) {
+        const index = cursor;
+        cursor += 1;
+        results[index] = await mapper(values[index], index);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
 
 function digest(data) {
   return createHash('sha256').update(data).digest('hex');
@@ -562,32 +582,12 @@ export class RepositorySynchronizer {
   }
 
   async #retrieveBundle(manifest) {
-    const chunks = [];
-    let size = 0;
-    for (const chunk of manifest.chunks) {
-      let data = null;
-      if (await this.cache.hasChunk(chunk.sha256)) {
-        data = await this.cache.readChunk(chunk.sha256);
-      } else {
-        const record = await this.storage.retrieve(
-          'frozen',
-          chunkKey(this.config.repositoryId, chunk.sha256),
-          { timeoutMs: this.retrieveTimeoutMs },
-        );
-        data = this.#decodeChunk(record?.value, chunk);
-        if (!data) throw new Error(`Chunk ${chunk.sha256} is not currently available`);
-        await this.cache.writeChunk(chunk.sha256, data);
-      }
-      if (data.length !== chunk.size || digest(data) !== chunk.sha256) {
-        throw new Error(`Corrupt cached chunk ${chunk.sha256}`);
-      }
-      chunks.push(data);
-      size += data.length;
-    }
-    if (size !== manifest.bundleSize) throw new Error('Snapshot bundle size does not match its manifest');
-    const bundle = Buffer.concat(chunks, size);
-    if (digest(bundle) !== manifest.bundleSha256) throw new Error('Snapshot bundle digest does not match its manifest');
-    return bundle;
+    return await this.#retrieveChunks(
+      manifest.chunks,
+      manifest.bundleSize,
+      manifest.bundleSha256,
+      "Snapshot bundle",
+    );
   }
 
   async #retrieveWorkspaceFiles(manifest) {
@@ -616,44 +616,50 @@ export class RepositorySynchronizer {
     return files;
   }
 
-  async #retrieveChunks(chunks, expectedSize, expectedDigest, label) {
-    const values = [];
-    let size = 0;
-    for (const chunk of chunks) {
-      let data;
-      if (await this.cache.hasChunk(chunk.sha256)) {
-        data = await this.cache.readChunk(chunk.sha256);
-      } else {
-        const record = await this.storage.retrieve(
-          'frozen',
-          chunkKey(this.config.repositoryId, chunk.sha256),
-          { timeoutMs: this.retrieveTimeoutMs },
-        );
-        data = this.#decodeChunk(record?.value, chunk);
-        if (!data) throw new Error(`Chunk ${chunk.sha256} is not currently available`);
-        await this.cache.writeChunk(chunk.sha256, data);
-      }
-      if (data.length !== chunk.size || digest(data) !== chunk.sha256) {
-        throw new Error(`Corrupt cached chunk ${chunk.sha256}`);
-      }
-      values.push(data);
-      size += data.length;
+  async #retrieveChunk(chunk) {
+    let data;
+    if (await this.cache.hasChunk(chunk.sha256)) {
+      data = await this.cache.readChunk(chunk.sha256);
+    } else {
+      const record = await this.storage.retrieve(
+        "frozen",
+        chunkKey(this.config.repositoryId, chunk.sha256),
+        { timeoutMs: this.retrieveTimeoutMs },
+      );
+      data = this.#decodeChunk(record?.value, chunk);
+      if (!data) throw new Error("Chunk " + chunk.sha256 + " is not currently available");
+      await this.cache.writeChunk(chunk.sha256, data);
     }
-    if (size !== expectedSize) throw new Error(`${label} size does not match its manifest`);
+    if (data.length !== chunk.size || digest(data) !== chunk.sha256) {
+      throw new Error("Corrupt cached chunk " + chunk.sha256);
+    }
+    return data;
+  }
+
+  async #retrieveChunks(chunks, expectedSize, expectedDigest, label) {
+    const values = await mapConcurrent(
+      chunks,
+      CHUNK_RETRIEVE_CONCURRENCY,
+      (chunk) => this.#retrieveChunk(chunk),
+    );
+    const size = values.reduce((total, value) => total + value.length, 0);
+    if (size !== expectedSize) throw new Error(label + " size does not match its manifest");
     const data = Buffer.concat(values, size);
-    if (digest(data) !== expectedDigest) throw new Error(`${label} digest does not match its manifest`);
+    if (digest(data) !== expectedDigest) throw new Error(label + " digest does not match its manifest");
     return data;
   }
 
   async #cacheChunks(data) {
-    const chunks = [];
-    for (let offset = 0; offset < data.length; offset += this.chunkSize) {
+    const offsets = Array.from(
+      { length: Math.ceil(data.length / this.chunkSize) },
+      (_value, index) => index * this.chunkSize,
+    );
+    return await mapConcurrent(offsets, CHUNK_CACHE_CONCURRENCY, async (offset) => {
       const value = data.subarray(offset, Math.min(offset + this.chunkSize, data.length));
       const sha256 = digest(value);
       await this.cache.writeChunk(sha256, value);
-      chunks.push({ sha256, size: value.length });
-    }
-    return chunks;
+      return { sha256, size: value.length };
+    });
   }
 
   async #seedManifest(manifest) {
@@ -662,21 +668,21 @@ export class RepositorySynchronizer {
       ...manifest.files.flatMap((file) => file.chunks),
       ...manifest.liveFiles.flatMap((file) => file.chunks),
     ];
-    const uniqueChunks = new Map(descriptors.map((chunk) => [chunk.sha256, chunk]));
-    for (const chunk of uniqueChunks.values()) {
+    const uniqueChunks = [...new Map(descriptors.map((chunk) => [chunk.sha256, chunk])).values()];
+    await mapConcurrent(uniqueChunks, CHUNK_SEED_CONCURRENCY, async (chunk) => {
       const key = chunkKey(this.config.repositoryId, chunk.sha256);
-      if (!await this.storage.get('frozen', key)) {
+      if (!await this.storage.get("frozen", key)) {
         const data = await this.cache.readChunk(chunk.sha256);
-        await this.#put('frozen', key, {
+        await this.#put("frozen", key, {
           protocol: PROTOCOL,
-          kind: 'chunk',
+          kind: "chunk",
           sha256: chunk.sha256,
           size: chunk.size,
-          encoding: 'base64',
-          data: data.toString('base64'),
+          encoding: "base64",
+          data: data.toString("base64"),
         });
       }
-    }
+    });
     const key = manifestKey(this.config.repositoryId, manifest.snapshotId);
     if (!await this.storage.get('frozen', key)) {
       await this.#put('frozen', key, manifest);

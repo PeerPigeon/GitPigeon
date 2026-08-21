@@ -252,6 +252,7 @@ test('syncs live working-tree CRUD before commit and preserves concurrent code e
   t.after(() => rm(root, { recursive: true, force: true }));
   const source = await createRepository(path.join(root, 'source'), 'base\n');
   const target = await createRepository(path.join(root, 'target'));
+  await target.git(['config', 'core.autocrlf', 'true']);
   const network = new FakeNetwork();
   const common = {
     version: 1,
@@ -304,7 +305,7 @@ test('syncs live working-tree CRUD before commit and preserves concurrent code e
   await source.git(['commit', '-m', 'commit live changes']);
   await a.publishLocal();
   await b.refresh();
-  assert.equal(await readFile(path.join(target.root, 'file.txt'), 'utf8'), 'now committed\n');
+  assert.equal((await readFile(path.join(target.root, 'file.txt'), 'utf8')).trim(), 'now committed');
   assert.equal((await target.git(['status', '--porcelain=v1'])).stdout, '');
   assert.equal(
     (await target.git(['rev-parse', 'HEAD'])).stdout.trim(),

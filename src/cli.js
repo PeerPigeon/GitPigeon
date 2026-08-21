@@ -1,3 +1,4 @@
+import { watch as watchFilesystem } from "node:fs";
 import { randomBytes } from 'node:crypto';
 import { mkdir, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -155,7 +156,8 @@ async function prepareRepositorySession(entry) {
 
 async function openRepositorySession({ repository, config }, pollMs, log, serviceInstanceId, machineIndexId) {
   const { runtime, synchronizer } = await openNetwork(repository, config, log, serviceInstanceId, machineIndexId);
-  let timer;
+  let changeTimer;
+  let filesystemWatcher;
   let peerRefreshTimer;
   let started = false;
   let starting = false;
@@ -179,6 +181,14 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     }
   };
 
+  const schedulePublish = () => {
+    if (changeTimer) clearTimeout(changeTimer);
+    changeTimer = setTimeout(() => {
+      changeTimer = null;
+      publishChanges().catch((error) => log.error(error));
+    }, pollMs);
+  };
+
   const activate = async () => {
     if (started || starting || stopped) return;
     starting = true;
@@ -186,7 +196,12 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       await synchronizer.start();
       previousDigest = await synchronizer.localDigest();
       started = true;
-      timer = setInterval(() => { publishChanges().catch((error) => log.error(error)); }, pollMs);
+      filesystemWatcher = watchFilesystem(repository.root, { recursive: true }, (_event, filename) => {
+        const changed = String(filename ?? "").replaceAll("\\", "/");
+        if (changed === ".git/gitpigeon" || changed.startsWith(".git/gitpigeon/")) return;
+        schedulePublish();
+      });
+      filesystemWatcher.on("error", (error) => log.error(error));
     } catch (error) {
       log.error(error);
     } finally {
@@ -211,7 +226,8 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     async close() {
       if (stopped) return;
       stopped = true;
-      if (timer) clearInterval(timer);
+      if (changeTimer) clearTimeout(changeTimer);
+      filesystemWatcher?.close();
       if (peerRefreshTimer) clearTimeout(peerRefreshTimer);
       while (starting || publishing) await sleep(10);
       await synchronizer.stop();
@@ -241,6 +257,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let machineIndex;
   let lanApprovals;
   let reconciliationTimer;
+  let indexWatcher;
   let reconciling = false;
 
   const publishServiceRepositoryState = async () => {
@@ -346,10 +363,27 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     }
   };
 
+  const scheduleReconcile = () => {
+    if (reconciliationTimer) clearTimeout(reconciliationTimer);
+    reconciliationTimer = setTimeout(() => {
+      reconciliationTimer = null;
+      reconcile().catch((error) => log.error(error));
+    }, 100);
+  };
+
   try {
     control = await createWatchServiceControl(root, token, stop);
     await reconcile();
-    machineIndex = await connectMachineIndexService(log, { root, serviceInstanceId });
+    machineIndex = await connectMachineIndexService(log, {
+      root,
+      serviceInstanceId,
+      onRemoteRepositories: async (repositories) => {
+        const added = await materializeGrantedRepositories(repositories, { root });
+        if (!added.length) return;
+        log.info("PeerPigeon index added " + added.length + " shared " + (added.length === 1 ? "repository" : "repositories"));
+        await reconcile();
+      },
+    });
     try {
       lanApprovals = await startLanApprovalService(machineIndex, {
         logger: log,
@@ -363,14 +397,18 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       // repository watcher and all already-approved devices must keep working.
       log.warn(`LAN device approval is unavailable: ${error.message}`);
     }
-    reconciliationTimer = setInterval(() => { reconcile().catch((error) => log.error(error)); }, 500);
+    indexWatcher = watchFilesystem(root, (_event, filename) => {
+      if (String(filename ?? "") === "index.json") scheduleReconcile();
+    });
+    indexWatcher.on("error", (error) => log.error(error));
     await control.ready();
     log.info(`GitPigeon service is watching ${sessions.size} ${sessions.size === 1 ? 'repository' : 'repositories'} as PID ${process.pid}`);
     await stopped;
   } finally {
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);
-    if (reconciliationTimer) clearInterval(reconciliationTimer);
+    if (reconciliationTimer) clearTimeout(reconciliationTimer);
+    indexWatcher?.close();
     while (reconciling) await sleep(10);
     for (const record of sessions.values()) await stopSession(record);
     await markMachinePigeonsStopped({ root, pid: process.pid });
@@ -513,12 +551,17 @@ async function commandEnroll(args, verbose) {
   }
   await stopWatchService(root);
   const index = await adoptMachineIndexCapability(grant.index, { root });
+  const added = await materializeGrantedRepositories(grant.repositories, { root });
   const pairing = await claimDashboardPairing({ root, force: true });
   await startWatchService({ root, verbose });
+  await Promise.all(added.map(({ repository }) => (
+    waitForWatchServiceRepository(root, repository.root)
+  )));
   await runDashboardPairing(pairing, verbose, {
     automatic: true,
     nativeDevicePublicKey: identity.publicKey,
   });
+  if (added.length) console.log("Added " + added.length + " shared " + (added.length === 1 ? "repository" : "repositories") + " to the persistent native index.");
   console.log(`This device is now approved for GitPigeon index ${index.indexId.slice(0, 10)}.`);
 }
 
@@ -805,6 +848,43 @@ async function availableCloneTarget(base, name) {
     }
   }
   throw new Error(`Could not choose an unused clone directory below ${base}`);
+}
+
+export async function materializeGrantedRepositories(values, {
+  root = machineIndexRoot(),
+  base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), "GitPigeon")),
+} = {}) {
+  if (!Array.isArray(values)) return [];
+  if (values.length > 1_000) throw new Error("The approved GitPigeon index contains too many repositories");
+  const capabilities = [];
+  const seen = new Set();
+  for (const value of values) {
+    if (!value || typeof value !== "object") continue;
+    const capability = validateNativeClonePayload(value);
+    if (seen.has(capability.repositoryId)) continue;
+    seen.add(capability.repositoryId);
+    capabilities.push(capability);
+  }
+  const existing = await listMachinePigeons({ root, activeOnly: false });
+  const registered = new Set(existing.map((entry) => entry.repositoryId));
+  await mkdir(base, { recursive: true });
+  const added = [];
+  for (const capability of capabilities) {
+    if (registered.has(capability.repositoryId)) continue;
+    const target = await availableCloneTarget(
+      base,
+      safeRepositoryDirectoryName(capability.name, capability.repositoryId),
+    );
+    await ensureCloneDirectory(target);
+    const repository = await GitRepository.init(target);
+    const config = createIdentity(capability);
+    await saveConfig(repository.gitDir, config);
+    await new WorkspaceFiles(repository).init();
+    await registerMachinePigeon(repository, config, { root, pid: null });
+    registered.add(capability.repositoryId);
+    added.push({ repository, config, capability });
+  }
+  return added;
 }
 
 async function commandProtocol(args, verbose) {

@@ -11,5 +11,5 @@ test('installs a browser-compatible WebRTC runtime for native PeerPigeon', async
 
   const connection = new globalThis.RTCPeerConnection({ iceServers: [], iceCandidatePoolSize: 4 });
   assert.equal(connection.connectionState, 'new');
-  connection.close();
+  await connection.close();
 });

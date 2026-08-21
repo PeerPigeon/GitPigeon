@@ -1,6 +1,7 @@
 node_modules/
 coverage/
 dist/
+.gitpigeon-build/
 *.log
 .DS_Store
 

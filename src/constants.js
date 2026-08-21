@@ -1,9 +1,9 @@
 export const PROTOCOL = 'gitpigeon/1';
 export const NETWORK_ID = 'gitpigeon-v1';
-export const REPOSITORY_ROOM_PEERS = 32;
+export const REPOSITORY_ROOM_PEERS = 5;
 
 export function repositoryRoomTopology() {
-  return { minPeers: REPOSITORY_ROOM_PEERS, maxPeers: REPOSITORY_ROOM_PEERS };
+  return { minPeers: 1, maxPeers: REPOSITORY_ROOM_PEERS };
 }
 export const CONFIG_VERSION = 1;
 export const CONFIG_FILE = 'config.json';
@@ -14,7 +14,7 @@ export const DEFAULT_CHUNK_SIZE = 16 * 1024;
 export const DEFAULT_RETRIEVE_TIMEOUT_MS = 4_000;
 export const DEFAULT_SYNC_WAIT_MS = 5_000;
 export const DEFAULT_POLL_MS = 250;
-export const REPOSITORY_PRESENCE_HEARTBEAT_MS = 3_000;
+export const REPOSITORY_PRESENCE_HEARTBEAT_MS = 10_000;
 export const REPOSITORY_PRESENCE_BUCKET_MS = 5_000;
 
 export function storagePrefix(repositoryId) {

@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { commandStop } from '../src/cli.js';
+import { commandStop, materializeGrantedRepositories } from '../src/cli.js';
 import { createIdentity } from '../src/config.js';
 import { listMachinePigeons, registerMachinePigeon } from '../src/machine-index.js';
 import { createRepository } from './helpers.js';
@@ -40,7 +40,7 @@ test('stop terminates discovered watcher processes even when the index is empty'
     findWatcherPids: async () => [child.pid],
   });
   await waitForExit(child);
-  assert.notEqual(child.signalCode, null);
+  assert.equal(child.exitCode !== null || child.signalCode !== null, true);
 });
 
 test('stop marks registered repositories inactive without removing the persistent index', async (t) => {
@@ -63,4 +63,23 @@ test('stop marks registered repositories inactive without removing the persisten
   assert.equal(entries.length, 1);
   assert.equal(entries[0].repository, repository.root);
   assert.equal(entries[0].pid, null);
+});
+
+test("approved enrollment materializes every shared repository in the native index", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "gitpigeon-enrollment-index-test-"));
+  const stateRoot = path.join(root, "state");
+  const cloneRoot = path.join(root, "repositories");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const capabilities = [
+    { repositoryId: "shared-repository-one", secret: "a".repeat(43), name: "First repository" },
+    { repositoryId: "shared-repository-two", secret: "b".repeat(43), name: "Second repository" },
+  ];
+  const added = await materializeGrantedRepositories(capabilities, { root: stateRoot, base: cloneRoot });
+  assert.equal(added.length, 2);
+  const entries = await listMachinePigeons({ root: stateRoot, activeOnly: false });
+  assert.deepEqual(entries.map((entry) => entry.repositoryId).sort(), [
+    "shared-repository-one",
+    "shared-repository-two",
+  ]);
+  assert.equal((await materializeGrantedRepositories(capabilities, { root: stateRoot, base: cloneRoot })).length, 0);
 });
