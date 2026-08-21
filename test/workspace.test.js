@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { LiveWorkspace } from '../src/live-workspace.js';
 import { WorkspaceFiles } from '../src/workspace.js';
 import { commitFile, createRepository } from './helpers.js';
 
@@ -39,7 +40,7 @@ test('automatically protects ignored files and conventional secrets while skippi
   await commitFile(
     repository,
     '.gitignore',
-    'private-settings.json\nnode_modules/\n',
+    ['private-settings.json', 'node_modules/', '.vinext/', '.wrangler/', '.gitpigeon-build/', '*.tsbuildinfo'].join(String.fromCharCode(10)) + String.fromCharCode(10),
     'ignore local files',
   );
   await writeFile(path.join(repository.root, '.env'), 'TOKEN=automatic\n');
@@ -48,15 +49,63 @@ test('automatically protects ignored files and conventional secrets while skippi
   await mkdir(path.join(repository.root, 'node_modules', 'example'), { recursive: true });
   await writeFile(path.join(repository.root, 'node_modules', 'example', 'config.json'), '{}\n');
 
+  const generated = [
+    ['.vinext', 'fonts', 'font.woff2'],
+    ['.wrangler', 'tmp', 'deploy.js'],
+    ['.gitpigeon-build', 'sea-config.json'],
+  ];
+  for (const parts of generated) {
+    const filename = path.join(repository.root, ...parts);
+    await mkdir(path.dirname(filename), { recursive: true });
+    await writeFile(filename, 'generated');
+  }
+  await writeFile(path.join(repository.root, 'tsconfig.tsbuildinfo'), 'generated');
+
   const workspace = new WorkspaceFiles(repository);
+  await mkdir(path.dirname(workspace.trackedFile), { recursive: true });
+  await writeFile(workspace.trackedFile, JSON.stringify({
+    version: 1,
+    files: [
+      '.vinext/fonts/font.woff2',
+      '.wrangler/tmp/deploy.js',
+      '.gitpigeon-build/sea-config.json',
+      'tsconfig.tsbuildinfo',
+    ],
+    excluded: [],
+  }));
+  await workspace.init();
   const snapshot = await workspace.snapshot();
 
   assert.deepEqual(await workspace.list(), ['.env', 'private-settings.json']);
   assert.deepEqual(snapshot.files.map(({ path: file }) => file), ['.env', 'private-settings.json']);
   assert.equal((await repository.git(['check-ignore', '.env'])).stdout.trim(), '.env');
   assert.equal(await repository.isTracked('.env.example'), false);
+  const exclude = await readFile(path.join(repository.gitDir, 'info', 'exclude'), 'utf8');
+  assert.doesNotMatch(exclude, /vinext|wrangler|gitpigeon-build|tsbuildinfo/);
+  await assert.rejects(workspace.track(['tsconfig.tsbuildinfo']), /generated artifact/);
 
   await workspace.untrack(['.env']);
   await workspace.discover({ force: true });
   assert.deepEqual(await workspace.list(), ['private-settings.json']);
+});
+
+test('live synchronization excludes generated build artifacts', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-live-generated-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await createRepository(path.join(root, 'repository'));
+  const generated = [
+    ['.vinext', 'output.js'],
+    ['.wrangler', 'output.js'],
+    ['.gitpigeon-build', 'output.js'],
+  ];
+  for (const parts of generated) {
+    const filename = path.join(repository.root, ...parts);
+    await mkdir(path.dirname(filename), { recursive: true });
+    await writeFile(filename, 'generated');
+  }
+  await writeFile(path.join(repository.root, 'tsconfig.tsbuildinfo'), 'generated');
+  await writeFile(path.join(repository.root, 'app.js'), 'source');
+
+  const snapshot = await new LiveWorkspace(repository).snapshot();
+  assert.deepEqual(snapshot.files.map(({ path: file }) => file), ['app.js']);
 });

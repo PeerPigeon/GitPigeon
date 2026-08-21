@@ -7,7 +7,7 @@ const INVALID_PATTERN = /[\0-\x1f\x7f*?\[\]\\]/;
 const SKIP_DIRECTORIES = new Set([
   '.git', '.hg', '.svn', 'node_modules', 'vendor', '.venv', 'venv', 'dist',
   'build', 'out', 'target', 'coverage', '.cache', '__pycache__', '.next',
-  '.nuxt', '.turbo',
+  '.nuxt', '.turbo', '.vinext', '.wrangler', '.gitpigeon-build',
 ]);
 const SKIP_FILES = new Set(['.ds_store', 'thumbs.db']);
 export const LIVE_FILE_LIMIT = Infinity;
@@ -203,7 +203,7 @@ export class LiveWorkspace {
     const name = parts.at(-1);
     if (parts.slice(0, -1).some((part) => SKIP_DIRECTORIES.has(part.toLowerCase()))) return true;
     if (SKIP_FILES.has(name.toLowerCase())) return true;
-    return /\.(?:log|tmp|pyc|pyo)$/i.test(name);
+    return /\.(?:log|tmp|pyc|pyo|tsbuildinfo)$/i.test(name);
   }
 
   async #assertSafeParents(file) {

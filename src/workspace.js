@@ -11,7 +11,7 @@ const AUTO_DISCOVERY_INTERVAL_MS = 5_000;
 const SKIP_DIRECTORIES = new Set([
   '.git', '.hg', '.svn', 'node_modules', 'vendor', '.venv', 'venv', 'dist',
   'build', 'out', 'target', 'coverage', '.cache', '__pycache__', '.next',
-  '.nuxt', '.turbo',
+  '.nuxt', '.turbo', '.vinext', '.wrangler', '.gitpigeon-build',
 ]);
 const SKIP_FILES = new Set(['.ds_store', 'thumbs.db']);
 
@@ -67,7 +67,7 @@ export class WorkspaceFiles {
   }
 
   async list() {
-    return (await this.#loadMetadata()).files;
+    return (await this.#loadMetadata()).files.filter((file) => !this.#shouldSkip(file));
   }
 
   async excluded() {
@@ -95,13 +95,17 @@ export class WorkspaceFiles {
     if (!inputs.length) throw new Error('track requires at least one file path');
     const additions = [...new Set(inputs.map((input) => this.normalize(input)))];
     for (const file of additions) {
+      if (this.#shouldSkip(file)) {
+        throw new Error(file + ' is a generated artifact and cannot be privately tracked');
+      }
       if (await this.repository.isTracked(file)) {
         throw new Error(`${file} is already tracked by Git; run \`git rm --cached -- ${file}\` first`);
       }
       await this.#assertRegularFile(file);
     }
     const metadata = await this.#loadMetadata();
-    const files = [...new Set([...metadata.files, ...additions])].sort();
+    const existing = metadata.files.filter((file) => !this.#shouldSkip(file));
+    const files = [...new Set([...existing, ...additions])].sort();
     await this.#saveList(files, metadata.excluded.filter((file) => !additions.includes(file)));
     await this.syncExclude(files);
     return additions;
@@ -112,7 +116,8 @@ export class WorkspaceFiles {
     if (!force && Date.now() - this.lastDiscoveryAt < AUTO_DISCOVERY_INTERVAL_MS) return [];
     this.lastDiscoveryAt = Date.now();
     const metadata = await this.#loadMetadata();
-    const existing = metadata.files;
+    const existing = metadata.files.filter((file) => !this.#shouldSkip(file));
+    const pruned = existing.length !== metadata.files.length;
     const excluded = new Set(metadata.excluded);
     const ignored = new Set(await this.repository.ignoredFiles());
     const candidates = new Set(ignored);
@@ -137,7 +142,7 @@ export class WorkspaceFiles {
       additions.push(file);
     }
     const files = [...new Set([...existing, ...additions])].sort();
-    if (additions.length) await this.#saveList(files, metadata.excluded);
+    if (additions.length || pruned) await this.#saveList(files, metadata.excluded);
     await this.syncExclude(files);
     return additions;
   }
@@ -146,7 +151,7 @@ export class WorkspaceFiles {
     if (!inputs.length) throw new Error('untrack requires at least one file path');
     const removals = new Set(inputs.map((input) => this.normalize(input)));
     const metadata = await this.#loadMetadata();
-    const files = metadata.files.filter((file) => !removals.has(file));
+    const files = metadata.files.filter((file) => !removals.has(file) && !this.#shouldSkip(file));
     const excluded = [...new Set([...metadata.excluded, ...removals])].sort();
     await this.#saveList(files, excluded);
     await this.syncExclude(files);
@@ -154,10 +159,11 @@ export class WorkspaceFiles {
   }
 
   async acceptRemotePaths(inputs) {
-    const incoming = inputs.map((input) => this.normalize(input));
+    const incoming = inputs.map((input) => this.normalize(input)).filter((file) => !this.#shouldSkip(file));
     const metadata = await this.#loadMetadata();
     const excluded = new Set(metadata.excluded);
-    const files = [...new Set([...metadata.files, ...incoming.filter((file) => !excluded.has(file))])].sort();
+    const existing = metadata.files.filter((file) => !this.#shouldSkip(file));
+    const files = [...new Set([...existing, ...incoming.filter((file) => !excluded.has(file))])].sort();
     await this.#saveList(files, metadata.excluded);
     await this.syncExclude(files);
     return files;
@@ -202,7 +208,10 @@ export class WorkspaceFiles {
       throw new Error('Cannot restore private workspace files into a bare repository');
     }
     const excluded = new Set(await this.excluded());
-    const activeFiles = files.filter((file) => !excluded.has(this.normalize(file.path)));
+    const activeFiles = files.filter((file) => {
+      const normalized = this.normalize(file.path);
+      return !excluded.has(normalized) && !this.#shouldSkip(normalized);
+    });
     await this.acceptRemotePaths(activeFiles.map((file) => file.path));
     const updated = [];
     const conflicts = [];
@@ -333,7 +342,7 @@ export class WorkspaceFiles {
     const name = parts.at(-1);
     if (parts.slice(0, -1).some((part) => SKIP_DIRECTORIES.has(part.toLowerCase()))) return true;
     if (SKIP_FILES.has(name.toLowerCase())) return true;
-    return /\.(?:log|tmp|pyc|pyo)$/i.test(name);
+    return /\.(?:log|tmp|pyc|pyo|tsbuildinfo)$/i.test(name);
   }
 
   async #saveList(files, excluded = []) {

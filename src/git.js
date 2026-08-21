@@ -108,7 +108,7 @@ export class GitRepository {
   async ignoredFiles() {
     const excluded = [
       'node_modules', 'vendor', '.venv', 'venv', 'dist', 'build', 'out',
-      'target', 'coverage', '.cache', '__pycache__', '.next', '.nuxt', '.turbo',
+      'target', 'coverage', '.cache', '__pycache__', '.next', '.nuxt', '.turbo', '.vinext', '.wrangler', '.gitpigeon-build',
     ].map((directory) => `:(exclude,glob)**/${directory}/**`);
     const result = await this.git([
       'ls-files',
@@ -120,6 +120,7 @@ export class GitRepository {
       ...excluded,
       ':(exclude,glob)**/*.log',
       ':(exclude,glob)**/*.tmp',
+      ':(exclude,glob)**/*.tsbuildinfo',
     ]);
     return result.stdout.split('\0').filter(Boolean).sort();
   }
