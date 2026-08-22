@@ -457,7 +457,13 @@ async function connectMachineDirectory(index, logger = {}, {
   node.mesh.on('peer:discovered', (peerId) => logger.debug?.(`[${roomLabel}] discovered ${String(peerId).slice(0, 12)}`));
   // PeerPigeon and FreeRTC own signaling recovery. A GitPigeon-side recovery
   // call can interrupt their in-flight cross-relay negotiation.
-  node.on('error', (error) => logger.error?.(error));
+  node.on('error', (error) => {
+    if (/^Negotiation stalled\b/.test(String(error?.message ?? error ?? ''))) {
+      logger.debug?.(error?.message ?? error);
+      return;
+    }
+    logger.error?.(error);
+  });
   let closed = false;
   let ready = false;
   let needsReconcile = true;
