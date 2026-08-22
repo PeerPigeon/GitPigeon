@@ -37,14 +37,12 @@ import {
 import {
   loadOrCreateNativeDeviceIdentity,
   openDeviceGrant,
-  pairingCode,
   parseNativeCloneUrl,
   validateNativeClonePayload,
 } from './device-grants.js';
 import { startDeviceApprovalResponder } from './device-approval-mesh.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
 import { installNativeIntegration } from './native-install.js';
-import { connectPeerPigeon } from './peerpigeon.js';
 import { RepositorySynchronizer } from './protocol.js';
 import { TerminalServer } from './terminal-server.js';
 import { RealtimeWorkspaceServer } from './realtime-server.js';
@@ -150,11 +148,14 @@ async function configuredRepository(cwd) {
   return { repository, config };
 }
 
-async function openNetwork(repository, config, log, serviceInstanceId, machineIndexId) {
-  const runtime = await connectPeerPigeon(config, log);
+// One node, one room. Every repository rides the machine's single index node,
+// which is what browsers already do, instead of opening a PeerPigeon room per
+// repository that no browser ever joins.
+function openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node) {
+  if (!node?.storage) throw new Error('The GitPigeon index mesh is not connected');
   const synchronizer = new RepositorySynchronizer({
     repository,
-    storage: runtime.storage,
+    storage: node.storage,
     config,
     logger: log,
     serviceInstanceId,
@@ -162,10 +163,10 @@ async function openNetwork(repository, config, log, serviceInstanceId, machineIn
     deviceName: deviceHostName(),
     // The snapshot channel rides PeerPigeon's encrypted, mesh-routed direct
     // messages, so it takes the node facade rather than the raw mesh.
-    streamTransport: runtime.node,
+    streamTransport: node,
     storageWritePauseMs: 0,
   });
-  return { runtime, synchronizer };
+  return { synchronizer };
 }
 
 async function startIndexedWatchService(options = {}) {
@@ -187,10 +188,10 @@ async function prepareRepositorySession(entry) {
   return { repository, config, signature: repositorySessionSignature(config) };
 }
 
-async function openRepositorySession({ repository, config }, pollMs, log, serviceInstanceId, machineIndexId) {
-  const { runtime, synchronizer } = await openNetwork(repository, config, log, serviceInstanceId, machineIndexId);
+async function openRepositorySession({ repository, config }, pollMs, log, serviceInstanceId, machineIndexId, node) {
+  const { synchronizer } = openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node);
   const terminalServer = new TerminalServer({
-    node: runtime.node,
+    node,
     repository,
     secret: config.secret,
     repositoryId: config.repositoryId,
@@ -200,7 +201,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   });
   terminalServer.start();
   const realtimeServer = new RealtimeWorkspaceServer({
-    node: runtime.node,
+    node,
     repository,
     secret: config.secret,
     repositoryId: config.repositoryId,
@@ -262,16 +263,17 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     }
   };
 
-  runtime.node.on('peerConnected', () => {
+  const onPeerConnected = () => {
     activate().catch((error) => log.error(error));
     if (!started || peerRefreshTimer) return;
     peerRefreshTimer = setTimeout(() => {
       peerRefreshTimer = null;
-      if (!stopped && runtime.node.getConnectedPeers().length > 0) {
+      if (!stopped && node.getConnectedPeers().length > 0) {
         synchronizer.refresh().catch((error) => log.error(error));
       }
     }, 250);
-  });
+  };
+  node.on('peerConnected', onPeerConnected);
   activate().catch((error) => log.error(error));
   log.info(`Watching ${repository.root} as ${config.deviceId.slice(0, 8)}`);
 
@@ -282,11 +284,12 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       if (changeTimer) clearTimeout(changeTimer);
       filesystemWatcher?.close();
       if (peerRefreshTimer) clearTimeout(peerRefreshTimer);
+      node.off('peerConnected', onPeerConnected);
       terminalServer.stop();
       realtimeServer.stop();
       while (starting || publishing) await sleep(10);
       await synchronizer.stop();
-      await runtime.close();
+      // The node belongs to the machine index service, not to this session.
     },
   };
 }
@@ -377,7 +380,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     sessions.set(entry.repository, record);
     repositoryErrors.delete(entry.repository);
     await publishServiceRepositoryState();
-    record.opening = openRepositorySession(prepared, pollMs, log, serviceInstanceId, machineIndexId)
+    record.opening = openRepositorySession(prepared, pollMs, log, serviceInstanceId, machineIndexId, machineIndex.node)
       .then(async (session) => {
         record.session = session;
         if (record.cancelled) {
@@ -400,7 +403,9 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   };
 
   const reconcile = async () => {
-    if (reconciling || stopping) return;
+    // Every session rides the machine index node, so nothing can start before
+    // it exists.
+    if (reconciling || stopping || !machineIndex) return;
     reconciling = true;
     try {
       const entries = await listMachinePigeons({ root, activeOnly: false });
@@ -430,7 +435,6 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
 
   try {
     control = await createWatchServiceControl(root, token, stop);
-    await reconcile();
     machineIndex = await connectMachineIndexService(log, {
       root,
       serviceInstanceId,
@@ -441,6 +445,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
         await reconcile();
       },
     });
+    await reconcile();
     try {
       lanApprovals = await startLanApprovalService(machineIndex, {
         logger: log,
@@ -743,10 +748,14 @@ async function commandPair(args, verbose) {
       }
 
       console.log('\nDevices asking to pair:\n');
-      pending.forEach((request, position) => {
+      for (const [position, request] of pending.entries()) {
         console.log(`  ${position + 1}  ${pairingLabel(request)}`);
-        console.log(`     code ${pairingCode(request)}`);
-      });
+        try {
+          console.log(`     code ${await responder.codeFor(request.requestId)}`);
+        } catch (error) {
+          console.log(`     code unavailable (${error.message})`);
+        }
+      }
       console.log('');
       const answer = await readLine('Approve which number? (Enter to refresh, q to quit) ');
       if (answer.toLowerCase() === 'q') return;
@@ -757,7 +766,13 @@ async function commandPair(args, verbose) {
         continue;
       }
       const request = pending[choice - 1];
-      const code = pairingCode(request);
+      let code;
+      try {
+        code = await responder.codeFor(request.requestId);
+      } catch (error) {
+        console.log(`\nCould not read that device's key yet: ${error.message}\n`);
+        continue;
+      }
       console.log(`\n${pairingLabel(request)} should be showing this code:\n`);
       console.log(`     ${code}\n`);
       const matches = await readLine('Does that match what you see there? (y/N) ');
@@ -788,7 +803,27 @@ async function commandPair(args, verbose) {
         return;
       }
       console.log(`\nPaired ${pairingLabel(request)}.`);
-      console.log(`It now shares this machine's encrypted Pigeon index${repositories.length ? ` and ${repositories.length} ${repositories.length === 1 ? 'repository' : 'repositories'}` : ''}.`);
+      // Pairing alone left the machine serving nothing, so the browser showed
+      // zero device peers with nothing to confirm against. The service joins
+      // the encrypted index whether or not any repository is registered, so a
+      // paired machine is visible as a peer immediately.
+      const count = repositories.length
+        ? `${repositories.length} ${repositories.length === 1 ? 'repository' : 'repositories'}`
+        : 'no repositories yet';
+      try {
+        const watcher = await startWatchService({ root, verbose });
+        console.log(watcher.started
+          ? `Started the watcher service (PID ${watcher.pid}) with ${count}.`
+          : `The watcher service is already running (PID ${watcher.pid}) with ${count}.`);
+        console.log('This machine now appears as a device peer in the browser.');
+      } catch (error) {
+        console.log(`\nCould not start the watcher service: ${error.message}`);
+        console.log('Run `git pigeon start` to retry; until it runs the browser sees no device peer.');
+        return;
+      }
+      if (!repositories.length) {
+        console.log('\nRun `git pigeon init` inside a repository to start syncing one.');
+      }
       return;
     }
   } finally {
@@ -832,15 +867,34 @@ async function commandTracked(args, cwd) {
   for (const file of files) console.log(file);
 }
 
+function waitForAnyPeer(node, timeoutMs) {
+  if (node.getConnectedPeers().length > 0) return Promise.resolve(node.getConnectedPeers()[0]);
+  return new Promise((resolve, reject) => {
+    const connected = (peerId) => {
+      clearTimeout(timer);
+      node.off('peerConnected', connected);
+      resolve(peerId);
+    };
+    const timer = setTimeout(() => {
+      node.off('peerConnected', connected);
+      reject(new Error('No GitPigeon peer connected before the timeout'));
+    }, Math.max(1, timeoutMs));
+    node.on('peerConnected', connected);
+  });
+}
+
 async function commandSync(args, cwd, verbose) {
   const waitMs = duration(takeOption(args, '--wait'), DEFAULT_SYNC_WAIT_MS);
   const force = takeFlag(args, '--force');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const { repository, config } = await configuredRepository(cwd);
   const log = logger(verbose);
-  const { runtime, synchronizer } = await openNetwork(repository, config, log);
+  // A one-shot sync joins the same single room as the watcher rather than
+  // opening a private repository room that no other peer is in.
+  const index = await connectMachineIndexService(log, { root: machineIndexRoot() });
+  const { synchronizer } = openNetwork(repository, config, log, undefined, undefined, index.node);
   try {
-    await runtime.waitForPeer({ timeoutMs: Math.max(waitMs, DEFAULT_SYNC_WAIT_MS) });
+    await waitForAnyPeer(index.node, Math.max(waitMs, DEFAULT_SYNC_WAIT_MS));
     await synchronizer.start({ publish: false });
     await synchronizer.publishLocal({ force });
     if (waitMs > 0) await sleep(waitMs);
@@ -848,7 +902,7 @@ async function commandSync(args, cwd, verbose) {
     await synchronizer.publishLocal();
   } finally {
     await synchronizer.stop();
-    await runtime.close();
+    await index.close();
   }
 }
 
@@ -932,8 +986,17 @@ export async function commandStart(args, {
   const repositories = watchedRepositories(
     await listMachinePigeons({ root, activeOnly: false }),
   );
+  // A paired machine is a peer on the mesh whether or not it has repositories
+  // yet, and the service joins the encrypted index either way. Refusing to run
+  // on an empty index left a freshly paired machine invisible with no way to
+  // confirm it, short of registering a repository first.
   if (!repositories.length) {
-    throw new Error('The persistent GitPigeon index is empty. Run `git pigeon init` in a repository first.');
+    const empty = await startService({ root, pollMs, verbose });
+    console.log(empty.started
+      ? `GitPigeon started the machine-wide background service (PID ${empty.pid}) with no repositories yet.`
+      : `The GitPigeon watcher service is already running (PID ${empty.pid}) with no repositories yet.`);
+    console.log('This machine appears as a device peer. Run `git pigeon init` in a repository to sync one.');
+    return;
   }
 
   if (restart) await stopService(root);

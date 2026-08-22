@@ -427,8 +427,13 @@ async function connectMachineDirectory(index, logger = {}, {
   await installNativeStorage(root);
   const { PeerPigeonNode } = await import('peerpigeon');
   const prefix = `gitpigeon/index/v1/${index.indexId}/`;
+  const repositoryPrefix = 'gitpigeon/v1/';
   const node = new PeerPigeonNode({
-    crypto: false,
+    // One node, one room. Repository traffic used to open a separate
+    // PeerPigeon room per repository while browsers carried everything on this
+    // one, so repository records never reached them and the two sides only ever
+    // met on the index.
+    crypto: { roomId: `gitpigeon:index:${index.indexId}`, roomSecret: index.secret },
     networkId: INDEX_NETWORK_ID,
     sessionId: index.indexId,
     minPeers: 1,
@@ -444,7 +449,11 @@ async function connectMachineDirectory(index, logger = {}, {
       sessionId: `${INDEX_NETWORK_ID}:${index.indexId}`,
       syncSecret: index.secret,
       dbName: `gitpigeon-index-${index.indexId}-${index.publisherId}`,
-      syncFilter: (_space, key) => String(key).startsWith(prefix),
+      // This node carries the index and every repository, matching the browser.
+      syncFilter: (_space, key) => {
+        const value = String(key);
+        return value.startsWith(prefix) || value.startsWith(repositoryPrefix);
+      },
     },
   });
   const roomLabel = `index ${index.indexId.slice(0, 10)}`;

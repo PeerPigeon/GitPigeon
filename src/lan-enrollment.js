@@ -10,7 +10,7 @@ import {
   openDeviceGrant,
   validateDeviceEnrollmentRequest,
 } from './device-grants.js';
-import { startDeviceApprovalRequester } from './device-approval-mesh.js';
+import { createMeshPairingRequest, startDeviceApprovalRequester } from './device-approval-mesh.js';
 
 const REQUEST_BUCKET_MS = 5_000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -83,10 +83,20 @@ export async function requestLanDeviceApproval(identity, {
     socket.on('message', (data, remote) => {
       accept(decodeMessage(data), `LAN ${remote.address}`);
     });
-    meshSessionPromise = startDeviceApprovalRequester(identity, request, {
-      logger,
-      onGrant: (envelope) => accept(envelope, 'PeerPigeon mesh'),
-    }).catch((error) => {
+    // Over the mesh, PeerPigeon encrypts the grant to this peer's key with
+    // unsea, so the capability arrives already opened. The LAN/UDP path below
+    // has no PeerPigeon transport and still carries its own sealed envelope.
+    meshSessionPromise = startDeviceApprovalRequester(
+      createMeshPairingRequest({ requestId: request.requestId, deviceName: request.deviceName }),
+      {
+        logger,
+        onGrant: (capability) => {
+          if (settled) return;
+          logger.debug?.('Encrypted device approval received through the PeerPigeon mesh');
+          finish(null, { request, grant: capability });
+        },
+      },
+    ).catch((error) => {
       logger.debug?.(`PeerPigeon device approval discovery: ${error.message}`);
       return null;
     });

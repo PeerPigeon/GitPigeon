@@ -6,6 +6,8 @@ import test from 'node:test';
 import {
   DEVICE_APPROVAL_NETWORK_ID,
   DEVICE_APPROVAL_SESSION_ID,
+  createMeshPairingRequest,
+  MESH_PAIRING_PROTOCOL,
   startDeviceApprovalRequester,
 } from '../src/device-approval-mesh.js';
 import {
@@ -102,30 +104,40 @@ test('native clone URLs contain ciphertext and decrypt into a validated reposito
   }
 });
 
-test('discovers an approved browser directly through PeerPigeon without a watcher bridge', async () => {
+test('a mesh pairing grant arrives through PeerPigeon encryption, not a second envelope', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'gitpigeon-mesh-approval-'));
   try {
-    const identity = await loadOrCreateNativeDeviceIdentity({ root });
-    const request = createDeviceEnrollmentRequest(identity, { port: 41_717 });
+    const request = createMeshPairingRequest({ requestId: 'a'.repeat(32), deviceName: 'New device' });
     let fake;
     let resolveGrant;
     const received = new Promise((resolve) => { resolveGrant = resolve; });
-    const session = await startDeviceApprovalRequester(identity, request, {
+    const session = await startDeviceApprovalRequester(request, {
       nodeFactory: (options) => {
         fake = new FakeApprovalNode(options);
         return fake;
       },
-      onGrant: (_envelope, grant) => resolveGrant(grant),
+      onGrant: (capability) => resolveGrant(capability),
     });
     assert.equal(fake.options.networkId, DEVICE_APPROVAL_NETWORK_ID);
     assert.equal(fake.options.sessionId, DEVICE_APPROVAL_SESSION_ID);
-    // Gossip carries the request object; PeerPigeon owns serialization.
+    // sendEncryptedDirect throws on a node without crypto.
+    assert.notEqual(fake.options.crypto, false);
     assert.deepEqual(fake.broadcasts, [request]);
 
-    const envelope = sealDeviceGrant(identity.publicKey, request.requestId, {
-      index: { indexId: 'c'.repeat(32), secret: 'z'.repeat(43) },
+    // PeerPigeon hands over an already-decrypted payload; the request carries
+    // no public key of its own because unsea encrypts to the peer key.
+    assert.equal(request.publicKey, undefined);
+    fake.emit('message', {
+      local: false,
+      encrypted: true,
+      fromPeerId: 'browser-peer',
+      data: JSON.stringify({
+        protocol: MESH_PAIRING_PROTOCOL,
+        kind: 'grant',
+        requestId: request.requestId,
+        capability: { index: { indexId: 'c'.repeat(32), secret: 'z'.repeat(43) } },
+      }),
     });
-    fake.emit('message', { local: false, fromPeerId: 'browser-peer', data: envelope });
     assert.equal((await received).index.indexId, 'c'.repeat(32));
     await session.close();
     assert.equal(fake.destroyed, true);

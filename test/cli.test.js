@@ -63,18 +63,21 @@ test('start launches the machine-wide service and waits for every persistent rep
   assert.deepEqual(loaded.sort(), [first.root, second.root].sort());
 });
 
-test('start refuses to launch a watcher with an empty persistent index', async (t) => {
+test('start launches the watcher on an empty index so a paired machine is a peer', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-start-empty-index-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   let started = false;
-  await assert.rejects(commandStart([], {
+  // The service joins the encrypted index with or without repositories.
+  // Refusing here left a freshly paired machine invisible in the browser, with
+  // no way to confirm it short of registering a repository first.
+  await commandStart([], {
     indexRoot: path.join(root, 'state'),
     startService: async () => {
       started = true;
-      return { started: true };
+      return { started: true, pid: 4242 };
     },
-  }), /persistent GitPigeon index is empty/);
-  assert.equal(started, false);
+  });
+  assert.equal(started, true);
 });
 
 test('restart replaces the watcher and reports the completed restart', async (t) => {
