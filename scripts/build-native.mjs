@@ -7,8 +7,11 @@ import { build } from "esbuild";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argument = process.argv.find((value) => value.startsWith("--output="));
+// `indexOf` returns -1 when the flag is absent, so the unguarded lookup read
+// argv[0] — the node executable — and the build tried to copy node onto itself.
+const separateIndex = process.argv.indexOf("--output");
 const requestedOutput = argument?.slice("--output=".length)
-  ?? process.argv[process.argv.indexOf("--output") + 1];
+  ?? (separateIndex === -1 ? undefined : process.argv[separateIndex + 1]);
 const output = path.resolve(root, requestedOutput || path.join("dist", process.platform === "win32" ? "git-pigeon.exe" : "git-pigeon"));
 const work = path.join(root, ".gitpigeon-build");
 const bundle = path.join(work, "git-pigeon.cjs");
