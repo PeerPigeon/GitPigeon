@@ -1,13 +1,11 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
-import { chmodSync, statSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { spawn } from 'node:child_process';
 import { hostname } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import * as pty from 'node-pty';
 
-const require = createRequire(import.meta.url);
+const STANDALONE = typeof __GITPIGEON_STANDALONE__ !== 'undefined' && __GITPIGEON_STANDALONE__;
 
 export const TERMINAL_PROTOCOL = 'gitpigeon/terminal/1';
 export const TERMINAL_ENVELOPE_PROTOCOL = 'gitpigeon/terminal-envelope/1';
@@ -22,23 +20,63 @@ const OUTPUT_CHUNK_BYTES = 16 * 1024;
 const OUTPUT_BATCH_MS = 8;
 const SESSION_TIMEOUT_MS = 60_000;
 const SWEEP_MS = 15_000;
-const BIN_DIRECTORY = fileURLToPath(new URL('../bin', import.meta.url));
+const BIN_DIRECTORY = STANDALONE ? null : fileURLToPath(new URL('../bin', import.meta.url));
+const DEVICE_COMMAND = STANDALONE
+  ? [process.execPath]
+  : [process.execPath, fileURLToPath(new URL('../bin/git-pigeon.js', import.meta.url))];
 
-function spawnPty(shell, args, options) {
+function quoteShell(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`;
+}
+
+function portablePty(shell, args, options) {
+  let command = shell;
+  let commandArgs = args;
   if (process.platform !== 'win32') {
-    const packageRoot = path.dirname(require.resolve('node-pty/package.json'));
-    const helpers = [
-      path.join(packageRoot, 'build', 'Release', 'spawn-helper'),
-      path.join(packageRoot, 'build', 'Debug', 'spawn-helper'),
-      path.join(packageRoot, 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper'),
-    ];
-    const helper = helpers.find((candidate) => {
-      try { return statSync(candidate).isFile(); } catch { return false; }
-    });
-    if (!helper) throw new Error(`node-pty spawn-helper is missing for ${process.platform}-${process.arch}`);
-    const mode = statSync(helper).mode;
-    if ((mode & 0o111) === 0) chmodSync(helper, mode | 0o755);
+    const setup = `stty rows ${options.rows} cols ${options.cols}; exec ${quoteShell(shell)} ${args.map(quoteShell).join(' ')}`;
+    if (process.platform === 'darwin') {
+      command = '/usr/bin/script';
+      commandArgs = ['-q', '/dev/null', '/bin/sh', '-c', setup];
+    } else {
+      command = '/usr/bin/script';
+      commandArgs = ['-qefc', setup, '/dev/null'];
+    }
   }
+  const child = spawn(command, commandArgs, {
+    cwd: options.cwd,
+    env: options.env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  const dataListeners = new Set();
+  const exitListeners = new Set();
+  const emitData = (chunk) => {
+    const data = chunk.toString('utf8');
+    for (const listener of dataListeners) listener(data);
+  };
+  child.stdout.on('data', emitData);
+  child.stderr.on('data', emitData);
+  child.once('exit', (exitCode, signal) => {
+    for (const listener of exitListeners) listener({ exitCode, signal });
+  });
+  return {
+    onData(listener) {
+      dataListeners.add(listener);
+      return { dispose: () => dataListeners.delete(listener) };
+    },
+    onExit(listener) {
+      exitListeners.add(listener);
+      return { dispose: () => exitListeners.delete(listener) };
+    },
+    write(data) { child.stdin.write(data); },
+    resize() {},
+    kill() { child.kill(); },
+  };
+}
+
+async function spawnPty(shell, args, options) {
+  if (STANDALONE) return portablePty(shell, args, options);
+  const pty = await import('node-pty');
   return pty.spawn(shell, args, options);
 }
 
@@ -106,6 +144,7 @@ function validRoster(value) {
 
 function shellCommand(deviceName) {
   const prompt = `gitpigeon ${deviceName}:$ `;
+  const deviceCommand = DEVICE_COMMAND.map((value) => quoteShell(value)).join(' ');
   if (process.platform === 'win32') {
     const shell = process.env.COMSPEC || 'powershell.exe';
     const powershell = /(?:^|[\\/])(?:pwsh|powershell)(?:\.exe)?$/i.test(shell);
@@ -113,13 +152,17 @@ function shellCommand(deviceName) {
       shell,
       args: [],
       initialize: powershell
-        ? `$function:prompt = { '${prompt.replaceAll("'", "''")}' }; Clear-Host\r`
-        : `prompt ${prompt.replaceAll('&', '^&')}$_$G& cls\r`,
+        ? `function global:device { & ${deviceCommand} terminal-device @args }; $function:prompt = { '${prompt.replaceAll("'", "''")}' }; Clear-Host\r`
+        : `doskey device=${DEVICE_COMMAND.map((value) => `"${value.replaceAll('"', '""')}"`).join(' ')} terminal-device $*& prompt ${prompt.replaceAll('&', '^&')}$_$G& cls\r`,
     };
   }
   const shell = process.env.SHELL && path.isAbsolute(process.env.SHELL) ? process.env.SHELL : '/bin/sh';
   const escaped = prompt.replaceAll("'", "'\\''");
-  return { shell, args: [], initialize: `export PS1='${escaped}'; export PROMPT='${escaped}'; clear\r` };
+  return {
+    shell,
+    args: [],
+    initialize: `device() { ${deviceCommand} terminal-device "$@"; }; export PS1='${escaped}'; export PROMPT='${escaped}'; clear\r`,
+  };
 }
 
 export class TerminalServer {
@@ -214,7 +257,7 @@ export class TerminalServer {
     const pathValue = [BIN_DIRECTORY, process.env.PATH].filter(Boolean).join(path.delimiter);
     let terminal;
     try {
-      terminal = this.spawnPty(command.shell, command.args, {
+      terminal = await this.spawnPty(command.shell, command.args, {
         name: 'xterm-256color',
         cols,
         rows,

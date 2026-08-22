@@ -38,6 +38,7 @@ await build({
   minify: false,
   minifySyntax: true,
   sourcemap: false,
+  external: ["node-pty"],
   define: { __GITPIGEON_STANDALONE__: "true" },
 });
 await writeFile(config, `${JSON.stringify({

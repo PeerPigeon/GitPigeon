@@ -107,6 +107,28 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function commandTerminalDevice(args) {
+  let devices = [];
+  try {
+    const value = JSON.parse(Buffer.from(process.env.GITPIGEON_DEVICE_ROSTER ?? '', 'base64url').toString('utf8'));
+    if (Array.isArray(value) && value.length > 0 && value.length <= 64) {
+      devices = value.map((entry) => String(entry?.name ?? 'device').slice(0, 120));
+    }
+  } catch { /* invalid rosters are reported below */ }
+  const command = args.shift() ?? 'list';
+  if (args.length) throw new Error('Usage: device list | device <number>');
+  if (command === 'list') {
+    if (!devices.length) throw new Error('No GitPigeon terminal devices are available.');
+    devices.forEach((name, index) => console.log(`${index}  ${index === 0 ? '[this device] ' : ''}${name}`));
+    return;
+  }
+  if (/^\d+$/.test(command) && Number(command) < devices.length) {
+    process.stdout.write(`\u001b]777;gitpigeon-device=${Number(command)}\u0007`);
+    return;
+  }
+  throw new Error('Usage: device list | device <number>');
+}
+
 function logger(verbose = false) {
   return {
     info: (message) => console.log(`[gitpigeon] ${message}`),
@@ -1055,6 +1077,7 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   if (command === 'stop') return await commandStop(args);
   if (command === 'clone') return await commandClone(args, cwd, verbose);
   if (command === 'protocol') return await commandProtocol(args, verbose);
+  if (command === 'terminal-device') return commandTerminalDevice(args);
   if (command === 'status') return await commandStatus(args, cwd);
   if (command === 'doctor') return await commandDoctor(args, cwd);
   throw new Error(`Unknown command: ${command}\n\n${HELP}`);

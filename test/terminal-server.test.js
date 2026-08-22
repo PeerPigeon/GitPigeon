@@ -29,6 +29,16 @@ test('device list labels the current device immediately after its index', () => 
   });
 
   assert.equal(output, '0  [this device] Daniels-Mac-mini.local\n1  Other-Mac.local\n');
+
+  const bundledCommandOutput = execFileSync(process.execPath, [
+    fileURLToPath(new URL('../bin/git-pigeon.js', import.meta.url)),
+    'terminal-device',
+    'list',
+  ], {
+    encoding: 'utf8',
+    env: { ...process.env, GITPIGEON_DEVICE_ROSTER: roster },
+  });
+  assert.equal(bundledCommandOutput, output);
 });
 
 class FakeNode extends EventEmitter {
