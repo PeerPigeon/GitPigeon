@@ -50,6 +50,14 @@ download the native installer from the
 [`GitPigeon releases`](https://github.com/PeerPigeon/GitPigeon/releases) page.
 All three paths expose GitPigeon as the ordinary `git pigeon` subcommand.
 
+Packaged watchers check the official GitHub release every 15 minutes. When a
+new stable release is available, the watcher downloads the executable for its
+OS and CPU into its user-owned state directory, verifies the release's
+published SHA-256 checksum, runs the new executable's self-check, and restarts
+the single machine-wide service on the verified build. Update checks are
+single-flight and use GitHub's `ETag` response for conditional requests. Source
+checkout installations are never overwritten automatically.
+
 On a new device, the installer broadcasts a short-lived approval request on a
 dedicated PeerPigeon discovery mesh. Every already-approved browser listens for
 these requests directly and displays the device name and operating system in a
@@ -174,7 +182,17 @@ git pigeon stop
 ```
 
 `stop` is machine-wide and can be run from any directory. Indexed repositories
-remain available to restart with `git pigeon watch` or `git pigeon init`.
+remain available to restart from any directory with:
+
+```bash
+git pigeon start
+```
+
+`start` launches the one machine-wide service, loads every repository retained
+in the persistent index, and returns after each repository session is ready.
+`git pigeon restart` is an exact alias of `git pigeon start`.
+`git pigeon watch` or `git pigeon init` can still add or start the current
+repository.
 `unwatch` is always repository-scoped and is the command that removes an entry
 from the persistent index.
 
@@ -291,6 +309,8 @@ override that disables private syncing and removes the Git exclusion.
 | `git pigeon unwatch` | Remove only the current repository from the encrypted index; keep the service running. |
 | `git pigeon unwatch REPOSITORY` | Remove one repository by name without stopping the service. |
 | `git pigeon watch off` | Repository-scoped alias for `unwatch`. |
+| `git pigeon start` | Start the one machine-wide watcher service and load every persistent indexed repository. |
+| `git pigeon restart` | Alias for `git pigeon start`. |
 | `git pigeon stop` | Stop the one machine-wide watcher service without deleting the persistent index. |
 | `git pigeon invite` | Print the existing invite URL. |
 | `git pigeon track FILE...` | Exclude exact files from Git and sync them privately. |

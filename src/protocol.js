@@ -88,6 +88,7 @@ export class RepositorySynchronizer {
     serviceInstanceId = randomBytes(16).toString('hex'),
     machineIndexId = null,
     streamTransport = null,
+    deviceName = null,
   }) {
     this.repository = repository;
     this.storage = storage;
@@ -103,6 +104,7 @@ export class RepositorySynchronizer {
     this.mutableRecordSettleMs = mutableRecordSettleMs;
     this.serviceInstanceId = serviceInstanceId;
     this.machineIndexId = MACHINE_INDEX.test(String(machineIndexId ?? '')) ? String(machineIndexId) : null;
+    this.deviceName = String(deviceName ?? '').trim().slice(0, 120) || null;
     this.streamTransport = streamTransport;
     this.snapshotStream = streamTransport
       ? new SnapshotStreamServer({
@@ -110,21 +112,15 @@ export class RepositorySynchronizer {
         cache,
         secret: config.secret,
         logger,
-        getMetadata: async () => {
-          const head = this.state?.heads?.[config.deviceId];
-          if (!head?.snapshotId) return null;
-          const manifest = await cache.readManifest(head.snapshotId);
-          if (!manifest) return null;
-          return {
+        getMetadata: async () => ({
             protocol: PROTOCOL,
             repositoryId: config.repositoryId,
             repositoryName: path.basename(repository.root).slice(0, 200),
+            deviceId: config.deviceId,
             serviceInstanceId: this.serviceInstanceId,
             machineIndexId: this.machineIndexId,
-            head,
-            manifest,
-          };
-        },
+            ...(this.deviceName ? { deviceName: this.deviceName } : {}),
+        }),
       })
       : null;
     this.presenceTimer = null;
@@ -739,6 +735,7 @@ export class RepositorySynchronizer {
       serviceInstanceId: this.serviceInstanceId,
       ...(peerId ? { peerId } : {}),
       ...(this.machineIndexId ? { machineIndexId: this.machineIndexId } : {}),
+      ...(this.deviceName ? { deviceName: this.deviceName } : {}),
       updatedAt: new Date().toISOString(),
     };
     // A new key each short time bucket makes the liveness lease independent of

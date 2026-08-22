@@ -82,6 +82,23 @@ function parseRequest(frame) {
   }
 }
 
+function watcherServiceMetadata(value) {
+  if (!value || typeof value !== 'object') return null;
+  const result = {};
+  for (const key of [
+    'protocol',
+    'repositoryId',
+    'repositoryName',
+    'deviceId',
+    'serviceInstanceId',
+    'machineIndexId',
+    'deviceName',
+  ]) {
+    if (typeof value[key] === 'string') result[key] = value[key];
+  }
+  return result;
+}
+
 export class SnapshotStreamServer {
   constructor({ mesh, cache, secret, getMetadata = null, logger = {} }) {
     this.mesh = mesh;
@@ -111,7 +128,11 @@ export class SnapshotStreamServer {
     const frame = decodeFrame(this.key, data);
     if (!frame) return;
     if (frame.type === TYPE_METADATA_REQUEST) {
-      const metadata = await this.getMetadata?.();
+      // This direct frame is the bounded live-watcher handshake. Snapshot
+      // manifests can exceed a WebRTC data channel's message ceiling and must
+      // travel through PeerPigeon storage/streaming instead of being attached
+      // to terminal discovery.
+      const metadata = watcherServiceMetadata(await this.getMetadata?.());
       if (metadata) {
         this.#send(peerId, encodeFrame(
           this.key,

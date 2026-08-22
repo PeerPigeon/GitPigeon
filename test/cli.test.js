@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { commandStop, materializeGrantedRepositories } from '../src/cli.js';
+import { commandStart, commandStop, materializeGrantedRepositories } from '../src/cli.js';
 import { createIdentity } from '../src/config.js';
 import { listMachinePigeons, registerMachinePigeon } from '../src/machine-index.js';
 import { createRepository } from './helpers.js';
@@ -26,6 +26,93 @@ async function stopFixtureProcess(child) {
 async function waitForExit(child) {
   if (child.exitCode === null && child.signalCode === null) await once(child, 'exit');
 }
+
+test('start launches the machine-wide service and waits for every persistent repository', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-start-persistent-index-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const first = await createRepository(path.join(root, 'first'));
+  const second = await createRepository(path.join(root, 'second'));
+  const stateRoot = path.join(root, 'state');
+  await registerMachinePigeon(first, createIdentity({
+    repositoryId: 'start-persistent-first',
+    secret: 'a'.repeat(64),
+    deviceId: 'start-persistent-device-first',
+  }), { root: stateRoot, pid: null });
+  await registerMachinePigeon(second, createIdentity({
+    repositoryId: 'start-persistent-second',
+    secret: 'b'.repeat(64),
+    deviceId: 'start-persistent-device-second',
+  }), { root: stateRoot, pid: null });
+  let serviceOptions;
+  const loaded = [];
+
+  await commandStart(['--poll', '750ms'], {
+    verbose: true,
+    indexRoot: stateRoot,
+    startService: async (options) => {
+      serviceOptions = options;
+      return { started: true };
+    },
+    waitForRepository: async (indexRoot, repository) => {
+      assert.equal(indexRoot, stateRoot);
+      loaded.push(repository);
+    },
+  });
+
+  assert.deepEqual(serviceOptions, { root: stateRoot, pollMs: 750, verbose: true });
+  assert.deepEqual(loaded.sort(), [first.root, second.root].sort());
+});
+
+test('start refuses to launch a watcher with an empty persistent index', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-start-empty-index-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let started = false;
+  await assert.rejects(commandStart([], {
+    indexRoot: path.join(root, 'state'),
+    startService: async () => {
+      started = true;
+      return { started: true };
+    },
+  }), /persistent GitPigeon index is empty/);
+  assert.equal(started, false);
+});
+
+test('restart replaces the watcher and reports the completed restart', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-restart-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await createRepository(path.join(root, 'repository'));
+  const stateRoot = path.join(root, 'state');
+  await registerMachinePigeon(repository, createIdentity({
+    repositoryId: 'restart-persistent-repository',
+    secret: 'r'.repeat(64),
+    deviceId: 'restart-persistent-device',
+  }), { root: stateRoot, pid: null });
+  const calls = [];
+  const messages = [];
+  t.mock.method(console, 'log', (message) => messages.push(message));
+
+  await commandStart([], {
+    indexRoot: stateRoot,
+    restart: true,
+    stopService: async (indexRoot) => { calls.push(`stop:${indexRoot}`); },
+    startService: async ({ root: indexRoot }) => {
+      calls.push(`start:${indexRoot}`);
+      return { started: true };
+    },
+    waitForRepository: async (indexRoot, repositoryRoot) => {
+      calls.push(`wait:${indexRoot}:${repositoryRoot}`);
+    },
+  });
+
+  assert.deepEqual(calls, [
+    `stop:${stateRoot}`,
+    `start:${stateRoot}`,
+    `wait:${stateRoot}:${repository.root}`,
+  ]);
+  assert.deepEqual(messages, [
+    'GitPigeon restarted the machine-wide background service and is watching 1 repository.',
+  ]);
+});
 
 test('stop terminates discovered watcher processes even when the index is empty', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-stop-empty-index-test-'));

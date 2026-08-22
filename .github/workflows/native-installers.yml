@@ -18,15 +18,19 @@ jobs:
           - os: macos-15
             artifact: macos-arm64
             installer: GitPigeon-macos-arm64.pkg
+            update_asset: GitPigeon-macos-arm64
           - os: macos-15-intel
             artifact: macos-x64
             installer: GitPigeon-macos-x64.pkg
+            update_asset: GitPigeon-macos-x64
           - os: ubuntu-24.04
             artifact: linux
             installer: GitPigeon-linux-amd64.deb
+            update_asset: GitPigeon-linux-x64
           - os: windows-2025
             artifact: windows
             installer: GitPigeon-windows-x64-Setup.exe
+            update_asset: GitPigeon-windows-x64.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +45,9 @@ jobs:
       - name: Verify standalone executable
         shell: bash
         run: "dist/git-pigeon${{ runner.os == 'Windows' && '.exe' || '' }} --help"
+      - name: Stage automatic-update executable
+        shell: bash
+        run: cp "dist/git-pigeon${{ runner.os == 'Windows' && '.exe' || '' }}" "dist/${{ matrix.update_asset }}"
       - name: Build macOS bootstrap archive
         if: runner.os == 'macOS'
         shell: bash
@@ -70,6 +77,7 @@ jobs:
             dist/*.deb
             dist/*.tar.gz
             dist/*-Setup.exe
+            dist/${{ matrix.update_asset }}
           if-no-files-found: error
 
   release:
@@ -101,6 +109,10 @@ jobs:
             GitPigeon-macos-x64.tar.gz \
             GitPigeon-linux-amd64.deb \
             GitPigeon-windows-x64-Setup.exe \
+            GitPigeon-macos-arm64 \
+            GitPigeon-macos-x64 \
+            GitPigeon-linux-x64 \
+            GitPigeon-windows-x64.exe \
             SHA256SUMS
           do
             grep -Fxq "${expected}" <<<"${assets}" || {

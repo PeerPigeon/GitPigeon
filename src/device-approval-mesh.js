@@ -3,7 +3,6 @@ import {
   openDeviceGrant,
   validateDeviceEnrollmentRequest,
 } from './device-grants.js';
-import { productionSignalingServers } from './relay-policy.js';
 import { installNativeWebRTC } from './webrtc.js';
 
 export const DEVICE_APPROVAL_NETWORK_ID = 'gitpigeon-device-approval-v1';
@@ -35,8 +34,6 @@ export async function startDeviceApprovalRequester(identity, requestValue, {
     await installNativeWebRTC();
     const peerpigeon = await import('peerpigeon');
     PartialMesh = peerpigeon.PartialMesh;
-    signalingServers = signalingServers
-      ?? productionSignalingServers(peerpigeon.DEFAULT_SIGNALING_SERVERS);
   }
   let closed = false;
   const announcing = new Set();

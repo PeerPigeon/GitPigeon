@@ -4,6 +4,7 @@ import { mkdir, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { deviceHostName } from './device-name.js';
 import { DEFAULT_POLL_MS, DEFAULT_SYNC_WAIT_MS } from './constants.js';
 import { RepositoryCache } from './cache.js';
 import { createIdentity, loadConfig, saveConfig } from './config.js';
@@ -43,7 +44,10 @@ import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollm
 import { installNativeIntegration } from './native-install.js';
 import { connectPeerPigeon } from './peerpigeon.js';
 import { RepositorySynchronizer } from './protocol.js';
+import { TerminalServer } from './terminal-server.js';
 import { WorkspaceFiles } from './workspace.js';
+import { clearInstalledUpdate, startAutomaticUpdates } from './auto-update.js';
+import { GITPIGEON_VERSION, IS_STANDALONE } from './version.js';
 
 const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
 
@@ -54,6 +58,8 @@ Usage:
   git pigeon list
   git pigeon pair [--rotate]
   git pigeon unwatch [REPOSITORY]
+  git pigeon start [--poll DURATION]
+  git pigeon restart [--poll DURATION]
   git pigeon stop
   git pigeon watch [off] [--poll DURATION]
   git pigeon invite
@@ -125,6 +131,7 @@ async function openNetwork(repository, config, log, serviceInstanceId, machineIn
     logger: log,
     serviceInstanceId,
     machineIndexId,
+    deviceName: deviceHostName(),
     streamTransport: runtime.node.mesh,
     storageWritePauseMs: 0,
     // Browser peers retain PeerPigeon records in IndexedDB while the native
@@ -156,6 +163,16 @@ async function prepareRepositorySession(entry) {
 
 async function openRepositorySession({ repository, config }, pollMs, log, serviceInstanceId, machineIndexId) {
   const { runtime, synchronizer } = await openNetwork(repository, config, log, serviceInstanceId, machineIndexId);
+  const terminalServer = new TerminalServer({
+    node: runtime.node,
+    repository,
+    secret: config.secret,
+    repositoryId: config.repositoryId,
+    serviceInstanceId,
+    deviceName: deviceHostName(),
+    logger: log,
+  });
+  terminalServer.start();
   let changeTimer;
   let filesystemWatcher;
   let peerRefreshTimer;
@@ -229,6 +246,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       if (changeTimer) clearTimeout(changeTimer);
       filesystemWatcher?.close();
       if (peerRefreshTimer) clearTimeout(peerRefreshTimer);
+      terminalServer.stop();
       while (starting || publishing) await sleep(10);
       await synchronizer.stop();
       await runtime.close();
@@ -259,6 +277,8 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let reconciliationTimer;
   let indexWatcher;
   let reconciling = false;
+  let automaticUpdates;
+  let installedUpdate;
 
   const publishServiceRepositoryState = async () => {
     if (!control) return;
@@ -403,8 +423,19 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     indexWatcher.on("error", (error) => log.error(error));
     await control.ready();
     log.info(`GitPigeon service is watching ${sessions.size} ${sessions.size === 1 ? 'repository' : 'repositories'} as PID ${process.pid}`);
+    automaticUpdates = startAutomaticUpdates({
+      enabled: IS_STANDALONE,
+      root,
+      currentVersion: GITPIGEON_VERSION,
+      logger: log,
+      onUpdate: async (update) => {
+        installedUpdate = update;
+        stop();
+      },
+    });
     await stopped;
   } finally {
+    automaticUpdates?.stop();
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);
     if (reconciliationTimer) clearTimeout(reconciliationTimer);
@@ -415,6 +446,15 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     if (lanApprovals) await lanApprovals.close();
     if (machineIndex) await machineIndex.close();
     if (control) await control.close();
+  }
+  if (installedUpdate) {
+    try {
+      await startWatchService({ root, pollMs, verbose });
+    } catch (error) {
+      await clearInstalledUpdate(root, installedUpdate.executable);
+      log.error(new Error(`GitPigeon ${installedUpdate.version} could not start; restoring ${GITPIGEON_VERSION}: ${error.message}`));
+      await startWatchService({ root, pollMs, verbose, entrypoint: process.execPath });
+    }
   }
 }
 
@@ -717,6 +757,38 @@ function watchedRepositories(registrations) {
   ));
 }
 
+export async function commandStart(args, {
+  verbose = false,
+  indexRoot,
+  restart = false,
+  startService = startWatchService,
+  stopService = stopWatchService,
+  waitForRepository = waitForWatchServiceRepository,
+} = {}) {
+  const pollMs = duration(takeOption(args, '--poll'), DEFAULT_POLL_MS);
+  if (pollMs < 100) throw new Error('Poll interval must be at least 100ms');
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  const root = indexRoot ?? machineIndexRoot();
+  const repositories = watchedRepositories(
+    await listMachinePigeons({ root, activeOnly: false }),
+  );
+  if (!repositories.length) {
+    throw new Error('The persistent GitPigeon index is empty. Run `git pigeon init` in a repository first.');
+  }
+
+  if (restart) await stopService(root);
+  const result = await startService({ root, pollMs, verbose });
+  await Promise.all(repositories.map((repository) => (
+    waitForRepository(root, repository.root)
+  )));
+  const count = repositories.length;
+  console.log(restart
+    ? `GitPigeon restarted the machine-wide background service and is watching ${count} ${count === 1 ? 'repository' : 'repositories'}.`
+    : result.started
+    ? `GitPigeon started the machine-wide background service and is watching ${count} ${count === 1 ? 'repository' : 'repositories'}.`
+    : `The GitPigeon watcher service is already running and watching ${count} ${count === 1 ? 'repository' : 'repositories'}.`);
+}
+
 async function commandList(args) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const registrations = await listMachinePigeons({ activeOnly: false });
@@ -977,6 +1049,9 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   if (command === 'sync') return await commandSync(args, cwd, verbose);
   if (command === 'watch') return await commandWatch(args, cwd, verbose);
   if (command === 'unwatch') return await commandUnwatch(args, cwd);
+  if (command === 'start' || command === 'restart') {
+    return await commandStart(args, { verbose, restart: command === 'restart' });
+  }
   if (command === 'stop') return await commandStop(args);
   if (command === 'clone') return await commandClone(args, cwd, verbose);
   if (command === 'protocol') return await commandProtocol(args, verbose);

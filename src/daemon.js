@@ -6,6 +6,7 @@ import process from 'node:process';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { readInstalledUpdate } from './auto-update.js';
 
 const STANDALONE = typeof __GITPIGEON_STANDALONE__ === 'boolean'
   ? __GITPIGEON_STANDALONE__
@@ -155,6 +156,11 @@ export function watchServiceHasRepository(status, repository) {
   );
 }
 
+export async function preferredServiceEntrypoint(root, fallback = ENTRYPOINT, { standalone = STANDALONE } = {}) {
+  if (!standalone) return fallback;
+  return (await readInstalledUpdate(root))?.executable ?? fallback;
+}
+
 export async function waitForWatchServiceRepository(root, repository, {
   timeoutMs = START_TIMEOUT_MS,
 } = {}) {
@@ -191,7 +197,7 @@ export async function startWatchService({
   root,
   pollMs,
   verbose = false,
-  entrypoint = ENTRYPOINT,
+  entrypoint,
   findWatcherPids = listGitPigeonWatcherPids,
 } = {}) {
   if (!root) throw new Error('GitPigeon service state root is required');
@@ -214,8 +220,10 @@ export async function startWatchService({
     const output = await open(service.log, 'a', 0o600);
     let child;
     try {
+      const selectedEntrypoint = entrypoint ?? await preferredServiceEntrypoint(root);
+      const executable = STANDALONE ? selectedEntrypoint : process.execPath;
       const args = [
-        ...(STANDALONE ? [] : [entrypoint]),
+        ...(STANDALONE ? [] : [selectedEntrypoint]),
         'watch',
         '--foreground',
         `--service-child=${token}`,
@@ -223,7 +231,7 @@ export async function startWatchService({
       ];
       if (pollMs !== undefined) args.push(`--poll=${pollMs}ms`);
       if (verbose) args.push('--verbose');
-      child = spawn(process.execPath, args, {
+      child = spawn(executable, args, {
         cwd: root,
         detached: true,
         windowsHide: true,

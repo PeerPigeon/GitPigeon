@@ -1,31 +1,17 @@
 import { NETWORK_ID, repositoryRoomTopology, storagePrefix } from './constants.js';
-import { productionSignalingServers } from './relay-policy.js';
 import { installNativeWebRTC } from './webrtc.js';
 
-const PEERPIGEON_START_TIMEOUT_MS = 15_000;
-
 async function startPeerPigeonNode(node, label) {
-  let timer;
-  try {
-    await Promise.race([
-      node.start(),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`${label} did not finish PeerPigeon startup within ${PEERPIGEON_START_TIMEOUT_MS / 1_000} seconds`));
-        }, PEERPIGEON_START_TIMEOUT_MS);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  // PeerPigeon owns its bounded startup and recovery. Do not stack a second
+  // GitPigeon timer on top of its connection state machine.
+  await node.start();
 }
 
 export async function connectPeerPigeon(config, logger = {}) {
   await installNativeWebRTC();
   let PeerPigeonNode;
-  let defaultSignalingServers;
   try {
-    ({ PeerPigeonNode, DEFAULT_SIGNALING_SERVERS: defaultSignalingServers } = await import('peerpigeon'));
+    ({ PeerPigeonNode } = await import('peerpigeon'));
   } catch (error) {
     throw new Error(`PeerPigeon is not installed. Run your package manager install first. (${error.message})`);
   }
@@ -45,7 +31,6 @@ export async function connectPeerPigeon(config, logger = {}) {
     tolerantPeers: 0,
     autoDiscover: true,
     autoConnect: true,
-    signalingServers: productionSignalingServers(defaultSignalingServers),
     storage: {
       userId: config.deviceId,
       sessionId: `${NETWORK_ID}:${config.repositoryId}`,

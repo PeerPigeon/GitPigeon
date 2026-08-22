@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -7,6 +7,7 @@ import {
   createWatchServiceControl,
   isGitPigeonWatcherCommand,
   listGitPigeonWatcherPids,
+  preferredServiceEntrypoint,
   startWatchService,
   stopWatchService,
   watcherPidsFromProcessRows,
@@ -14,6 +15,26 @@ import {
   watchServiceHasRepository,
   watchServiceStatus,
 } from '../src/daemon.js';
+
+test('packaged services prefer the verified automatic-update executable', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-service-update-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, 'updates', '0.1.11');
+  const executable = path.join(directory, 'git-pigeon');
+  await mkdir(directory, { recursive: true });
+  await writeFile(executable, 'updated executable');
+  await chmod(executable, 0o755);
+  await writeFile(path.join(root, 'updates', 'current.json'), `${JSON.stringify({
+    version: 1,
+    releaseVersion: '0.1.11',
+    executable,
+    sha256: 'a'.repeat(64),
+    installedAt: new Date().toISOString(),
+  })}\n`);
+
+  assert.equal(await preferredServiceEntrypoint(root, '/old/git-pigeon', { standalone: true }), executable);
+  assert.equal(await preferredServiceEntrypoint(root, '/source/git-pigeon.js', { standalone: false }), '/source/git-pigeon.js');
+});
 
 test('finds only GitPigeon foreground watcher processes', async () => {
   assert.equal(isGitPigeonWatcherCommand('/usr/bin/node /repo/bin/git-pigeon.js watch --foreground --daemon-child=secret'), true);

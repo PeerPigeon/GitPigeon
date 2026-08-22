@@ -70,10 +70,18 @@ test('machine index securely groups active repositories for PeerPigeon publicati
     publishers: ['1'.repeat(32)],
   }, 1_700_000_000_000);
   assert.deepEqual(roster.publishers, ['1'.repeat(32), state.publisherId].sort());
-  const publisher = publisherDirectoryValue(state, active, 1_700_000_000_000, watcherServiceId);
+  const publisherPeerId = 'peer-transport-id';
+  const publisher = publisherDirectoryValue(
+    state,
+    active,
+    1_700_000_000_000,
+    watcherServiceId,
+    publisherPeerId,
+  );
   assert.equal(publisher.kind, 'publisher-directory');
   assert.equal(publisher.publisherId, state.publisherId);
   assert.equal(publisher.serviceInstanceId, watcherServiceId);
+  assert.equal(publisher.peerId, publisherPeerId);
 
   assert.equal((await unregisterMachinePigeon(firstRepository, { root: stateRoot })).removed, true);
   assert.deepEqual((await listMachinePigeons({ root: stateRoot })).map(({ repositoryId }) => repositoryId), ['beta-pigeon']);

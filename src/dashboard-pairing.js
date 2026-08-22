@@ -8,7 +8,6 @@ import {
   timingSafeEqual,
 } from 'node:crypto';
 import { installNativeWebRTC } from './webrtc.js';
-import { productionSignalingServers } from './relay-policy.js';
 
 export const PAIRING_PROTOCOL = 'gitpigeon-pairing/1';
 export const PAIRING_NETWORK_ID = 'gitpigeon-pairing-v1';
@@ -156,7 +155,7 @@ export async function serveDashboardEnrollment(enrollment, {
   federationWarmupMs = 2_000,
 } = {}) {
   await installNativeWebRTC();
-  const { PeerPigeonNode, DEFAULT_SIGNALING_SERVERS } = await import('peerpigeon');
+  const { PeerPigeonNode } = await import('peerpigeon');
   const storagePrefix = `${prefix(enrollment.pairingId)}/`;
   const node = new PeerPigeonNode({
     crypto: false,
@@ -167,7 +166,6 @@ export async function serveDashboardEnrollment(enrollment, {
     tolerantPeers: 1,
     autoDiscover: true,
     autoConnect: true,
-    signalingServers: productionSignalingServers(DEFAULT_SIGNALING_SERVERS),
     storage: {
       userId: `native-${randomBytes(16).toString('hex')}`,
       sessionId: `${PAIRING_NETWORK_ID}:${enrollment.pairingId}`,

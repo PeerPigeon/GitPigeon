@@ -35,6 +35,43 @@ class FakeMesh {
   }
 }
 
+test('answers authenticated watcher metadata before a snapshot exists', async () => {
+  const secret = 'snapshot-stream-metadata-secret';
+  const service = {
+    protocol: 'gitpigeon/1',
+    repositoryId: 'repository-id',
+    serviceInstanceId: 'a'.repeat(32),
+    deviceName: 'test-device',
+  };
+  const metadata = {
+    ...service,
+    head: { snapshotId: 'b'.repeat(64) },
+    manifest: { liveFiles: [{ content: 'x'.repeat(80_000) }] },
+  };
+  const mesh = new FakeMesh();
+  const server = new SnapshotStreamServer({
+    mesh,
+    cache: {},
+    secret,
+    getMetadata: async () => metadata,
+  });
+  server.start();
+  const key = snapshotStreamWire.streamKey(secret);
+  const requestId = Buffer.alloc(16, 9);
+  mesh.receive('browser-peer', snapshotStreamWire.encodeFrame(
+    key,
+    snapshotStreamWire.TYPE_METADATA_REQUEST,
+    requestId,
+    0,
+  ));
+  await waitFor(() => mesh.sent.length === 1);
+  const response = snapshotStreamWire.decodeFrame(key, mesh.sent[0].data);
+  assert.equal(response.type, snapshotStreamWire.TYPE_METADATA);
+  assert.deepEqual(JSON.parse(response.plaintext.toString('utf8')), service);
+  assert.ok(mesh.sent[0].data.length < 65_536, 'watcher discovery must stay below the WebRTC message ceiling');
+  server.stop();
+});
+
 test('streams encrypted snapshot frames with acknowledgement backpressure', async () => {
   const secret = 'snapshot-stream-test-secret-0123456789';
   const snapshotId = 'a'.repeat(64);
