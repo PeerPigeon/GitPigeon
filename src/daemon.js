@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { watch as watchFilesystem } from 'node:fs';
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, stat, truncate, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { execFile, spawn } from 'node:child_process';
@@ -18,6 +18,8 @@ const START_TIMEOUT_MS = 20_000;
 const HEARTBEAT_STALE_MS = 10_000;
 const HEARTBEAT_INTERVAL_MS = 3_000;
 const START_LOCK_STALE_MS = 30_000;
+const SERVICE_LOG_MAX_BYTES = 5 * 1024 * 1024;
+const SERVICE_LOG_CHECK_MS = 60_000;
 export const SERVICE_PROTOCOL_VERSION = 5;
 const execFileAsync = promisify(execFile);
 
@@ -78,6 +80,14 @@ function servicePaths(root) {
     log: path.join(root, 'service.log'),
     startLock: path.join(root, 'service-start.lock'),
   };
+}
+
+async function capServiceLog(filename) {
+  try {
+    if ((await stat(filename)).size > SERVICE_LOG_MAX_BYTES) await truncate(filename, 0);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
 }
 
 async function writeState(filename, value) {
@@ -217,6 +227,7 @@ export async function startWatchService({
     await rm(service.command, { force: true });
 
     const token = randomBytes(32).toString('hex');
+    await capServiceLog(service.log);
     const output = await open(service.log, 'a', 0o600);
     let child;
     try {
@@ -335,6 +346,8 @@ export async function createWatchServiceControl(root, token, stop) {
   });
   commandWatcher.on('error', () => {});
   const timer = setInterval(() => { poll().catch(() => {}); }, HEARTBEAT_INTERVAL_MS);
+  const logTimer = setInterval(() => { capServiceLog(service.log).catch(() => {}); }, SERVICE_LOG_CHECK_MS);
+  logTimer.unref?.();
   const updateState = async (change) => {
     while (working) await sleep(10);
     working = true;
@@ -361,6 +374,7 @@ export async function createWatchServiceControl(root, token, stop) {
       closed = true;
       commandWatcher.close();
       clearInterval(timer);
+      clearInterval(logTimer);
       while (working) await sleep(10);
       const current = await readWatchServiceState(root);
       if (current?.token === token) await rm(service.state, { force: true });

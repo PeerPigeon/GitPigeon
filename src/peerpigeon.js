@@ -56,7 +56,13 @@ export async function connectPeerPigeon(config, logger = {}) {
   // PeerPigeon and FreeRTC own signaling recovery, federation, and redial.
   // Calling recoverAfterInactivity from GitPigeon while a negotiation is in
   // progress tears down the healthy transport and creates a reconnect loop.
-  node.on('error', (error) => logger.error?.(error));
+  node.on('error', (error) => {
+    if (/^Negotiation stalled\b/.test(String(error?.message ?? error ?? ''))) {
+      logger.debug?.(error?.message ?? error);
+      return;
+    }
+    logger.error?.(error);
+  });
   node.on('peerConnected', (peerId) => logger.debug?.(`[${roomLabel}] peer connected: ${peerId}`));
   node.on('peerDisconnected', (peerId) => logger.debug?.(`[${roomLabel}] peer disconnected: ${peerId}`));
   try {
