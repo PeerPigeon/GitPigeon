@@ -1,6 +1,7 @@
 import {
   DEVICE_GRANT_PROTOCOL,
   openDeviceGrant,
+  sealDeviceGrant,
   validateDeviceEnrollmentRequest,
 } from './device-grants.js';
 import { installNativeWebRTC } from './webrtc.js';
@@ -111,6 +112,95 @@ export async function startDeviceApprovalRequester(identity, requestValue, {
       clearInterval(timer);
       node.off('message', receive);
       node.off('peerConnected', announce);
+      await node.destroy();
+    },
+  };
+}
+
+
+/**
+ * The approving side of the same discovery room.
+ *
+ * Until now only browsers could approve a pairing, so the very first browser on
+ * a machine had nothing to ask: it told the user to "open an already-approved
+ * GitPigeon browser" when none existed. A watcher host can answer that request
+ * directly, which is what `git pigeon pair` uses.
+ */
+export async function startDeviceApprovalResponder({
+  logger = {},
+  onRequest = () => {},
+  nodeFactory,
+  requestStaleMs = 20_000,
+} = {}) {
+  let PeerPigeonNode;
+  if (!nodeFactory) {
+    await installNativeWebRTC();
+    ({ PeerPigeonNode } = await import('peerpigeon'));
+  }
+  const options = deviceApprovalNodeOptions();
+  const node = nodeFactory ? nodeFactory(options) : new PeerPigeonNode(options);
+  const requests = new Map();
+  let closed = false;
+
+  const receive = (message) => {
+    if (closed || message?.local || !message?.fromPeerId) return;
+    const request = validateDeviceEnrollmentRequest(decode(message.data));
+    if (!request) return;
+    const known = requests.get(request.requestId);
+    requests.set(request.requestId, {
+      request,
+      peerId: String(message.fromPeerId),
+      lastSeenAt: Date.now(),
+    });
+    if (!known) {
+      Promise.resolve(onRequest(request)).catch((error) => logger.debug?.(error.message));
+    }
+  };
+
+  node.mesh.on('identity:ready', ({ clientId } = {}) => {
+    logger.debug?.(`[device pairing] identity ready as ${String(clientId ?? 'unknown').slice(0, 12)}`);
+  });
+  node.mesh.on('signaling:connected', ({ signalingServer } = {}) => {
+    logger.debug?.(`[device pairing] signaling connected through ${signalingServer ?? 'a federated relay'}`);
+  });
+  node.on('message', receive);
+  node.on('error', (error) => logger.debug?.(`Device pairing mesh: ${error?.message ?? error}`));
+
+  await node.start();
+
+  return {
+    node,
+    /** Live requests, oldest first, with expired and silent ones dropped. */
+    pending() {
+      const now = Date.now();
+      for (const [requestId, record] of requests) {
+        const expired = Date.parse(record.request.expiresAt) <= now;
+        if (expired || now - record.lastSeenAt > requestStaleMs) requests.delete(requestId);
+      }
+      return [...requests.values()]
+        .sort((left, right) => left.request.issuedAt.localeCompare(right.request.issuedAt))
+        .map(({ request }) => request);
+    },
+    /** Encrypt a capability to one requester's one-time key and deliver it. */
+    async approve(requestId, capability) {
+      const record = requests.get(String(requestId));
+      if (!record) throw new Error('That pairing request is no longer being advertised');
+      const envelope = sealDeviceGrant(
+        record.request.publicKey,
+        record.request.requestId,
+        capability,
+        { purpose: 'enrollment' },
+      );
+      if (!node.sendDirect(record.peerId, envelope)) {
+        throw new Error(`${record.request.deviceName} is no longer reachable`);
+      }
+      requests.delete(record.request.requestId);
+      return record.request;
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      node.off('message', receive);
       await node.destroy();
     },
   };

@@ -97,6 +97,26 @@ export async function loadOrCreateNativeDeviceIdentity({ root = machineIndexRoot
   return { privateKey: value.privateKey, publicKey };
 }
 
+/**
+ * A short code both sides of a pairing can compute independently from the
+ * request itself. Nothing extra travels over the mesh: the requester shows it,
+ * the approver shows it, and a human confirms they match before a capability is
+ * released. That is what stops an attacker's request from being approved by
+ * someone who only meant to approve their own browser.
+ */
+export function pairingCode(request) {
+  const requestId = String(request?.requestId ?? '');
+  const publicKey = String(request?.publicKey ?? '');
+  if (!requestId || !publicKey) throw new Error('A pairing code requires a request ID and public key');
+  const digest = createHash('sha256')
+    .update('gitpigeon:pair-code:v1\0')
+    .update(requestId)
+    .update('\0')
+    .update(publicKey)
+    .digest();
+  return String(digest.readUInt32BE(0) % 1_000_000).padStart(6, '0');
+}
+
 export function createDeviceEnrollmentRequest(identity, {
   port,
   deviceName = os.hostname(),
@@ -109,6 +129,8 @@ export function createDeviceEnrollmentRequest(identity, {
   return {
     protocol: DEVICE_REQUEST_PROTOCOL,
     kind: 'request',
+    // Browsers announce `requesterKind: 'browser'` on the same discovery room.
+    requesterKind: 'native',
     requestId: randomBytes(16).toString('hex'),
     publicKey: identity.publicKey,
     deviceName: String(deviceName || 'New device').trim().slice(0, 120),
@@ -135,6 +157,9 @@ export function validateDeviceEnrollmentRequest(value, now = Date.now()) {
   return {
     protocol: DEVICE_REQUEST_PROTOCOL,
     kind: 'request',
+    // Browsers announce themselves on the same discovery room, and `git pigeon
+    // pair` describes a browser differently from a native device.
+    requesterKind: value.requesterKind === 'browser' ? 'browser' : 'native',
     requestId,
     publicKey,
     deviceName: String(value.deviceName || 'New device').trim().slice(0, 120),

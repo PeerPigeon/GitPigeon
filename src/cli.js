@@ -37,9 +37,11 @@ import {
 import {
   loadOrCreateNativeDeviceIdentity,
   openDeviceGrant,
+  pairingCode,
   parseNativeCloneUrl,
   validateNativeClonePayload,
 } from './device-grants.js';
+import { startDeviceApprovalResponder } from './device-approval-mesh.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
 import { installNativeIntegration } from './native-install.js';
 import { connectPeerPigeon } from './peerpigeon.js';
@@ -52,12 +54,15 @@ import { GITPIGEON_VERSION, IS_STANDALONE } from './version.js';
 
 const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
 
+First time here? Open gitpigeon.dev in your browser, then run
+\`git pigeon pair\` on this machine and approve it.
+
 Usage:
+  git pigeon pair [--dashboard] [--rotate]
   git pigeon init [INVITE] [DIRECTORY]
   git pigeon install [--enroll | --no-enroll]
   git pigeon enroll
   git pigeon list
-  git pigeon pair [--rotate]
   git pigeon unwatch [REPOSITORY]
   git pigeon start [--poll DURATION]
   git pigeon restart [--poll DURATION]
@@ -657,7 +662,7 @@ async function commandInstall(args, verbose) {
   await commandEnroll([], verbose);
 }
 
-async function commandPair(args, verbose) {
+async function commandPairDashboard(args, verbose) {
   const rotate = takeFlag(args, '--rotate');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const root = machineIndexRoot();
@@ -666,6 +671,106 @@ async function commandPair(args, verbose) {
   const pairing = await claimDashboardPairing({ force: true, rotate });
   if (registrations.length) await startWatchService({ root, verbose });
   await runDashboardPairing(pairing, verbose);
+}
+
+function pairingLabel(request) {
+  if (request.requesterKind === 'browser') {
+    const where = request.platform && request.platform !== 'browser' ? ` on ${request.platform}` : '';
+    return `${request.deviceName}${where} (browser)`;
+  }
+  return `${request.deviceName} (${request.platform}/${request.arch})`;
+}
+
+async function readLine(prompt) {
+  const { createInterface } = await import('node:readline/promises');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return (await rl.question(prompt)).trim();
+  } finally {
+    rl.close();
+  }
+}
+
+async function commandPair(args, verbose) {
+  if (takeFlag(args, '--dashboard')) return await commandPairDashboard(args, verbose);
+  // `--rotate` only ever meant anything to the dashboard enrollment flow.
+  if (args.includes('--rotate')) return await commandPairDashboard(args, verbose);
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  if (!process.stdin.isTTY) {
+    throw new Error('`git pigeon pair` is interactive. Run it in a terminal, or use `git pigeon pair --dashboard`.');
+  }
+
+  const root = machineIndexRoot();
+  const log = logger(verbose);
+  const index = await loadMachineIndex({ root });
+  const identity = await loadOrCreateNativeDeviceIdentity({ root });
+
+  console.log('Waiting for a device or browser to ask to pair…');
+  console.log('Open gitpigeon.dev (or your local GitPigeon page) on the device you want to add.');
+  console.log('Press Ctrl+C to stop.\n');
+
+  const responder = await startDeviceApprovalResponder({ logger: log });
+  let announced = new Set();
+  try {
+    while (true) {
+      const pending = responder.pending();
+      for (const request of pending) {
+        if (announced.has(request.requestId)) continue;
+        announced.add(request.requestId);
+        console.log(`Found ${pairingLabel(request)} asking to pair.`);
+      }
+      announced = new Set(pending.map((request) => request.requestId));
+      if (!pending.length) {
+        await sleep(500);
+        continue;
+      }
+
+      console.log('\nDevices asking to pair:\n');
+      pending.forEach((request, position) => {
+        console.log(`  ${position + 1}  ${pairingLabel(request)}`);
+        console.log(`     code ${pairingCode(request)}`);
+      });
+      console.log('');
+      const answer = await readLine('Approve which number? (Enter to refresh, q to quit) ');
+      if (answer.toLowerCase() === 'q') return;
+      if (!answer) continue;
+      const choice = Number.parseInt(answer, 10);
+      if (!Number.isSafeInteger(choice) || choice < 1 || choice > pending.length) {
+        console.log(`\nThere is no device ${answer}.\n`);
+        continue;
+      }
+      const request = pending[choice - 1];
+      const code = pairingCode(request);
+      console.log(`\n${pairingLabel(request)} should be showing this code:\n`);
+      console.log(`     ${code}\n`);
+      const confirmed = await readLine('Does that match what you see there? (y/N) ');
+      if (confirmed.toLowerCase() !== 'y' && confirmed.toLowerCase() !== 'yes') {
+        console.log('\nNot approved. If the codes differ, something else is asking to pair.\n');
+        continue;
+      }
+
+      const repositories = (await listMachinePigeons({ root, activeOnly: false })).map((entry) => ({
+        repositoryId: entry.repositoryId,
+        secret: entry.secret,
+        name: entry.name,
+        ...(entry.signalingServer ? { signalingServer: entry.signalingServer } : {}),
+      }));
+      await responder.approve(request.requestId, {
+        index: {
+          indexId: index.indexId,
+          secret: index.secret,
+          publisherId: index.publisherId,
+        },
+        nativeDevicePublicKey: identity.publicKey,
+        repositories,
+      });
+      console.log(`\nPaired ${pairingLabel(request)}.`);
+      console.log(`It now shares this machine's encrypted Pigeon index${repositories.length ? ` and ${repositories.length} ${repositories.length === 1 ? 'repository' : 'repositories'}` : ''}.`);
+      return;
+    }
+  } finally {
+    await responder.close();
+  }
 }
 
 async function commandInvite(args, cwd) {
