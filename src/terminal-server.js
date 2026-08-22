@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { chmod, stat } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -80,9 +81,45 @@ function portablePty(shell, args, options) {
   };
 }
 
+/**
+ * node-pty execs a small `spawn-helper` binary on macOS and Linux, and the
+ * execute bit is set by its install script. This repository's `.npmrc` sets
+ * `ignore-scripts=true` to keep PeerPigeon and FreeRTC pinned, so that script
+ * never runs and the helper ships without it — every terminal then failed with
+ * a bare "posix_spawnp failed". Restore the bit rather than requiring a
+ * separate `npm rebuild` that the pinning is there to avoid.
+ */
+async function ensureSpawnHelper(ptyModule) {
+  if (process.platform === 'win32') return;
+  const root = ptyModule?.default?.__dirname ?? null;
+  const candidates = [];
+  const prebuild = `${process.platform}-${process.arch}`;
+  for (const base of [
+    root,
+    fileURLToPath(new URL('../node_modules/node-pty', import.meta.url)),
+  ].filter(Boolean)) {
+    candidates.push(path.join(base, 'prebuilds', prebuild, 'spawn-helper'));
+    candidates.push(path.join(base, 'build', 'Release', 'spawn-helper'));
+  }
+  for (const candidate of candidates) {
+    try {
+      const details = await stat(candidate);
+      if (details.mode & 0o111) return;
+      await chmod(candidate, 0o755);
+      return;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+}
+
+let spawnHelperReady = null;
+
 async function spawnPty(shell, args, options) {
   if (STANDALONE) return portablePty(shell, args, options);
   const pty = await import('node-pty');
+  spawnHelperReady ??= ensureSpawnHelper(pty).catch(() => { /* surfaced by the spawn below */ });
+  await spawnHelperReady;
   return pty.spawn(shell, args, options);
 }
 
