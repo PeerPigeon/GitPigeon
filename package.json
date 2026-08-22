@@ -1,6 +1,6 @@
 {
   "name": "gitpigeon",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Real-time, peer-to-peer synchronization for native Git repositories",
   "type": "module",
   "bin": {
@@ -33,7 +33,7 @@
   "license": "MIT",
   "dependencies": {
     "node-pty": "^1.1.0",
-    "peerpigeon": "https://github.com/PeerPigeon/PeerPigeon/archive/5965782ca63b14401492b1cfbea1b7063158393a.tar.gz",
+    "peerpigeon": "https://github.com/PeerPigeon/PeerPigeon/archive/659c2821f05dbfccb75c95f63699073955ab73d0.tar.gz",
     "werift": "0.24.4",
     "ws": "8.21.3"
   },
