@@ -673,6 +673,10 @@ async function commandPairDashboard(args, verbose) {
   await runDashboardPairing(pairing, verbose);
 }
 
+// How long to let an already-open browser announce itself before assuming there
+// is none and opening one.
+const DISCOVERY_GRACE_MS = 3_000;
+
 function pairingLabel(request) {
   if (request.requesterKind === 'browser') {
     const where = request.platform && request.platform !== 'browser' ? ` on ${request.platform}` : '';
@@ -705,15 +709,28 @@ async function commandPair(args, verbose) {
   const index = await loadMachineIndex({ root });
   const identity = await loadOrCreateNativeDeviceIdentity({ root });
 
-  console.log('Waiting for a device or browser to ask to pair…');
-  console.log('Open gitpigeon.dev (or your local GitPigeon page) on the device you want to add.');
-  console.log('Press Ctrl+C to stop.\n');
+  console.log('Looking for a device or browser asking to pair…');
 
+  const startedAt = Date.now();
   const responder = await startDeviceApprovalResponder({ logger: log });
   let announced = new Set();
+  let openedDashboard = false;
   try {
     while (true) {
       const pending = responder.pending();
+      // Only open a page when nothing is already waiting. A browser that is
+      // sitting on the approval screen is the whole reason this command was
+      // run; opening another tab on top of it is just noise.
+      if (!pending.length && !openedDashboard && Date.now() - startedAt >= DISCOVERY_GRACE_MS) {
+        openedDashboard = true;
+        const dashboard = process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/';
+        if (openDashboard(dashboard)) {
+          console.log(`No browser is waiting, so GitPigeon opened ${dashboard}.`);
+        } else {
+          console.log(`No browser is waiting. Open ${dashboard} on the device you want to add.`);
+        }
+        console.log('Press Ctrl+C to stop.\n');
+      }
       for (const request of pending) {
         if (announced.has(request.requestId)) continue;
         announced.add(request.requestId);

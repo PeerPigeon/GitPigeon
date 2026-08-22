@@ -110,3 +110,21 @@ test('an expired or silent request stops being offered for approval', async (t) 
     /no longer being advertised/,
   );
 });
+
+test('pair opens a page only when no browser is already waiting', async () => {
+  const source = await import('node:fs/promises')
+    .then(({ readFile }) => readFile(new URL('../src/cli.js', import.meta.url), 'utf8'));
+
+  // Running `pair` while a browser sits on the approval screen must not throw
+  // another tab on top of it; the waiting browser is the reason it was run.
+  const command = /async function commandPair\(args, verbose\) \{[\s\S]*?\n\}/.exec(source)?.[0] ?? '';
+  assert.ok(command, 'commandPair should be present');
+  assert.match(command, /if \(!pending\.length && !openedDashboard/);
+  assert.doesNotMatch(command, /openDashboard\([^)]*\);\s*\n\s*console\.log\('Waiting/);
+
+  // The dashboard-URL enrollment flow, which always opened a tab and printed a
+  // different six-digit code, is no longer what plain `pair` runs.
+  const dashboardCall = command.indexOf('commandPairDashboard');
+  const dashboardFlag = command.indexOf("takeFlag(args, '--dashboard')");
+  assert.ok(dashboardFlag !== -1 && dashboardCall !== -1 && dashboardFlag < dashboardCall);
+});
