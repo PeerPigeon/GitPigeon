@@ -1,19 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import {
-  TERMINAL_PROTOCOL,
-  TerminalServer,
-  decryptTerminalFrame,
-  encryptTerminalFrame,
-} from '../src/terminal-server.js';
+import { TERMINAL_CHANNEL } from '../src/channel.js';
+import { TerminalServer } from '../src/terminal-server.js';
+import { FakeNode } from './fake-node.js';
 
 const repositoryId = 'repository-terminal';
 const serviceInstanceId = 'a'.repeat(32);
 const secret = 'terminal-test-secret';
-const settle = () => new Promise((resolve) => setImmediate(resolve));
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 
 test('device list labels the current device immediately after its index', () => {
   const roster = Buffer.from(JSON.stringify([
@@ -41,15 +37,6 @@ test('device list labels the current device immediately after its index', () => 
   assert.equal(bundledCommandOutput, output);
 });
 
-class FakeNode extends EventEmitter {
-  sent = [];
-
-  sendDirect(peerId, data) {
-    this.sent.push({ peerId, data });
-    return `message-${this.sent.length}`;
-  }
-}
-
 class FakePty {
   writes = [];
   resizes = [];
@@ -73,22 +60,37 @@ class FakePty {
 }
 
 function browserFrame(kind, sequence, fields = {}) {
-  return encryptTerminalFrame(secret, repositoryId, {
-    protocol: TERMINAL_PROTOCOL,
-    repositoryId,
+  return {
     serviceInstanceId,
     sessionId: 'b'.repeat(32),
     kind,
     sequence,
     ...fields,
-  });
+  };
 }
 
-test('terminal frames are authenticated to the repository secret', () => {
-  const encrypted = browserFrame('ping', 1);
-  assert.equal(decryptTerminalFrame(secret, repositoryId, encrypted)?.kind, 'ping');
-  assert.equal(decryptTerminalFrame('wrong-secret', repositoryId, encrypted), null);
-  assert.equal(decryptTerminalFrame(secret, 'another-repository', encrypted), null);
+test('terminal frames from another repository or service instance are ignored', async (t) => {
+  const node = new FakeNode();
+  const server = new TerminalServer({
+    node,
+    repository: { root: '/tmp/example-repository' },
+    secret,
+    repositoryId,
+    serviceInstanceId,
+    deviceName: 'test-device',
+    spawnPty() { throw new Error('must not spawn a shell'); },
+  });
+  server.start();
+  t.after(() => server.stop());
+
+  node.receive('browser-peer', 'another-repository', TERMINAL_CHANNEL, browserFrame('open', 0, { cols: 80, rows: 24 }));
+  node.receive('browser-peer', repositoryId, TERMINAL_CHANNEL, {
+    ...browserFrame('open', 0, { cols: 80, rows: 24 }),
+    serviceInstanceId: 'f'.repeat(32),
+  });
+  await settle();
+  assert.equal(server.activeSessionCount(), 0);
+  assert.equal(node.direct.length, 0);
 });
 
 test('watcher terminal opens one bounded PTY and cleans it up on close', async (t) => {
@@ -110,47 +112,29 @@ test('watcher terminal opens one bounded PTY and cleans it up on close', async (
   server.start();
   t.after(() => server.stop());
 
-  node.emit('message', {
-    kind: 'direct',
-    local: false,
-    fromPeerId: 'browser-peer',
-    data: browserFrame('open', 0, {
-      cols: 120,
-      rows: 40,
-      devices: [{ name: 'test-device' }, { name: 'other-device' }],
-    }),
-  });
+  node.receive('browser-peer', repositoryId, TERMINAL_CHANNEL, browserFrame('open', 0, {
+    cols: 120,
+    rows: 40,
+    devices: [{ name: 'test-device' }, { name: 'other-device' }],
+  }));
   await settle();
 
   assert.equal(server.activeSessionCount(), 1);
   assert.equal(spawned.length, 1);
   assert.equal(spawned[0].options.cwd, '/tmp/example-repository');
   assert.match(spawned[0].options.env.GITPIGEON_DEVICE_ROSTER, /^[A-Za-z0-9_-]+$/);
-  assert.equal(decryptTerminalFrame(secret, repositoryId, node.sent[0].data)?.kind, 'opened');
+  assert.equal(node.directFrames(TERMINAL_CHANNEL)[0]?.kind, 'opened');
   assert.match(spawned[0].terminal.writes[0], /gitpigeon test-device:\$/);
 
-  node.emit('message', {
-    kind: 'direct',
-    local: false,
-    fromPeerId: 'browser-peer',
-    data: browserFrame('input', 1, { payload: Buffer.from('pwd\r').toString('base64') }),
-  });
-  node.emit('message', {
-    kind: 'direct',
-    local: false,
-    fromPeerId: 'browser-peer',
-    data: browserFrame('resize', 2, { cols: 90, rows: 25 }),
-  });
+  node.receive('browser-peer', repositoryId, TERMINAL_CHANNEL, browserFrame('input', 1, {
+    payload: Buffer.from('pwd\r').toString('base64'),
+  }));
+  node.receive('browser-peer', repositoryId, TERMINAL_CHANNEL, browserFrame('resize', 2, { cols: 90, rows: 25 }));
   await settle();
   assert.equal(spawned[0].terminal.writes.at(-1), 'pwd\r');
   assert.deepEqual(spawned[0].terminal.resizes, [[90, 25]]);
 
-  node.emit('message', {
-    kind: 'direct',
-    local: false,
-    fromPeerId: 'browser-peer',
-    data: browserFrame('close', 3),
-  });
+  node.receive('browser-peer', repositoryId, TERMINAL_CHANNEL, browserFrame('close', 3));
   await settle();
   assert.equal(server.activeSessionCount(), 0);
   assert.equal(spawned[0].terminal.killed, true);

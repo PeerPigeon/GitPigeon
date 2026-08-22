@@ -25,6 +25,8 @@ class FakeApprovalNode {
     this.listeners = new Map();
     this.broadcasts = [];
     this.destroyed = false;
+    // The node facade exposes the raw mesh for signaling diagnostics.
+    this.mesh = { on: () => {} };
   }
 
   on(event, listener) {
@@ -37,7 +39,7 @@ class FakeApprovalNode {
     this.listeners.get(event)?.delete(listener);
   }
 
-  async init() {}
+  async start() {}
 
   broadcast(value) {
     this.broadcasts.push(value);
@@ -109,7 +111,6 @@ test('discovers an approved browser directly through PeerPigeon without a watche
     let resolveGrant;
     const received = new Promise((resolve) => { resolveGrant = resolve; });
     const session = await startDeviceApprovalRequester(identity, request, {
-      signalingServers: ['wss://relay.example/ws'],
       nodeFactory: (options) => {
         fake = new FakeApprovalNode(options);
         return fake;
@@ -118,12 +119,13 @@ test('discovers an approved browser directly through PeerPigeon without a watche
     });
     assert.equal(fake.options.networkId, DEVICE_APPROVAL_NETWORK_ID);
     assert.equal(fake.options.sessionId, DEVICE_APPROVAL_SESSION_ID);
-    assert.deepEqual(fake.broadcasts, [JSON.stringify(request)]);
+    // Gossip carries the request object; PeerPigeon owns serialization.
+    assert.deepEqual(fake.broadcasts, [request]);
 
     const envelope = sealDeviceGrant(identity.publicKey, request.requestId, {
       index: { indexId: 'c'.repeat(32), secret: 'z'.repeat(43) },
     });
-    fake.emit('peer:data', { data: JSON.stringify(envelope) });
+    fake.emit('message', { local: false, fromPeerId: 'browser-peer', data: envelope });
     assert.equal((await received).index.indexId, 'c'.repeat(32));
     await session.close();
     assert.equal(fake.destroyed, true);

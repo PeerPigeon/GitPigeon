@@ -1,124 +1,130 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-import { SnapshotStreamServer, snapshotStreamWire } from '../src/snapshot-stream.js';
+import { SNAPSHOT_CHANNEL } from '../src/channel.js';
+import { SnapshotStreamServer } from '../src/snapshot-stream.js';
+import { FakeNode } from './fake-node.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const repositoryId = 'repository-id';
 
 async function waitFor(predicate, timeoutMs = 2_000) {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error('Timed out waiting for snapshot stream frames');
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for snapshot frames');
     await sleep(5);
   }
 }
 
-class FakeMesh {
-  constructor() {
-    this.listeners = new Set();
-    this.sent = [];
-  }
-
-  on(event, listener) {
-    if (event === 'peer:data') this.listeners.add(listener);
-  }
-
-  off(event, listener) {
-    if (event === 'peer:data') this.listeners.delete(listener);
-  }
-
-  send(peerId, data) {
-    this.sent.push({ peerId, data });
-  }
-
-  receive(peerId, data) {
-    for (const listener of this.listeners) listener({ peerId, data });
-  }
-}
-
-test('answers authenticated watcher metadata before a snapshot exists', async () => {
-  const secret = 'snapshot-stream-metadata-secret';
+test('answers watcher metadata before a snapshot exists', async () => {
   const service = {
     protocol: 'gitpigeon/1',
-    repositoryId: 'repository-id',
+    repositoryId,
     serviceInstanceId: 'a'.repeat(32),
     deviceName: 'test-device',
   };
-  const metadata = {
-    ...service,
-    head: { snapshotId: 'b'.repeat(64) },
-    manifest: { liveFiles: [{ content: 'x'.repeat(80_000) }] },
-  };
-  const mesh = new FakeMesh();
+  const node = new FakeNode();
   const server = new SnapshotStreamServer({
-    mesh,
+    node,
+    repositoryId,
     cache: {},
-    secret,
-    getMetadata: async () => metadata,
+    // Discovery must not carry the snapshot manifest; only the service fields
+    // survive, which is what keeps the frame small.
+    getMetadata: async () => ({
+      ...service,
+      head: { snapshotId: 'b'.repeat(64) },
+      manifest: { liveFiles: [{ content: 'x'.repeat(80_000) }] },
+    }),
   });
   server.start();
-  const key = snapshotStreamWire.streamKey(secret);
-  const requestId = Buffer.alloc(16, 9);
-  mesh.receive('browser-peer', snapshotStreamWire.encodeFrame(
-    key,
-    snapshotStreamWire.TYPE_METADATA_REQUEST,
-    requestId,
-    0,
-  ));
-  await waitFor(() => mesh.sent.length === 1);
-  const response = snapshotStreamWire.decodeFrame(key, mesh.sent[0].data);
-  assert.equal(response.type, snapshotStreamWire.TYPE_METADATA);
-  assert.deepEqual(JSON.parse(response.plaintext.toString('utf8')), service);
-  assert.ok(mesh.sent[0].data.length < 65_536, 'watcher discovery must stay below the WebRTC message ceiling');
+
+  node.receive('browser-peer', repositoryId, SNAPSHOT_CHANNEL, { kind: 'metadata-request', requestId: 'r1' });
+  await waitFor(() => node.direct.length === 1);
+
+  const [reply] = node.directFrames(SNAPSHOT_CHANNEL);
+  assert.equal(reply.kind, 'metadata');
+  assert.equal(reply.requestId, 'r1');
+  assert.deepEqual(reply.metadata, service);
+  assert.ok(JSON.stringify(reply).length < 65_536, 'watcher discovery must stay small');
   server.stop();
 });
 
-test('streams encrypted snapshot frames with acknowledgement backpressure', async () => {
-  const secret = 'snapshot-stream-test-secret-0123456789';
+test('serves requested snapshot chunks and refuses digests the snapshot does not reference', async () => {
   const snapshotId = 'a'.repeat(64);
-  const bundleSha256 = 'b'.repeat(64);
-  const chunks = Array.from({ length: 40 }, (_, index) => Buffer.from(`chunk-${String(index).padStart(2, '0')}`));
-  const descriptors = chunks.map((data, index) => ({ sha256: String(index).padStart(64, '0'), size: data.length }));
-  const manifest = {
-    snapshotId,
-    bundleSha256,
-    bundleSize: chunks.reduce((total, data) => total + data.length, 0),
-    chunks: descriptors,
-  };
+  const chunks = Array.from({ length: 3 }, (_value, index) => Buffer.from(`chunk-${index}`));
+  const descriptors = chunks.map((data) => ({
+    sha256: createHash('sha256').update(data).digest('hex'),
+    size: data.length,
+  }));
+  const foreign = createHash('sha256').update('unreferenced').digest('hex');
+  const manifest = { snapshotId, bundleSha256: 'b'.repeat(64), chunks: descriptors };
   const cache = {
     async readManifest(value) { return value === snapshotId ? manifest : null; },
-    async readChunk(value) { return chunks[descriptors.findIndex((descriptor) => descriptor.sha256 === value)]; },
+    async readChunk(value) {
+      const index = descriptors.findIndex((descriptor) => descriptor.sha256 === value);
+      if (index === -1) throw new Error(`unknown chunk ${value}`);
+      return chunks[index];
+    },
   };
-  const mesh = new FakeMesh();
-  const server = new SnapshotStreamServer({ mesh, cache, secret });
+  const node = new FakeNode();
+  const server = new SnapshotStreamServer({ node, repositoryId, cache });
   server.start();
 
-  const key = snapshotStreamWire.streamKey(secret);
-  const requestId = Buffer.alloc(16, 7);
-  const request = snapshotStreamWire.encodeFrame(
-    key,
-    snapshotStreamWire.TYPE_REQUEST,
-    requestId,
-    0,
-    Buffer.from(JSON.stringify({ snapshotId, bundleSha256 })),
+  node.receive('browser-peer', repositoryId, SNAPSHOT_CHANNEL, {
+    kind: 'chunk-request',
+    requestId: 'r2',
+    snapshotId,
+    digests: [...descriptors.map((descriptor) => descriptor.sha256), foreign],
+  });
+  await waitFor(() => node.direct.length === 3);
+  await sleep(20);
+
+  const replies = node.directFrames(SNAPSHOT_CHANNEL);
+  assert.equal(replies.length, 3, 'the unreferenced digest must not be served');
+  assert.deepEqual(replies.map((frame) => frame.kind), ['chunk', 'chunk', 'chunk']);
+  assert.deepEqual(
+    replies.map((frame) => Buffer.from(frame.data, 'base64').toString('utf8')),
+    ['chunk-0', 'chunk-1', 'chunk-2'],
   );
-  mesh.receive('browser-peer', request);
-  await waitFor(() => mesh.sent.length === 32);
-  assert.equal(mesh.sent.length, 32, 'the sender must stop at its unacknowledged window');
-
-  mesh.receive('browser-peer', snapshotStreamWire.encodeFrame(
-    key,
-    snapshotStreamWire.TYPE_ACK,
-    requestId,
-    32,
-  ));
-  await waitFor(() => mesh.sent.length === 41);
-  const decoded = mesh.sent.map(({ data }) => snapshotStreamWire.decodeFrame(key, data));
-  assert.deepEqual(decoded.slice(0, 40).map((frame) => frame.type), Array(40).fill(snapshotStreamWire.TYPE_DATA));
-  assert.deepEqual(decoded.slice(0, 40).map((frame) => frame.sequence), Array.from({ length: 40 }, (_, index) => index));
-  assert.deepEqual(decoded.slice(0, 40).map((frame) => frame.plaintext), chunks);
-  assert.equal(decoded[40].type, snapshotStreamWire.TYPE_END);
-  assert.equal(decoded[40].sequence, 40);
-
+  assert.deepEqual(replies.map((frame) => frame.sha256), descriptors.map((descriptor) => descriptor.sha256));
   server.stop();
-  assert.equal(mesh.listeners.size, 0);
+});
+
+test('reports an unavailable snapshot instead of staying silent', async () => {
+  const node = new FakeNode();
+  const server = new SnapshotStreamServer({
+    node,
+    repositoryId,
+    cache: { async readManifest() { return null; } },
+  });
+  server.start();
+
+  node.receive('browser-peer', repositoryId, SNAPSHOT_CHANNEL, {
+    kind: 'chunk-request',
+    requestId: 'r3',
+    snapshotId: 'c'.repeat(64),
+    digests: ['d'.repeat(64)],
+  });
+  await waitFor(() => node.direct.length === 1);
+
+  const [reply] = node.directFrames(SNAPSHOT_CHANNEL);
+  assert.equal(reply.kind, 'error');
+  assert.match(reply.message, /not available/);
+  server.stop();
+});
+
+test('ignores frames addressed to another repository', async () => {
+  const node = new FakeNode();
+  const server = new SnapshotStreamServer({
+    node,
+    repositoryId,
+    cache: {},
+    getMetadata: async () => ({ protocol: 'gitpigeon/1', repositoryId }),
+  });
+  server.start();
+
+  node.receive('browser-peer', 'another-repository', SNAPSHOT_CHANNEL, { kind: 'metadata-request', requestId: 'r4' });
+  await sleep(50);
+  assert.equal(node.direct.length, 0);
+  server.stop();
 });

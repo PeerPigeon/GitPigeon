@@ -50,8 +50,21 @@ export * from './device-approval-mesh.js';
 export * from './lan-enrollment.js';
 export * from './native-install.js';
 export { connectPeerPigeon } from './peerpigeon.js';
-export { TerminalServer, TERMINAL_PROTOCOL, TERMINAL_ENVELOPE_PROTOCOL } from './terminal-server.js';
-export { RealtimeWorkspaceServer, REALTIME_PROTOCOL, REALTIME_ENVELOPE_PROTOCOL } from './realtime-server.js';
+export {
+  CHANNEL_PROTOCOL,
+  MAX_FRAME_BYTES,
+  REALTIME_CHANNEL,
+  SNAPSHOT_CHANNEL,
+  TERMINAL_CHANNEL,
+  broadcastChannel,
+  decodeChannelFrame,
+  onChannelMessage,
+  repositoryCrypto,
+  sendChannelDirect,
+} from './channel.js';
+export { flushNativeStorage, installNativeStorage } from './native-storage.js';
+export { TerminalServer, TERMINAL_PROTOCOL } from './terminal-server.js';
+export { RealtimeWorkspaceServer, REALTIME_PROTOCOL } from './realtime-server.js';
 export { installNativeWebRTC } from './webrtc.js';
 export { createIdentity, loadConfig, saveConfig, validateConfig } from './config.js';
 export { createInvite, parseInvite } from './invite.js';

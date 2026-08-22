@@ -1,11 +1,20 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import * as Y from 'yjs';
+import {
+  REALTIME_CHANNEL,
+  broadcastChannel,
+  onChannelMessage,
+  sendChannelDirect,
+} from './channel.js';
 import { LiveWorkspace } from './live-workspace.js';
 
+// Realtime frames used to carry their own AES-256-GCM envelope keyed by
+// `sha256('gitpigeon:realtime:v1\0' + secret)`. PeerPigeon room crypto derives
+// an equivalent key from the same repository secret, so only the Yjs part/total
+// splitting — which PeerPigeon does not do — remains GitPigeon's concern.
 export const REALTIME_PROTOCOL = 'gitpigeon/realtime/1';
-export const REALTIME_ENVELOPE_PROTOCOL = 'gitpigeon/realtime-envelope/1';
 const DIGEST = /^[a-f0-9]{64}$/;
 const MESSAGE_ID = /^[a-f0-9]{32}$/;
 const CHUNK_BYTES = 24 * 1024;
@@ -13,49 +22,8 @@ const MAX_PARTS = 512;
 const MAX_ASSEMBLIES = 64;
 const ASSEMBLY_TTL_MS = 30_000;
 
-function keyFor(secret) {
-  return createHash('sha256').update('gitpigeon:realtime:v1\0').update(String(secret)).digest();
-}
-
-function aad(repositoryId) {
-  return Buffer.from(`${REALTIME_ENVELOPE_PROTOCOL}\0${repositoryId}`);
-}
-
-export function encryptRealtimeFrame(secret, repositoryId, frame) {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', keyFor(secret), iv);
-  cipher.setAAD(aad(repositoryId));
-  const encrypted = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(frame))), cipher.final()]);
-  return {
-    protocol: REALTIME_ENVELOPE_PROTOCOL,
-    repositoryId,
-    ciphertext: Buffer.concat([iv, encrypted, cipher.getAuthTag()]).toString('base64'),
-  };
-}
-
-export function decryptRealtimeFrame(secret, repositoryId, envelope) {
-  if (!envelope || envelope.protocol !== REALTIME_ENVELOPE_PROTOCOL
-    || envelope.repositoryId !== repositoryId || typeof envelope.ciphertext !== 'string'
-    || envelope.ciphertext.length > 90_000) return null;
-  let encrypted;
-  try { encrypted = Buffer.from(envelope.ciphertext, 'base64'); } catch { return null; }
-  if (encrypted.length <= 28) return null;
-  const tagStart = encrypted.length - 16;
-  try {
-    const decipher = createDecipheriv('aes-256-gcm', keyFor(secret), encrypted.subarray(0, 12));
-    decipher.setAAD(aad(repositoryId));
-    decipher.setAuthTag(encrypted.subarray(tagStart));
-    return JSON.parse(Buffer.concat([
-      decipher.update(encrypted.subarray(12, tagStart)),
-      decipher.final(),
-    ]).toString('utf8'));
-  } catch {
-    return null;
-  }
-}
-
 function validFrame(frame, repositoryId) {
-  return frame && frame.protocol === REALTIME_PROTOCOL && frame.repositoryId === repositoryId
+  return frame && frame.repositoryId === repositoryId
     && DIGEST.test(String(frame.documentId ?? '')) && DIGEST.test(String(frame.baseHash ?? ''))
     && MESSAGE_ID.test(String(frame.messageId ?? ''))
     && typeof frame.path === 'string' && frame.path.length > 0 && frame.path.length <= 4_096 && !frame.path.includes('\0')
@@ -78,7 +46,7 @@ export class RealtimeWorkspaceServer {
     this.documents = new Map();
     this.assemblies = new Map();
     this.started = false;
-    this.onMessage = (message) => { this.#receiveEnvelope(message).catch((error) => logger.debug?.(`Realtime workspace: ${error.message}`)); };
+    this.unsubscribe = null;
     this.onPeer = (peerId) => { this.#requestAll(String(peerId ?? '')).catch(() => {}); };
   }
 
@@ -86,14 +54,17 @@ export class RealtimeWorkspaceServer {
     if (this.started) return;
     this.started = true;
     await this.liveWorkspace.init();
-    this.node.on('message', this.onMessage);
+    this.unsubscribe = onChannelMessage(this.node, this.repositoryId, REALTIME_CHANNEL, (frame, { peerId }) => {
+      this.#receiveFrame(peerId, frame).catch((error) => this.logger.debug?.(`Realtime workspace: ${error.message}`));
+    });
     this.node.on('peerConnected', this.onPeer);
   }
 
   stop() {
     if (!this.started) return;
     this.started = false;
-    this.node.off('message', this.onMessage);
+    this.unsubscribe?.();
+    this.unsubscribe = null;
     this.node.off('peerConnected', this.onPeer);
     for (const state of this.documents.values()) state.doc.destroy();
     this.documents.clear();
@@ -116,15 +87,13 @@ export class RealtimeWorkspaceServer {
     }
   }
 
-  async #receiveEnvelope(message) {
-    if (!this.started || message?.local || !message?.fromPeerId) return;
-    const frame = decryptRealtimeFrame(this.secret, this.repositoryId, message.data);
-    if (!validFrame(frame, this.repositoryId)) return;
+  async #receiveFrame(peerId, frame) {
+    if (!this.started || !validFrame(frame, this.repositoryId)) return;
     let payload;
     try { payload = Buffer.from(frame.payload, 'base64'); } catch { return; }
-    const complete = this.#assemble(String(message.fromPeerId), frame, payload);
+    const complete = this.#assemble(peerId, frame, payload);
     if (!complete) return;
-    await this.#receive(String(message.fromPeerId), complete);
+    await this.#receive(peerId, complete);
   }
 
   #assemble(peerId, frame, payload) {
@@ -248,8 +217,6 @@ export class RealtimeWorkspaceServer {
     const messageId = randomBytes(16).toString('hex');
     for (let part = 0; part < total; part += 1) {
       const frame = {
-        protocol: REALTIME_PROTOCOL,
-        repositoryId: this.repositoryId,
         documentId: message.documentId,
         path: message.path,
         revision: message.revision,
@@ -260,9 +227,11 @@ export class RealtimeWorkspaceServer {
         total,
         payload: payload.subarray(part * CHUNK_BYTES, (part + 1) * CHUNK_BYTES).toString('base64'),
       };
-      const envelope = encryptRealtimeFrame(this.secret, this.repositoryId, frame);
-      if (peerId && this.node.sendDirect(peerId, envelope)) continue;
-      this.node.broadcast(envelope, { protocol: REALTIME_ENVELOPE_PROTOCOL });
+      if (peerId) {
+        await sendChannelDirect(this.node, peerId, this.repositoryId, REALTIME_CHANNEL, frame);
+        continue;
+      }
+      await broadcastChannel(this.node, this.repositoryId, REALTIME_CHANNEL, frame);
     }
   }
 }

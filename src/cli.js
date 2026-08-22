@@ -155,12 +155,10 @@ async function openNetwork(repository, config, log, serviceInstanceId, machineIn
     serviceInstanceId,
     machineIndexId,
     deviceName: deviceHostName(),
-    streamTransport: runtime.node.mesh,
+    // The snapshot channel rides PeerPigeon's encrypted, mesh-routed direct
+    // messages, so it takes the node facade rather than the raw mesh.
+    streamTransport: runtime.node,
     storageWritePauseMs: 0,
-    // Browser peers retain PeerPigeon records in IndexedDB while the native
-    // process starts with memory storage. Let every response merge before the
-    // watcher advances mutable repository records.
-    mutableRecordSettleMs: 1_000,
   });
   return { runtime, synchronizer };
 }

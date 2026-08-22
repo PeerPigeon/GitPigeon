@@ -5,30 +5,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import * as Y from 'yjs';
+import { REALTIME_CHANNEL } from '../src/channel.js';
 import { GitRepository } from '../src/git.js';
-import {
-  decryptRealtimeFrame,
-  encryptRealtimeFrame,
-  RealtimeWorkspaceServer,
-  REALTIME_PROTOCOL,
-} from '../src/realtime-server.js';
-
-class FakeNode {
-  listeners = new Map();
-  direct = [];
-  broadcasts = [];
-
-  on(event, listener) {
-    const listeners = this.listeners.get(event) ?? new Set();
-    listeners.add(listener);
-    this.listeners.set(event, listeners);
-  }
-
-  off(event, listener) { this.listeners.get(event)?.delete(listener); }
-  emit(event, value) { for (const listener of this.listeners.get(event) ?? []) listener(value); }
-  sendDirect(peerId, data) { this.direct.push({ peerId, data }); return 'sent'; }
-  broadcast(data) { this.broadcasts.push(data); }
-}
+import { RealtimeWorkspaceServer } from '../src/realtime-server.js';
+import { FakeNode } from './fake-node.js';
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 80));
 
@@ -51,8 +31,6 @@ test('watcher joins realtime browser documents and writes the real repository fi
     'gitpigeon-realtime-v1', repositoryId, 'refs/heads/main', 'src/example.js', 'c'.repeat(64),
   ].join('\0')).digest('hex');
   const frame = {
-    protocol: REALTIME_PROTOCOL,
-    repositoryId,
     documentId,
     path: 'src/example.js',
     revision: 'refs/heads/main',
@@ -63,26 +41,16 @@ test('watcher joins realtime browser documents and writes the real repository fi
     total: 1,
     payload: Buffer.from(Y.encodeStateAsUpdate(browser)).toString('base64'),
   };
-  node.emit('message', {
-    local: false,
-    fromPeerId: 'browser-peer',
-    data: encryptRealtimeFrame(secret, repositoryId, frame),
-  });
+  node.receive('browser-peer', repositoryId, REALTIME_CHANNEL, frame);
   await settle();
 
   assert.equal(await readFile(path.join(root, 'src/example.js'), 'utf8'), 'original watcher file\n');
-  assert.equal(node.direct.some(({ data }) => (
-    decryptRealtimeFrame(secret, repositoryId, data)?.kind === 'sync-request'
-  )), true);
+  assert.equal(node.directFrames(REALTIME_CHANNEL).some((value) => value.kind === 'sync-request'), true);
 
-  node.emit('message', {
-    local: false,
-    fromPeerId: 'browser-peer',
-    data: encryptRealtimeFrame(secret, repositoryId, {
-      ...frame,
-      messageId: 'e'.repeat(32),
-      kind: 'sync-response',
-    }),
+  node.receive('browser-peer', repositoryId, REALTIME_CHANNEL, {
+    ...frame,
+    messageId: 'e'.repeat(32),
+    kind: 'sync-response',
   });
   await settle();
 
@@ -92,9 +60,7 @@ test('watcher joins realtime browser documents and writes the real repository fi
   await writeFile(path.join(root, 'src/example.js'), 'edited on the watcher\n');
   await server.filesystemChanged('src/example.js');
   await settle();
-  const outbound = node.broadcasts
-    .map((envelope) => decryptRealtimeFrame(secret, repositoryId, envelope))
-    .filter((value) => value?.kind === 'update');
+  const outbound = node.broadcastFrames(REALTIME_CHANNEL).filter((value) => value.kind === 'update');
   assert.equal(outbound.length >= 2, true);
   for (const update of outbound) Y.applyUpdate(browser, Buffer.from(update.payload, 'base64'));
   assert.equal(browser.getText('content').toString(), 'edited on the watcher\n');

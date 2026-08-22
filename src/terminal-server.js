@@ -1,14 +1,20 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { hostname } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import {
+  TERMINAL_CHANNEL,
+  onChannelMessage,
+  sendChannelDirect,
+} from './channel.js';
 
 const STANDALONE = typeof __GITPIGEON_STANDALONE__ !== 'undefined' && __GITPIGEON_STANDALONE__;
 
+// The terminal used to wrap each frame in its own AES-256-GCM envelope keyed by
+// `sha256('gitpigeon:terminal:v1\0' + secret)`. PeerPigeon's encrypted direct
+// messages provide the same authenticated confidentiality from the same secret.
 export const TERMINAL_PROTOCOL = 'gitpigeon/terminal/1';
-export const TERMINAL_ENVELOPE_PROTOCOL = 'gitpigeon/terminal-envelope/1';
 
 const SESSION = /^[a-f0-9]{32}$/;
 const MAX_SESSIONS = 4;
@@ -80,53 +86,6 @@ async function spawnPty(shell, args, options) {
   return pty.spawn(shell, args, options);
 }
 
-function terminalKey(secret) {
-  return createHash('sha256')
-    .update('gitpigeon:terminal:v1\0')
-    .update(String(secret))
-    .digest();
-}
-
-function additionalData(repositoryId) {
-  return Buffer.from(`${TERMINAL_ENVELOPE_PROTOCOL}\0${repositoryId}`);
-}
-
-export function encryptTerminalFrame(secret, repositoryId, value) {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', terminalKey(secret), iv);
-  cipher.setAAD(additionalData(repositoryId));
-  const encrypted = Buffer.concat([
-    cipher.update(Buffer.from(JSON.stringify(value))),
-    cipher.final(),
-  ]);
-  return {
-    protocol: TERMINAL_ENVELOPE_PROTOCOL,
-    repositoryId,
-    ciphertext: Buffer.concat([iv, encrypted, cipher.getAuthTag()]).toString('base64'),
-  };
-}
-
-export function decryptTerminalFrame(secret, repositoryId, envelope) {
-  if (!envelope || envelope.protocol !== TERMINAL_ENVELOPE_PROTOCOL
-    || envelope.repositoryId !== repositoryId || typeof envelope.ciphertext !== 'string'
-    || envelope.ciphertext.length > 100_000) return null;
-  let frame;
-  try { frame = Buffer.from(envelope.ciphertext, 'base64'); } catch { return null; }
-  if (frame.length <= 28) return null;
-  const tagStart = frame.length - 16;
-  try {
-    const decipher = createDecipheriv('aes-256-gcm', terminalKey(secret), frame.subarray(0, 12));
-    decipher.setAAD(additionalData(repositoryId));
-    decipher.setAuthTag(frame.subarray(tagStart));
-    return JSON.parse(Buffer.concat([
-      decipher.update(frame.subarray(12, tagStart)),
-      decipher.final(),
-    ]).toString('utf8'));
-  } catch {
-    return null;
-  }
-}
-
 function boundedInteger(value, minimum, maximum, fallback) {
   const number = Number(value);
   return Number.isSafeInteger(number) ? Math.min(maximum, Math.max(minimum, number)) : fallback;
@@ -178,15 +137,16 @@ export class TerminalServer {
     this.sessions = new Map();
     this.started = false;
     this.sweepTimer = null;
-    this.onMessage = (message) => {
-      this.#receive(message).catch((error) => this.logger.debug?.(`Terminal message: ${error.message}`));
-    };
+    this.unsubscribe = null;
   }
 
   start() {
     if (this.started) return;
     this.started = true;
-    this.node.on('message', this.onMessage);
+    this.unsubscribe = onChannelMessage(this.node, this.repositoryId, TERMINAL_CHANNEL, (frame, { peerId, kind }) => {
+      if (kind !== 'direct') return;
+      this.#receive(peerId, frame).catch((error) => this.logger.debug?.(`Terminal message: ${error.message}`));
+    });
     this.sweepTimer = setInterval(() => this.#sweep(), SWEEP_MS);
     this.sweepTimer.unref?.();
   }
@@ -194,7 +154,8 @@ export class TerminalServer {
   stop() {
     if (!this.started) return;
     this.started = false;
-    this.node.off('message', this.onMessage);
+    this.unsubscribe?.();
+    this.unsubscribe = null;
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.sweepTimer = null;
     for (const session of [...this.sessions.values()]) this.#close(session);
@@ -204,16 +165,14 @@ export class TerminalServer {
     return this.sessions.size;
   }
 
-  async #receive(message) {
-    if (!this.started || message?.local || message?.kind !== 'direct' || !message.fromPeerId) return;
-    const frame = decryptTerminalFrame(this.secret, this.repositoryId, message.data);
-    if (!frame || frame.protocol !== TERMINAL_PROTOCOL || frame.repositoryId !== this.repositoryId
-      || frame.serviceInstanceId !== this.serviceInstanceId || !SESSION.test(String(frame.sessionId ?? ''))
+  async #receive(peerId, frame) {
+    if (!this.started) return;
+    if (frame.serviceInstanceId !== this.serviceInstanceId || !SESSION.test(String(frame.sessionId ?? ''))
       || !['open', 'input', 'resize', 'ping', 'close'].includes(String(frame.kind ?? ''))
       || !Number.isSafeInteger(frame.sequence) || frame.sequence < 0) return;
-    const id = `${message.fromPeerId}:${frame.sessionId}`;
+    const id = `${peerId}:${frame.sessionId}`;
     if (frame.kind === 'open') {
-      await this.#open(message.fromPeerId, frame, id);
+      await this.#open(peerId, frame, id);
       return;
     }
     const session = this.sessions.get(id);
@@ -333,16 +292,17 @@ export class TerminalServer {
   }
 
   async #send(peerId, sessionId, kind, sequence, fields = {}) {
-    const envelope = encryptTerminalFrame(this.secret, this.repositoryId, {
-      protocol: TERMINAL_PROTOCOL,
-      repositoryId: this.repositoryId,
-      serviceInstanceId: this.serviceInstanceId,
-      sessionId,
-      kind,
-      sequence,
-      ...fields,
-    });
-    if (!this.node.sendDirect(peerId, envelope)) throw new Error('The terminal peer is no longer reachable.');
+    try {
+      await sendChannelDirect(this.node, peerId, this.repositoryId, TERMINAL_CHANNEL, {
+        serviceInstanceId: this.serviceInstanceId,
+        sessionId,
+        kind,
+        sequence,
+        ...fields,
+      });
+    } catch (error) {
+      throw new Error(`The terminal peer is no longer reachable. (${error.message})`);
+    }
   }
 
   #sweep() {

@@ -6,14 +6,12 @@ import {
   DEFAULT_CHUNK_SIZE,
   DEFAULT_RETRIEVE_TIMEOUT_MS,
   PROTOCOL,
-  REPOSITORY_PRESENCE_BUCKET_MS,
   REPOSITORY_PRESENCE_HEARTBEAT_MS,
   chunkKey,
   headKey,
   snapshotHeadKey,
   manifestKey,
   presenceKey,
-  presenceLeaseKey,
   registryKey,
   storagePrefix,
 } from './constants.js';
@@ -108,9 +106,9 @@ export class RepositorySynchronizer {
     this.streamTransport = streamTransport;
     this.snapshotStream = streamTransport
       ? new SnapshotStreamServer({
-        mesh: streamTransport,
+        node: streamTransport,
+        repositoryId: config.repositoryId,
         cache,
-        secret: config.secret,
         logger,
         getMetadata: async () => ({
             protocol: PROTOCOL,
@@ -124,7 +122,7 @@ export class RepositorySynchronizer {
       })
       : null;
     this.presenceTimer = null;
-    this.lastPresenceBucket = null;
+    this.lastPresenceAt = 0;
     this.lastPresenceIdentity = null;
     this.availableSnapshots = new Set();
     this.logger = {
@@ -713,50 +711,48 @@ export class RepositorySynchronizer {
 
   async #publishPresence() {
     const head = this.#validateHead(this.state.heads[this.config.deviceId]);
-    if (!head || !this.availableSnapshots.has(head.snapshotId)) return null;
+    // A watcher is live whether or not it has anything to share yet. An empty
+    // or newly initialized repository has no snapshot, and withholding presence
+    // until one exists left `git pigeon init` invisible to every browser.
+    const snapshotId = head && this.availableSnapshots.has(head.snapshotId) ? head.snapshotId : null;
     const peerId = DEVICE.test(String(this.streamTransport?.getClientId?.() ?? ''))
       ? this.streamTransport.getClientId()
       : null;
     const identity = JSON.stringify({
-      snapshotId: head.snapshotId,
+      snapshotId,
       peerId,
       serviceInstanceId: this.serviceInstanceId,
       machineIndexId: this.machineIndexId,
     });
-    const bucket = Math.floor(Date.now() / REPOSITORY_PRESENCE_BUCKET_MS);
     const identityChanged = identity !== this.lastPresenceIdentity;
-    if (!identityChanged && bucket === this.lastPresenceBucket) return null;
+    const stale = Date.now() - (this.lastPresenceAt ?? 0) >= this.presenceHeartbeatMs;
+    if (!identityChanged && !stale) return null;
     const value = {
       protocol: PROTOCOL,
       repositoryId: this.config.repositoryId,
       deviceId: this.config.deviceId,
       name: path.basename(this.repository.root).slice(0, 200),
-      snapshotId: head.snapshotId,
+      // `snapshotId` stays absent until this device has content to offer, so a
+      // reader can tell "watcher online, nothing published yet" from "offline".
+      ...(snapshotId ? { snapshotId } : {}),
       serviceInstanceId: this.serviceInstanceId,
       ...(peerId ? { peerId } : {}),
       ...(this.machineIndexId ? { machineIndexId: this.machineIndexId } : {}),
       ...(this.deviceName ? { deviceName: this.deviceName } : {}),
       updatedAt: new Date().toISOString(),
     };
-    // A new key each short time bucket makes the liveness lease independent of
-    // mutable-record versions retained by browsers across native restarts.
-    // Publish the bucket first; the legacy mutable key remains for clients
-    // that have not reloaded the newer browser application yet.
-    const lease = await this.#put(
+    // One durable record per device. Whether that device is reachable right now
+    // is answered by PeerPigeon membership against this record's `peerId`, so
+    // GitPigeon no longer republishes a fresh key every few seconds to fake a
+    // liveness lease on top of a key-value store.
+    const record = await this.#put(
       'public',
-      presenceLeaseKey(this.config.repositoryId, this.config.deviceId, bucket),
+      presenceKey(this.config.repositoryId, this.config.deviceId),
       value,
     );
-    if (identityChanged) {
-      await this.#put(
-        'public',
-        presenceKey(this.config.repositoryId, this.config.deviceId),
-        value,
-      );
-    }
-    this.lastPresenceBucket = bucket;
     this.lastPresenceIdentity = identity;
-    return lease;
+    this.lastPresenceAt = Date.now();
+    return record;
   }
 
   async #pruneCache() {
@@ -779,6 +775,9 @@ export class RepositorySynchronizer {
   }
 
   async #retrieveMutable(key) {
+    // Native storage is durable now, so a restarted watcher already holds the
+    // version it last wrote and this is an ordinary merge of whatever the mesh
+    // knows rather than a race that has to be waited out.
     const retrieved = await this.storage.retrieve(
       'public',
       key,

@@ -5,13 +5,17 @@ import {
 } from './device-grants.js';
 import { installNativeWebRTC } from './webrtc.js';
 
+// This discovery room used to open one PartialMesh per candidate relay and
+// re-announce on all of them every second, duplicating the relay federation and
+// health-check failover FreeRTC already performs. One node is enough.
+//
+// Announcements also move from `mesh.broadcast`, which only reaches direct
+// data-channel neighbours, to PeerPigeon gossip, which floods the room. An
+// unapproved device is now visible to every approved browser present rather
+// than only to the ones it happened to dial.
 export const DEVICE_APPROVAL_NETWORK_ID = 'gitpigeon-device-approval-v1';
 export const DEVICE_APPROVAL_SESSION_ID = 'approved-browser-discovery-v1';
-
-function decode(value) {
-  if (typeof value !== 'string' || value.length > 60_000) return null;
-  try { return JSON.parse(value); } catch { return null; }
-}
+const ANNOUNCE_INTERVAL_MS = 5_000;
 
 function validApprovalEnvelope(value, request) {
   return value?.protocol === DEVICE_GRANT_PROTOCOL
@@ -20,104 +24,94 @@ function validApprovalEnvelope(value, request) {
     && value.recipientPublicKey === request.publicKey;
 }
 
+function decode(value) {
+  if (typeof value === 'object' && value !== null) return value;
+  if (typeof value !== 'string' || value.length > 60_000) return null;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+export function deviceApprovalNodeOptions() {
+  return {
+    // Requests are public by design and grants are separately encrypted to the
+    // requesting device's key, so this room needs no shared secret.
+    crypto: false,
+    networkId: DEVICE_APPROVAL_NETWORK_ID,
+    sessionId: DEVICE_APPROVAL_SESSION_ID,
+    minPeers: 1,
+    maxPeers: 5,
+    tolerantPeers: 0,
+    autoDiscover: true,
+    autoConnect: true,
+  };
+}
+
 export async function startDeviceApprovalRequester(identity, requestValue, {
   logger = {},
   onGrant = () => {},
   nodeFactory,
-  signalingServers,
 } = {}) {
   const request = validateDeviceEnrollmentRequest(requestValue);
   if (!request) throw new Error('Invalid GitPigeon device approval request');
 
-  let PartialMesh;
+  let PeerPigeonNode;
   if (!nodeFactory) {
     await installNativeWebRTC();
-    const peerpigeon = await import('peerpigeon');
-    PartialMesh = peerpigeon.PartialMesh;
+    ({ PeerPigeonNode } = await import('peerpigeon'));
   }
   let closed = false;
-  const announcing = new Set();
-  const receive = ({ data } = {}) => {
-    if (closed) return;
-    const envelope = decode(data);
+  const options = deviceApprovalNodeOptions();
+  const node = nodeFactory ? nodeFactory(options) : new PeerPigeonNode(options);
+
+  const receive = (message) => {
+    if (closed || message?.local) return;
+    const envelope = decode(message?.data);
     if (!validApprovalEnvelope(envelope, request)) return;
     try {
       const grant = openDeviceGrant(identity, envelope, { purpose: 'enrollment' });
-      Promise.resolve(onGrant(envelope, grant)).catch((error) => logger.debug?.(`Device approval mesh grant: ${error.message}`));
+      Promise.resolve(onGrant(envelope, grant))
+        .catch((error) => logger.debug?.(`Device approval mesh grant: ${error.message}`));
     } catch (error) {
       logger.debug?.(`Ignored invalid PeerPigeon device approval: ${error.message}`);
     }
   };
-  const announce = (mesh) => {
-    if (closed || announcing.has(mesh)) return;
-    announcing.add(mesh);
+  const announce = () => {
+    if (closed) return;
     try {
-      mesh.broadcast(JSON.stringify(request));
+      node.broadcast(request);
     } catch (error) {
       logger.debug?.(`Device approval mesh announcement: ${error.message}`);
-    } finally {
-      announcing.delete(mesh);
     }
   };
-  const relays = [...new Set((signalingServers ?? []).map(String).filter(Boolean))];
-  const candidates = relays.length ? relays : [null];
-  const records = candidates.map((signalingServer) => {
-    const options = {
-      networkId: DEVICE_APPROVAL_NETWORK_ID,
-      sessionId: DEVICE_APPROVAL_SESSION_ID,
-      minPeers: 1,
-      maxPeers: 5,
-      tolerantPeers: 0,
-      autoDiscover: true,
-      autoConnect: true,
-      ...(signalingServer ? {
-        automaticSignalingServer: false,
-        signalingServer,
-        signalingServers: [signalingServer],
-      } : {}),
-    };
-    const mesh = nodeFactory ? nodeFactory(options) : new PartialMesh(options);
-    const peerConnected = () => announce(mesh);
-    mesh.on('identity:ready', ({ clientId } = {}) => {
-      logger.debug?.(`[device approval] identity ready as ${String(clientId ?? 'unknown').slice(0, 12)}`);
-    });
-    mesh.on('signaling:connected', ({ signalingServer: connectedRelay } = {}) => {
-      logger.debug?.(`[device approval] signaling connected through ${connectedRelay ?? signalingServer ?? 'a federated relay'}`);
-    });
-    mesh.on('peer:discovered', (peerId) => {
-      logger.debug?.(`[device approval] discovered ${String(peerId ?? 'unknown').slice(0, 12)}`);
-    });
-    mesh.on('peer:data', receive);
-    mesh.on('peer:connected', peerConnected);
-    mesh.on('peer:error', ({ error } = {}) => logger.debug?.(`Device approval mesh: ${error?.message ?? error}`));
-    return { mesh, peerConnected };
+
+  node.mesh.on('identity:ready', ({ clientId } = {}) => {
+    logger.debug?.(`[device approval] identity ready as ${String(clientId ?? 'unknown').slice(0, 12)}`);
   });
-  const starts = await Promise.allSettled(records.map(async (record) => {
-    await record.mesh.init();
-    announce(record.mesh);
-    return record;
-  }));
-  const active = starts.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
-  for (let index = 0; index < starts.length; index += 1) {
-    if (starts[index].status === 'rejected') records[index].mesh.destroy();
-  }
-  if (!active.length) throw starts[0]?.reason ?? new Error('No PeerPigeon approval relay is available');
-  const timer = setInterval(() => {
-    for (const { mesh } of active) announce(mesh);
-  }, 1_000);
+  node.mesh.on('signaling:connected', ({ signalingServer } = {}) => {
+    logger.debug?.(`[device approval] signaling connected through ${signalingServer ?? 'a federated relay'}`);
+  });
+  node.mesh.on('peer:discovered', (peerId) => {
+    logger.debug?.(`[device approval] discovered ${String(peerId ?? 'unknown').slice(0, 12)}`);
+  });
+  node.on('message', receive);
+  node.on('peerConnected', announce);
+  node.on('error', (error) => logger.debug?.(`Device approval mesh: ${error?.message ?? error}`));
+
+  await node.start();
+  announce();
+  const timer = setInterval(announce, ANNOUNCE_INTERVAL_MS);
+  timer.unref?.();
+
   return {
-    node: active[0].mesh,
-    nodes: active.map(({ mesh }) => mesh),
+    node,
+    nodes: [node],
     request,
     async close() {
       if (closed) return;
       closed = true;
       clearInterval(timer);
-      for (const { mesh, peerConnected } of active) {
-        mesh.off?.('peer:data', receive);
-        mesh.off?.('peer:connected', peerConnected);
-        mesh.destroy();
-      }
+      node.off('message', receive);
+      node.off('peerConnected', announce);
+      await node.destroy();
     },
   };
 }

@@ -4,6 +4,7 @@ import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/prom
 import { homedir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { installNativeStorage } from './native-storage.js';
 import { installNativeWebRTC } from './webrtc.js';
 
 export const INDEX_PROTOCOL = 'gitpigeon-index/1';
@@ -423,6 +424,7 @@ async function connectMachineDirectory(index, logger = {}, {
   onRemoteRepositories = async () => {},
 } = {}) {
   await installNativeWebRTC();
+  await installNativeStorage(root);
   const { PeerPigeonNode } = await import('peerpigeon');
   const prefix = `gitpigeon/index/v1/${index.indexId}/`;
   const node = new PeerPigeonNode({
@@ -441,7 +443,7 @@ async function connectMachineDirectory(index, logger = {}, {
       userId: `index-publisher-${index.publisherId}`,
       sessionId: `${INDEX_NETWORK_ID}:${index.indexId}`,
       syncSecret: index.secret,
-      dbName: `gitpigeon-index-${index.indexId}`,
+      dbName: `gitpigeon-index-${index.indexId}-${index.publisherId}`,
       syncFilter: (_space, key) => String(key).startsWith(prefix),
     },
   });

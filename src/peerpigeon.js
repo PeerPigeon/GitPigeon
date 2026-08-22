@@ -1,4 +1,7 @@
+import { repositoryCrypto } from './channel.js';
 import { NETWORK_ID, repositoryRoomTopology, storagePrefix } from './constants.js';
+import { machineIndexRoot } from './machine-index.js';
+import { installNativeStorage } from './native-storage.js';
 import { installNativeWebRTC } from './webrtc.js';
 
 async function startPeerPigeonNode(node, label) {
@@ -7,8 +10,12 @@ async function startPeerPigeonNode(node, label) {
   await node.start();
 }
 
-export async function connectPeerPigeon(config, logger = {}) {
+export async function connectPeerPigeon(config, logger = {}, { stateRoot = machineIndexRoot() } = {}) {
   await installNativeWebRTC();
+  // PeerPigeon Storage persists itself once Node has the `indexedDB` global it
+  // already looks for. Without this the watcher restarts every record at
+  // version 1 and browsers reject its writes as stale.
+  await installNativeStorage(stateRoot);
   let PeerPigeonNode;
   try {
     ({ PeerPigeonNode } = await import('peerpigeon'));
@@ -21,7 +28,9 @@ export async function connectPeerPigeon(config, logger = {}) {
 
   const prefix = `${storagePrefix(config.repositoryId)}/`;
   const options = {
-    crypto: false,
+    // PeerPigeon room crypto replaces the three hand-rolled AES-256-GCM
+    // framings GitPigeon used to carry over an intentionally unencrypted node.
+    crypto: repositoryCrypto(config.repositoryId, config.secret),
     networkId: NETWORK_ID,
     sessionId: config.repositoryId,
     // Keep small repository rooms fully meshed. A minimum of one makes every
@@ -35,7 +44,11 @@ export async function connectPeerPigeon(config, logger = {}) {
       userId: config.deviceId,
       sessionId: `${NETWORK_ID}:${config.repositoryId}`,
       syncSecret: config.secret,
-      dbName: `gitpigeon-${config.repositoryId}`,
+      // The database is this device's local replica. Two clones of the same
+      // repository can live on one machine, so the name is scoped by device as
+      // well; a shared name would let them overwrite each other's records now
+      // that native storage is durable rather than per-instance memory.
+      dbName: `gitpigeon-${config.repositoryId}-${config.deviceId}`,
       syncFilter: (_space, key) => String(key).startsWith(prefix),
     },
   };

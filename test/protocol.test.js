@@ -3,7 +3,7 @@ import { access, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { chunkKey, presenceKey, presenceLeaseKey, REPOSITORY_PRESENCE_BUCKET_MS } from '../src/constants.js';
+import { chunkKey, presenceKey } from '../src/constants.js';
 import { LiveWorkspace } from '../src/live-workspace.js';
 import { RepositorySynchronizer } from '../src/protocol.js';
 import { WorkspaceFiles } from '../src/workspace.js';
@@ -174,13 +174,16 @@ test('restart re-seeds cached chunks before publishing a fresh presence lease', 
     assert.ok(chunkIndex < presenceIndex, `${descriptor.sha256.slice(0, 10)} was seeded after presence`);
     assert.ok(await restartedStorage.get('frozen', key));
   }
-  const lease = await restartedStorage.get('public', presence);
-  assert.equal(lease?.value.snapshotId, head.snapshotId);
-  assert.equal(lease?.value.name, 'source');
-  const bucket = Math.floor(Date.parse(lease.value.updatedAt) / REPOSITORY_PRESENCE_BUCKET_MS);
-  const bucketedLease = await restartedStorage.get('public', presenceLeaseKey(config.repositoryId, config.deviceId, bucket));
-  assert.equal(bucketedLease?.value.snapshotId, head.snapshotId);
-  assert.equal(bucketedLease?.value.machineIndexId, '1'.repeat(32));
+  // One durable presence record per device; liveness is answered by PeerPigeon
+  // membership rather than by a stream of freshly keyed bucket records.
+  const record = await restartedStorage.get('public', presence);
+  assert.equal(record?.value.snapshotId, head.snapshotId);
+  assert.equal(record?.value.name, 'source');
+  assert.equal(record?.value.machineIndexId, '1'.repeat(32));
+  const presenceWrites = network.puts.filter(
+    (event) => event.id === 'restarted' && event.key.includes('/presence/'),
+  );
+  assert.equal(presenceWrites.length, 1, 'presence must not be republished under bucketed keys');
   await restarted.stop();
 });
 
