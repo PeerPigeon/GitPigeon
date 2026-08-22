@@ -45,6 +45,7 @@ import { installNativeIntegration } from './native-install.js';
 import { connectPeerPigeon } from './peerpigeon.js';
 import { RepositorySynchronizer } from './protocol.js';
 import { TerminalServer } from './terminal-server.js';
+import { RealtimeWorkspaceServer } from './realtime-server.js';
 import { WorkspaceFiles } from './workspace.js';
 import { clearInstalledUpdate, startAutomaticUpdates } from './auto-update.js';
 import { GITPIGEON_VERSION, IS_STANDALONE } from './version.js';
@@ -195,6 +196,14 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     logger: log,
   });
   terminalServer.start();
+  const realtimeServer = new RealtimeWorkspaceServer({
+    node: runtime.node,
+    repository,
+    secret: config.secret,
+    repositoryId: config.repositoryId,
+    logger: log,
+    onFileWritten: () => schedulePublish(),
+  });
   let changeTimer;
   let filesystemWatcher;
   let peerRefreshTimer;
@@ -232,12 +241,14 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     if (started || starting || stopped) return;
     starting = true;
     try {
+      await realtimeServer.start();
       await synchronizer.start();
       previousDigest = await synchronizer.localDigest();
       started = true;
       filesystemWatcher = watchFilesystem(repository.root, { recursive: true }, (_event, filename) => {
         const changed = String(filename ?? "").replaceAll("\\", "/");
         if (changed === ".git/gitpigeon" || changed.startsWith(".git/gitpigeon/")) return;
+        realtimeServer.filesystemChanged(changed).catch((error) => log.error(error));
         schedulePublish();
       });
       filesystemWatcher.on("error", (error) => log.error(error));
@@ -269,6 +280,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       filesystemWatcher?.close();
       if (peerRefreshTimer) clearTimeout(peerRefreshTimer);
       terminalServer.stop();
+      realtimeServer.stop();
       while (starting || publishing) await sleep(10);
       await synchronizer.stop();
       await runtime.close();
