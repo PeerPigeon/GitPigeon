@@ -147,11 +147,20 @@ export async function startDeviceApprovalResponder({
     const request = validateDeviceEnrollmentRequest(decode(message.data));
     if (!request) return;
     const known = requests.get(request.requestId);
-    requests.set(request.requestId, {
-      request,
-      peerId: String(message.fromPeerId),
-      lastSeenAt: Date.now(),
-    });
+    if (known) {
+      // Update in place. Replacing the object would leave an in-flight approve()
+      // holding a stale record whose lastSeenAt never advances, so a requester
+      // that is still asking would read as having accepted the grant.
+      known.request = request;
+      known.peerId = String(message.fromPeerId);
+      known.lastSeenAt = Date.now();
+    } else {
+      requests.set(request.requestId, {
+        request,
+        peerId: String(message.fromPeerId),
+        lastSeenAt: Date.now(),
+      });
+    }
     if (!known) {
       Promise.resolve(onRequest(request)).catch((error) => logger.debug?.(error.message));
     }
@@ -181,8 +190,19 @@ export async function startDeviceApprovalResponder({
         .sort((left, right) => left.request.issuedAt.localeCompare(right.request.issuedAt))
         .map(({ request }) => request);
     },
-    /** Encrypt a capability to one requester's one-time key and deliver it. */
-    async approve(requestId, capability) {
+    /**
+     * Encrypt a capability to one requester's one-time key and deliver it.
+     *
+     * A direct send is fire-and-forget, so this does not return until the
+     * requester stops re-announcing itself — which is what happens the moment
+     * it accepts a grant. Until then the grant is resent, because tearing the
+     * node down right after a send drops the message before it leaves.
+     */
+    async approve(requestId, capability, {
+      confirmMs = 15_000,
+      resendMs = 1_500,
+      quietMs = 3_000,
+    } = {}) {
       const record = requests.get(String(requestId));
       if (!record) throw new Error('That pairing request is no longer being advertised');
       const envelope = sealDeviceGrant(
@@ -191,11 +211,31 @@ export async function startDeviceApprovalResponder({
         capability,
         { purpose: 'enrollment' },
       );
-      if (!node.sendDirect(record.peerId, envelope)) {
-        throw new Error(`${record.request.deviceName} is no longer reachable`);
+      const send = () => {
+        if (!node.sendDirect(record.peerId, envelope)) {
+          throw new Error(`${record.request.deviceName} is no longer reachable`);
+        }
+      };
+      send();
+      let lastSentAt = Date.now();
+      const deadline = lastSentAt + confirmMs;
+      let confirmed = false;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        if (closed) break;
+        // The requester announces itself on a short timer while it waits, so a
+        // gap in those announcements means it has taken the grant and stopped.
+        if (Date.now() - record.lastSeenAt >= quietMs) {
+          confirmed = true;
+          break;
+        }
+        if (Date.now() - lastSentAt >= resendMs) {
+          send();
+          lastSentAt = Date.now();
+        }
       }
       requests.delete(record.request.requestId);
-      return record.request;
+      return { request: record.request, confirmed };
     },
     async close() {
       if (closed) return;

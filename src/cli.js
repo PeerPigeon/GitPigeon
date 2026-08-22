@@ -760,8 +760,8 @@ async function commandPair(args, verbose) {
       const code = pairingCode(request);
       console.log(`\n${pairingLabel(request)} should be showing this code:\n`);
       console.log(`     ${code}\n`);
-      const confirmed = await readLine('Does that match what you see there? (y/N) ');
-      if (confirmed.toLowerCase() !== 'y' && confirmed.toLowerCase() !== 'yes') {
+      const matches = await readLine('Does that match what you see there? (y/N) ');
+      if (matches.toLowerCase() !== 'y' && matches.toLowerCase() !== 'yes') {
         console.log('\nNot approved. If the codes differ, something else is asking to pair.\n');
         continue;
       }
@@ -772,7 +772,8 @@ async function commandPair(args, verbose) {
         name: entry.name,
         ...(entry.signalingServer ? { signalingServer: entry.signalingServer } : {}),
       }));
-      await responder.approve(request.requestId, {
+      console.log('\nSending the encrypted grant…');
+      const { confirmed } = await responder.approve(request.requestId, {
         index: {
           indexId: index.indexId,
           secret: index.secret,
@@ -781,6 +782,11 @@ async function commandPair(args, verbose) {
         nativeDevicePublicKey: identity.publicKey,
         repositories,
       });
+      if (!confirmed) {
+        console.log(`\n${pairingLabel(request)} did not confirm the grant.`);
+        console.log('It may have been closed or lost its connection. Reload it and run `git pigeon pair` again.');
+        return;
+      }
       console.log(`\nPaired ${pairingLabel(request)}.`);
       console.log(`It now shares this machine's encrypted Pigeon index${repositories.length ? ` and ${repositories.length} ${repositories.length === 1 ? 'repository' : 'repositories'}` : ''}.`);
       return;

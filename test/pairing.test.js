@@ -74,12 +74,18 @@ test('the watcher host lists pending requests and grants only the chosen one', a
     nativeDevicePublicKey: null,
     repositories: [],
   };
-  const approved = await responder.approve(bobRequest.requestId, capability);
-  assert.equal(approved.deviceName, 'Bob');
+  const approved = await responder.approve(bobRequest.requestId, capability, {
+    confirmMs: 2_000,
+    resendMs: 200,
+    quietMs: 300,
+  });
+  assert.equal(approved.request.deviceName, 'Bob');
+  // Bob stopped announcing after the grant, which is how acceptance is known.
+  assert.equal(approved.confirmed, true);
 
   // Only Bob was granted, and only Bob's key can open it.
-  assert.equal(node.direct.length, 1);
-  assert.equal(node.direct[0].peerId, 'bob-peer');
+  assert.ok(node.direct.length >= 1);
+  assert.ok(node.direct.every(({ peerId }) => peerId === 'bob-peer'));
   assert.equal(openDeviceGrant(bob, node.direct[0].data).index.indexId, 'c'.repeat(32));
   assert.throws(() => openDeviceGrant(alice, node.direct[0].data));
 
@@ -127,4 +133,34 @@ test('pair opens a page only when no browser is already waiting', async () => {
   const dashboardCall = command.indexOf('commandPairDashboard');
   const dashboardFlag = command.indexOf("takeFlag(args, '--dashboard')");
   assert.ok(dashboardFlag !== -1 && dashboardCall !== -1 && dashboardFlag < dashboardCall);
+});
+
+test('a grant is resent until the requester stops asking', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'gitpigeon-pair-confirm-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const identity = await loadOrCreateNativeDeviceIdentity({ root });
+  const request = createDeviceEnrollmentRequest(identity, { port: 41_717, deviceName: 'Safari' });
+
+  let node;
+  const responder = await startDeviceApprovalResponder({
+    nodeFactory: (options) => { node = new FakeApprovalNode(options); return node; },
+  });
+  t.after(() => responder.close());
+  node.emit('message', { local: false, fromPeerId: 'browser', data: request });
+  await settle();
+
+  // A requester that keeps announcing has not taken the grant. A single
+  // fire-and-forget send followed by tearing the node down loses it, which is
+  // exactly what left an approved browser stuck on its waiting screen.
+  const keepAsking = setInterval(() => {
+    node.emit('message', { local: false, fromPeerId: 'browser', data: request });
+  }, 100);
+  const stubborn = await responder.approve(request.requestId, { index: {} }, {
+    confirmMs: 1_200,
+    resendMs: 200,
+    quietMs: 400,
+  });
+  clearInterval(keepAsking);
+  assert.equal(stubborn.confirmed, false, 'a requester still asking must not read as confirmed');
+  assert.ok(node.direct.length > 1, `the grant should have been resent, sent ${node.direct.length} time(s)`);
 });
