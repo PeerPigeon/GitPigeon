@@ -53,6 +53,12 @@ export function validateMeshPairingRequest(value, now = Date.now()) {
     ...(/^[0-9a-f]{64}$/.test(String(value.indexFingerprint ?? ''))
       ? { indexFingerprint: String(value.indexFingerprint) }
       : {}),
+    ...(value.diagnostics && typeof value.diagnostics === 'object' ? { diagnostics: {
+      build: String(value.diagnostics.build ?? '').slice(0, 32),
+      indexPeers: Number.isSafeInteger(value.diagnostics.indexPeers) ? value.diagnostics.indexPeers : null,
+      publishedAgoMs: Number.isSafeInteger(value.diagnostics.publishedAgoMs) ? value.diagnostics.publishedAgoMs : null,
+      ...(value.diagnostics.indexError ? { indexError: String(value.diagnostics.indexError).slice(0, 300) } : {}),
+    } } : {}),
     platform: String(value.platform || 'unknown').slice(0, 32),
     arch: String(value.arch || 'unknown').slice(0, 32),
     issuedAt: new Date(issuedAt).toISOString(),
@@ -79,6 +85,7 @@ export function createMeshPairingRequest({
   platform = process.platform,
   arch = process.arch,
   indexId = null,
+  diagnostics = null,
   now = Date.now(),
 } = {}) {
   return {
@@ -87,6 +94,16 @@ export function createMeshPairingRequest({
     requesterKind: 'native',
     requestId,
     ...(indexId ? { indexFingerprint: indexFingerprint(indexId) } : {}),
+    // The machine states what its index half is doing, so a watcher whose
+    // index node cannot reach anyone still says so through the mesh it can
+    // reach. Carries no secrets: a build string, peer count, publish age,
+    // and an error message.
+    ...(diagnostics ? { diagnostics: {
+      build: String(diagnostics.build ?? '').slice(0, 32),
+      indexPeers: Number.isSafeInteger(diagnostics.indexPeers) ? diagnostics.indexPeers : null,
+      publishedAgoMs: Number.isSafeInteger(diagnostics.publishedAgoMs) ? diagnostics.publishedAgoMs : null,
+      ...(diagnostics.indexError ? { indexError: String(diagnostics.indexError).slice(0, 300) } : {}),
+    } } : {}),
     deviceName: String(deviceName || 'New device').trim().slice(0, 120),
     platform: String(platform).slice(0, 32),
     arch: String(arch).slice(0, 32),
@@ -179,9 +196,11 @@ export async function startDeviceApprovalResponder({
   // browser could end up linked to one machine's pair and never see the other.
   offerDeviceName = null,
   offerIndexId = null,
+  offerDiagnostics = null,
   onGrant = null,
 } = {}) {
   const node = await createNode(nodeFactory, keyPair);
+  const statusLines = new Map();
   const offerRequestId = keyPair?.pub
     ? createHash('sha256').update('gitpigeon:offer-id:v1\0').update(String(keyPair.pub)).digest('hex').slice(0, 32)
     : null;
@@ -217,6 +236,15 @@ export async function startDeviceApprovalResponder({
     }
     const request = validateMeshPairingRequest(value);
     if (!request) return;
+    if (request.requesterKind === 'native' && request.diagnostics) {
+      const d = request.diagnostics;
+      // Publish age moves every round; bucket it so only real changes log.
+      const line = `${request.deviceName} build=${d.build || '?'} indexPeers=${d.indexPeers ?? '?'} published=${d.publishedAgoMs === null ? 'never' : Math.round(d.publishedAgoMs / 60_000) + 'm ago'}${d.indexError ? ` error="${d.indexError}"` : ''}`;
+      if (statusLines.get(request.requestId) !== line) {
+        statusLines.set(request.requestId, line);
+        logger.info?.(`[watcher-status] ${line}`);
+      }
+    }
     const known = requests.get(request.requestId);
     if (known) {
       // Update in place: an in-flight approve() holds this record and reads
@@ -248,6 +276,7 @@ export async function startDeviceApprovalResponder({
         requestId: offerRequestId,
         deviceName: offerDeviceName,
         indexId: offerIndexId,
+        diagnostics: offerDiagnostics?.() ?? null,
       }));
     } catch (error) {
       logger.debug?.(`Watcher offer: ${error.message}`);

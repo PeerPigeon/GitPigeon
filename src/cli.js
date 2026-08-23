@@ -316,7 +316,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
  * a minute later, and nothing answered because both commands had already
  * exited. The watcher is the long-lived thing, so it is what listens.
  */
-async function startPairingService(root, log) {
+async function startPairingService(root, log, { indexDiagnostics = null } = {}) {
   const keyPair = await loadPairingKeyPair(root);
   const adopt = async (capability) => {
     if (!capability?.index?.indexId) return;
@@ -337,6 +337,7 @@ async function startPairingService(root, log) {
     // So a browser that already took this machine in stops asking to approve
     // it again every time it announces.
     offerIndexId: (await loadMachineIndex({ root }).catch(() => null))?.indexId ?? null,
+    offerDiagnostics: () => ({ build: GITPIGEON_VERSION, ...(indexDiagnostics?.() ?? {}) }),
     onGrant: adopt,
     // A browser this machine offered itself to can ask it to join the index it
     // settled on, which is how several machines end up together.
@@ -542,7 +543,9 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     await reconcile();
     // Keep offering to pair for as long as this machine runs, so a browser
     // opened at any time is answered.
-    pairingService = await startPairingService(root, log);
+    pairingService = await startPairingService(root, log, {
+      indexDiagnostics: () => machineIndex.diagnostics(),
+    });
     // Paired peers can remove a repository or rotate the index secret.
     controlServer = new ControlServer({
       node: machineIndex.node,

@@ -39,7 +39,11 @@ test('the watcher keeps offering to pair with no deadline', async () => {
   // forever while no browser actually held anything.
   assert.doesNotMatch(service, /if \(index\.pairingComplete\) return;/);
   assert.match(service, /completeDashboardPairing\(index, \{ root \}\)/);
-  assert.match(source, /pairingService = await startPairingService\(root, log\)/);
+  assert.match(source, /pairingService = await startPairingService\(root, log, \{/);
+  // The machine reports what its index half is doing on every announcement,
+  // so a watcher whose index node cannot reach anyone still says so through
+  // the mesh it can reach.
+  assert.match(source, /indexDiagnostics: \(\) => machineIndex\.diagnostics\(\)/);
 });
 
 test('joining an existing index is still possible on purpose', async () => {

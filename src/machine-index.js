@@ -492,6 +492,7 @@ async function connectMachineDirectory(index, logger = {}, {
   node.mesh.on('peer:discovered', (peerId) => logger.debug?.(`[${roomLabel}] discovered ${String(peerId).slice(0, 12)}`));
   // PeerPigeon and FreeRTC own signaling recovery. A GitPigeon-side recovery
   // call can interrupt their in-flight cross-relay negotiation.
+  node.on('error', (error) => { lastIndexError = String(error?.message ?? error).slice(0, 300); });
   node.on('error', (error) => {
     if (/^Negotiation stalled\b/.test(String(error?.message ?? error ?? ''))) {
       logger.debug?.(error?.message ?? error);
@@ -504,6 +505,8 @@ async function connectMachineDirectory(index, logger = {}, {
   let needsReconcile = true;
   let publishQueue = Promise.resolve();
   let lastDirectoryFingerprint = null;
+  let lastPublishedAt = null;
+  let lastIndexError = null;
   let lastRosterReconcileAt = 0;
   const rosterKey = indexPublishersKey(index.indexId);
   const publisherKey = publisherDirectoryKey(index.indexId, index.publisherId);
@@ -593,6 +596,7 @@ async function connectMachineDirectory(index, logger = {}, {
       // renegotiating. Storage will carry the newest record to every browser
       // as soon as the mesh reconnects instead of exposing a stale watcher.
       const record = await storage.put('public', publisherKey, value);
+      lastPublishedAt = Date.now();
       lastDirectoryFingerprint = fingerprint;
       if (directoryChanged) logger.debug?.(`Publisher directory updated at version ${record?.version ?? 'unknown'} with ${current.entries.length} ${current.entries.length === 1 ? 'repository' : 'repositories'}`);
     });
@@ -638,6 +642,19 @@ async function connectMachineDirectory(index, logger = {}, {
   return {
     index,
     node,
+    /**
+     * What this machine's index half is doing, stated by the machine itself.
+     * Carried on pairing announcements so a machine whose index node cannot
+     * reach anyone can still say so through the mesh it can reach — instead
+     * of silently vanishing from every dashboard.
+     */
+    diagnostics() {
+      return {
+        indexPeers: node.getConnectedPeers().length,
+        publishedAgoMs: lastPublishedAt === null ? null : Date.now() - lastPublishedAt,
+        ...(lastIndexError ? { indexError: lastIndexError } : {}),
+      };
+    },
     async close() {
       if (closed) return;
       clearInterval(timer);
