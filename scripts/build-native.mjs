@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -44,12 +44,32 @@ await build({
   external: ["node-pty"],
   define: { __GITPIGEON_STANDALONE__: "true" },
 });
+// The real pty ships inside the executable. The standalone build used to
+// fake a terminal through /usr/bin/script, which does tcgetattr on stdin —
+// a pipe, in a daemon — and exits 1 before the shell ever runs: the shipped
+// binary never had a working terminal on macOS at all.
+const prebuild = `${process.platform}-${process.arch}`;
+const prebuilds = path.join(root, "node_modules", "node-pty", "prebuilds", prebuild);
+const assets = {};
+for (const name of process.platform === "win32"
+  ? ["pty.node", "winpty-agent.exe", "winpty.dll", "conpty.node", "conpty.dll", "OpenConsole.exe"]
+  : ["pty.node", "spawn-helper"]) {
+  const file = path.join(prebuilds, name);
+  try {
+    await stat(file);
+    assets[`pty/${name}`] = file;
+  } catch { /* not every platform ships every helper */ }
+}
+if (!assets["pty/pty.node"] && process.platform !== "win32") {
+  throw new Error(`node-pty prebuild missing for ${prebuild}; the terminal would be dead in this binary`);
+}
 await writeFile(config, `${JSON.stringify({
   main: bundle,
   output: blob,
   disableExperimentalSEAWarning: true,
   useSnapshot: false,
   useCodeCache: false,
+  assets,
 })}\n`);
 await run(process.execPath, ["--experimental-sea-config", config]);
 await copyFile(process.execPath, output);

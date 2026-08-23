@@ -1,9 +1,9 @@
-import { spawn } from 'node:child_process';
-import { chmod, stat } from 'node:fs/promises';
+import { chmod, mkdir, stat, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   TERMINAL_CHANNEL,
   onChannelMessage,
@@ -36,35 +36,77 @@ function quoteShell(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`;
 }
 
-function portablePty(shell, args, options) {
-  let command = shell;
-  let commandArgs = args;
-  if (process.platform !== 'win32') {
-    const setup = `stty rows ${options.rows} cols ${options.cols}; exec ${quoteShell(shell)} ${args.map(quoteShell).join(' ')}`;
-    if (process.platform === 'darwin') {
-      command = '/usr/bin/script';
-      commandArgs = ['-q', '/dev/null', '/bin/sh', '-c', setup];
-    } else {
-      command = '/usr/bin/script';
-      commandArgs = ['-qefc', setup, '/dev/null'];
+/**
+ * A real pty from the standalone binary.
+ *
+ * The executable embeds node-pty's prebuilt `pty.node` and `spawn-helper` as
+ * SEA assets; they are written next to the machine state on first use and the
+ * addon is driven directly. The previous fallback pretended to be a terminal
+ * through /usr/bin/script, which calls tcgetattr on its stdin — a pipe, in a
+ * daemon — and exits 1 before the shell ever runs. The shipped binary never
+ * had a working terminal on macOS at all.
+ */
+let embeddedPtyPromise = null;
+
+async function embeddedPty() {
+  embeddedPtyPromise ??= (async () => {
+    const { getAsset } = await import('node:sea');
+    const { machineIndexRoot } = await import('./machine-index.js');
+    const { GITPIGEON_VERSION } = await import('./version.js');
+    const directory = path.join(machineIndexRoot(), 'pty', GITPIGEON_VERSION);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const files = {};
+    for (const name of ['pty.node', 'spawn-helper']) {
+      const target = path.join(directory, name);
+      try {
+        await stat(target);
+      } catch {
+        await writeFile(target, Buffer.from(getAsset(`pty/${name}`)), { mode: 0o755 });
+      }
+      await chmod(target, 0o755);
+      files[name] = target;
     }
-  }
-  const child = spawn(command, commandArgs, {
-    cwd: options.cwd,
-    env: options.env,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
+    const require = createRequire(pathToFileURL(path.join(directory, 'entry.cjs')));
+    return { native: require(files['pty.node']), helperPath: files['spawn-helper'] };
+  })();
+  return await embeddedPtyPromise;
+}
+
+async function portablePty(shell, args, options) {
+  const { native, helperPath } = await embeddedPty();
+  const tty = await import('node:tty');
+  const env = { ...options.env, TERM: options.env?.TERM ?? 'xterm-256color' };
+  const parsedEnv = Object.keys(env)
+    .filter((key) => env[key] !== undefined)
+    .map((key) => `${key}=${env[key]}`);
   const dataListeners = new Set();
   const exitListeners = new Set();
-  const emitData = (chunk) => {
-    const data = chunk.toString('utf8');
+  let exited = false;
+  const term = native.fork(
+    shell,
+    args,
+    parsedEnv,
+    options.cwd,
+    options.cols,
+    options.rows,
+    -1,
+    -1,
+    true,
+    helperPath,
+    (exitCode, signal) => {
+      exited = true;
+      for (const listener of exitListeners) listener({ exitCode, signal });
+    },
+  );
+  const socket = new tty.ReadStream(term.fd);
+  socket.setEncoding('utf8');
+  socket.on('data', (data) => {
     for (const listener of dataListeners) listener(data);
-  };
-  child.stdout.on('data', emitData);
-  child.stderr.on('data', emitData);
-  child.once('exit', (exitCode, signal) => {
-    for (const listener of exitListeners) listener({ exitCode, signal });
+  });
+  // fs read streams on a pty fd report EAGAIN early and EIO on exit.
+  socket.on('error', (error) => {
+    if (String(error?.code ?? '').includes('EAGAIN')) return;
+    socket.destroy();
   });
   return {
     onData(listener) {
@@ -75,9 +117,14 @@ function portablePty(shell, args, options) {
       exitListeners.add(listener);
       return { dispose: () => exitListeners.delete(listener) };
     },
-    write(data) { child.stdin.write(data); },
-    resize() {},
-    kill() { child.kill(); },
+    write(data) { if (!exited) socket.write(data); },
+    resize(cols, rows) {
+      try { native.resize(term.fd, cols, rows); } catch { /* exited */ }
+    },
+    kill() {
+      try { process.kill(term.pid, 'SIGHUP'); } catch { /* exited */ }
+      socket.destroy();
+    },
   };
 }
 
@@ -116,7 +163,7 @@ async function ensureSpawnHelper(ptyModule) {
 let spawnHelperReady = null;
 
 async function spawnPty(shell, args, options) {
-  if (STANDALONE) return portablePty(shell, args, options);
+  if (STANDALONE) return await portablePty(shell, args, options);
   const pty = await import('node-pty');
   spawnHelperReady ??= ensureSpawnHelper(pty).catch(() => { /* surfaced by the spawn below */ });
   await spawnHelperReady;
