@@ -37,10 +37,19 @@ export function deviceApprovalNodeOptions() {
  * discovered for that peer, and a human checks they agree before a capability
  * is released. A mismatch means the grant would go to a different key.
  */
-export function pairingCode(publicKey) {
-  const value = String(publicKey ?? '');
-  if (!value) throw new Error('A pairing code requires a PeerPigeon public key');
-  const digest = createHash('sha256').update('gitpigeon:pair-code:v2\0').update(value).digest();
+export function pairingCode(browserPublicKey, watcherPublicKey) {
+  const browser = String(browserPublicKey ?? '');
+  const watcher = String(watcherPublicKey ?? '');
+  if (!browser || !watcher) throw new Error('A pairing code requires both peers\' public keys');
+  // Both keys, so the digits identify this pair and not just the browser.
+  // Deriving from the browser alone made every machine show the same code, so
+  // confirming it said nothing about which machine was being approved.
+  const digest = createHash('sha256')
+    .update('gitpigeon:pair-code:v3\0')
+    .update(browser)
+    .update('\0')
+    .update(watcher)
+    .digest();
   return String(digest.readUInt32BE(0) % 1_000_000).padStart(6, '0');
 }
 
@@ -140,9 +149,9 @@ export async function startDeviceApprovalRequester(request, {
   return {
     node,
     request: valid,
-    /** This peer's own PeerPigeon key; the approver sees the same one. */
-    code() {
-      return pairingCode(node.getKeyPair().pub);
+    /** This peer's own PeerPigeon key, paired with the approver's. */
+    code(watcherPublicKey) {
+      return pairingCode(node.getKeyPair().pub, watcherPublicKey);
     },
     async close() {
       if (closed) return;
@@ -159,12 +168,16 @@ export async function startDeviceApprovalRequester(request, {
 export async function startDeviceApprovalResponder({
   logger = {},
   onRequest = () => {},
+  onAdopt = null,
   nodeFactory,
   requestStaleMs = 20_000,
   keyTimeoutMs = 8_000,
 } = {}) {
   const node = await createNode(nodeFactory);
   const requests = new Map();
+  // Peers this machine has already handed a capability to. Only they may ask
+  // it to join an index, so a stranger cannot redirect this machine.
+  const granted = new Set();
   let closed = false;
 
   const receive = (message) => {
@@ -174,6 +187,14 @@ export async function startDeviceApprovalResponder({
     if (value?.protocol === MESH_PAIRING_PROTOCOL && value.kind === 'accepted') {
       const acked = requests.get(String(value.requestId ?? ''));
       if (acked) acked.accepted = true;
+      return;
+    }
+    // A browser this machine already offered itself to, asking it to join the
+    // index it settled on, so a set of machines ends up together.
+    if (value?.protocol === MESH_PAIRING_PROTOCOL && value.kind === 'adopt') {
+      if (!onAdopt || !message.encrypted || !granted.has(String(message.fromPeerId))) return;
+      Promise.resolve(onAdopt(value.capability))
+        .catch((error) => logger.debug?.(`Adopt request: ${error.message}`));
       return;
     }
     const request = validateMeshPairingRequest(value);
@@ -225,7 +246,7 @@ export async function startDeviceApprovalResponder({
       if (!record) throw new Error('That pairing request is no longer being advertised');
       const known = node.getPublicKey(record.peerId)
         ?? await node.waitForPeerKey(record.peerId, keyTimeoutMs);
-      return pairingCode(known.pub);
+      return pairingCode(known.pub, node.getKeyPair().pub);
     },
     /**
      * Hand a capability to one requester. PeerPigeon encrypts it to that peer's
@@ -245,8 +266,11 @@ export async function startDeviceApprovalResponder({
         protocol: MESH_PAIRING_PROTOCOL,
         kind: 'grant',
         requestId: record.request.requestId,
+        // Without this the browser cannot derive the same per-pair code.
+        watcherPublicKey: node.getKeyPair().pub,
         capability,
       });
+      granted.add(record.peerId);
       const send = () => node.sendEncryptedDirect(record.peerId, grant);
       await send();
       let lastSentAt = Date.now();

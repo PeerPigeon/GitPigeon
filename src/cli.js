@@ -316,7 +316,20 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
  * exited. The watcher is the long-lived thing, so it is what listens.
  */
 async function startPairingService(root, log) {
-  const responder = await startDeviceApprovalResponder({ logger: log });
+  const responder = await startDeviceApprovalResponder({
+    logger: log,
+    // A browser this machine offered itself to can ask it to join the index it
+    // settled on, which is how several machines end up together.
+    onAdopt: async (capability) => {
+      if (!capability?.index?.indexId) return;
+      const current = await loadMachineIndex({ root });
+      if (current.indexId === capability.index.indexId) return;
+      await adoptMachineIndexCapability(capability.index, { root });
+      log.info?.(`Joined GitPigeon index ${String(capability.index.indexId).slice(0, 10)}; restarting`);
+      await stopWatchService(root);
+      await startWatchService({ root });
+    },
+  });
   const offered = new Set();
   let closed = false;
 

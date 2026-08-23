@@ -51,13 +51,23 @@ const acknowledge = (node, peerId, request) => node.emit('message', {
   data: { protocol: 'gitpigeon-mesh-pairing/1', kind: 'accepted', requestId: request.requestId },
 });
 
-test('a pairing code is derived from the PeerPigeon key the grant is encrypted to', () => {
-  assert.match(pairingCode('some-peer-public-key'), /^[0-9]{6}$/);
-  assert.equal(pairingCode('some-peer-public-key'), pairingCode('some-peer-public-key'));
-  // A different key must not present the same digits, or confirming the code
-  // would not tell you where the capability is going.
-  assert.notEqual(pairingCode('some-peer-public-key'), pairingCode('another-peer-public-key'));
-  assert.throws(() => pairingCode(''), /requires a PeerPigeon public key/);
+test('a pairing code identifies the pair, not just the browser', () => {
+  assert.match(pairingCode('browser-key', 'watcher-key'), /^[0-9]{6}$/);
+  assert.equal(pairingCode('browser-key', 'watcher-key'), pairingCode('browser-key', 'watcher-key'));
+
+  // Two machines offering the same browser must show different digits, or
+  // confirming the code says nothing about which machine is being approved.
+  assert.notEqual(
+    pairingCode('browser-key', 'watcher-one'),
+    pairingCode('browser-key', 'watcher-two'),
+  );
+  // And the same machine offering two browsers must differ too.
+  assert.notEqual(
+    pairingCode('browser-one', 'watcher-key'),
+    pairingCode('browser-two', 'watcher-key'),
+  );
+  assert.throws(() => pairingCode('', 'watcher-key'), /public keys/);
+  assert.throws(() => pairingCode('browser-key', ''), /public keys/);
 });
 
 test('both sides show the same code for the same requester', async (t) => {
@@ -74,7 +84,10 @@ test('both sides show the same code for the same requester', async (t) => {
 
   // The requester derives from its own key pair; the approver derives from the
   // key PeerPigeon discovered for that peer. Same key, same digits.
-  assert.equal(await responder.codeFor(request.requestId), pairingCode('requester-public-key'));
+  assert.equal(
+    await responder.codeFor(request.requestId),
+    pairingCode('requester-public-key', 'local-public-key'),
+  );
 });
 
 test('the responder lists requests and grants only the chosen one', async (t) => {
