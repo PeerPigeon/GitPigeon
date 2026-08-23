@@ -169,7 +169,14 @@ export async function startDeviceApprovalResponder({
 
   const receive = (message) => {
     if (closed || message?.local || !message?.fromPeerId) return;
-    const request = validateMeshPairingRequest(decode(message.data));
+    const value = decode(message.data);
+    // The only thing that means the capability was actually taken.
+    if (value?.protocol === MESH_PAIRING_PROTOCOL && value.kind === 'accepted') {
+      const acked = requests.get(String(value.requestId ?? ''));
+      if (acked) acked.accepted = true;
+      return;
+    }
+    const request = validateMeshPairingRequest(value);
     if (!request) return;
     const known = requests.get(request.requestId);
     if (known) {
@@ -184,6 +191,7 @@ export async function startDeviceApprovalResponder({
       request,
       peerId: String(message.fromPeerId),
       lastSeenAt: Date.now(),
+      accepted: false,
     });
     Promise.resolve(onRequest(request)).catch((error) => logger.debug?.(error.message));
   };
@@ -243,19 +251,19 @@ export async function startDeviceApprovalResponder({
       await send();
       let lastSentAt = Date.now();
       const deadline = lastSentAt + confirmMs;
-      let confirmed = false;
-      while (Date.now() < deadline) {
+      // Silence is not acceptance. A browser that was closed or reloaded stops
+      // announcing exactly like one that accepted, and treating that as
+      // success left machines believing they were paired to a browser that had
+      // never stored anything — and then refusing to pair with any other.
+      while (Date.now() < deadline && !record.accepted) {
         await new Promise((resolve) => setTimeout(resolve, 250));
         if (closed) break;
-        if (Date.now() - record.lastSeenAt >= quietMs) {
-          confirmed = true;
-          break;
-        }
         if (Date.now() - lastSentAt >= resendMs) {
           await send().catch((error) => logger.debug?.(`Pairing resend: ${error.message}`));
           lastSentAt = Date.now();
         }
       }
+      const confirmed = Boolean(record.accepted);
       requests.delete(record.request.requestId);
       return { request: record.request, confirmed };
     },

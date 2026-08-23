@@ -33,8 +33,10 @@ test('the watcher keeps offering to pair with no deadline', async () => {
 
   assert.doesNotMatch(service, /timeoutMs/);
   assert.doesNotMatch(service, /deadline/);
-  // Once a browser is paired, approving anything else is that browser's call.
-  assert.match(service, /if \(index\.pairingComplete\) return;/);
+  // Every watcher offers to every browser that is not yet approved. Gating on
+  // a stored "already paired" flag could leave a machine refusing to pair
+  // forever while no browser actually held anything.
+  assert.doesNotMatch(service, /if \(index\.pairingComplete\) return;/);
   assert.match(service, /completeDashboardPairing\(index, \{ root \}\)/);
   assert.match(source, /pairingService = await startPairingService\(root, log\)/);
 });

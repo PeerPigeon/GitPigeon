@@ -44,6 +44,13 @@ const announce = (node, peerId, request) => node.emit('message', {
   data: request,
 });
 
+// Silence used to count as acceptance, which a closed browser produced too.
+const acknowledge = (node, peerId, request) => node.emit('message', {
+  local: false,
+  fromPeerId: peerId,
+  data: { protocol: 'gitpigeon-mesh-pairing/1', kind: 'accepted', requestId: request.requestId },
+});
+
 test('a pairing code is derived from the PeerPigeon key the grant is encrypted to', () => {
   assert.match(pairingCode('some-peer-public-key'), /^[0-9]{6}$/);
   assert.equal(pairingCode('some-peer-public-key'), pairingCode('some-peer-public-key'));
@@ -89,8 +96,9 @@ test('the responder lists requests and grants only the chosen one', async (t) =>
   assert.deepEqual(responder.pending().map((r) => r.deviceName), ['Alice', 'Bob']);
 
   const capability = { index: { indexId: 'c'.repeat(32), secret: 'z'.repeat(43) } };
+  setTimeout(() => acknowledge(node, 'bob-peer', bob), 150);
   const approved = await responder.approve(bob.requestId, capability, {
-    confirmMs: 2_000, resendMs: 200, quietMs: 300,
+    confirmMs: 4_000, resendMs: 200,
   });
   assert.equal(approved.request.deviceName, 'Bob');
   assert.equal(approved.confirmed, true);
@@ -104,7 +112,7 @@ test('the responder lists requests and grants only the chosen one', async (t) =>
   assert.deepEqual(responder.pending().map((r) => r.deviceName), ['Alice']);
 });
 
-test('a grant is resent until the requester stops asking', async (t) => {
+test('a grant is resent until the requester acknowledges it', async (t) => {
   let node;
   const responder = await startDeviceApprovalResponder({
     nodeFactory: (options) => { node = new FakeApprovalNode(options); return node; },
@@ -115,14 +123,12 @@ test('a grant is resent until the requester stops asking', async (t) => {
   announce(node, 'browser', request);
   await settle();
 
-  // A requester that keeps announcing has not taken the grant. A single
+  // A requester that never acknowledges has not taken the grant. A single
   // fire-and-forget send followed by tearing the node down loses it, which is
   // what left an approved browser stuck on its waiting screen.
-  const keepAsking = setInterval(() => announce(node, 'browser', request), 100);
   const stubborn = await responder.approve(request.requestId, { index: {} }, {
-    confirmMs: 1_200, resendMs: 200, quietMs: 400,
+    confirmMs: 1_200, resendMs: 200,
   });
-  clearInterval(keepAsking);
   assert.equal(stubborn.confirmed, false);
   assert.ok(node.direct.length > 1, `expected a resend, sent ${node.direct.length}`);
 });

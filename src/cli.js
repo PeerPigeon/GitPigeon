@@ -324,9 +324,11 @@ async function startPairingService(root, log) {
   const tick = async () => {
     if (closed) return;
     const index = await loadMachineIndex({ root });
-    // Once a browser is paired, approving anything else is that browser's
-    // decision to make, not this machine's.
-    if (index.pairingComplete) return;
+    // Every watcher offers to every browser that is not yet approved. Gating
+    // this on a stored "already paired" flag was worse than useless: the flag
+    // could be set while no browser held anything, and the machine would then
+    // refuse to pair with any browser ever again. The person confirming the
+    // code in the browser is the check that matters.
     const identity = await loadOrCreateNativeDeviceIdentity({ root });
     for (const request of responder.pending()) {
       if (request.requesterKind !== 'browser' || offered.has(request.requestId)) continue;
