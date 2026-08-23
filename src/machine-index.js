@@ -10,7 +10,10 @@ import { installNativeWebRTC } from './webrtc.js';
 export const INDEX_PROTOCOL = 'gitpigeon-index/1';
 export const INDEX_NETWORK_ID = 'gitpigeon-index-v1';
 export const INDEX_HEARTBEAT_MS = 10_000;
-export const INDEX_STALE_MS = 12_000;
+// A publisher heartbeat is 10s, so a 12s window left two seconds for a record
+// to be written, gossiped across the mesh, and read. Any jitter marked a live
+// watcher dead and the next beat revived it, which read as constant flapping.
+export const INDEX_STALE_MS = 45_000;
 export const INDEX_PRESENCE_BUCKET_MS = 5_000;
 
 const STATE_VERSION = 4;
