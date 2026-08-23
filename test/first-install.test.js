@@ -61,3 +61,26 @@ test('a first install never asks anyone to type a code', async () => {
   assert.doesNotMatch(helper, /enrollment\.url/);
   assert.match(helper, /once it shows this code/);
 });
+
+test('init registers a repository without enrolling a browser', async () => {
+  const source = await import('node:fs/promises')
+    .then(({ readFile }) => readFile(new URL('../src/cli.js', import.meta.url), 'utf8'));
+  const command = /async function commandInit\([\s\S]*?\n\}/.exec(source)?.[0] ?? '';
+  assert.ok(command, 'commandInit should be present');
+
+  // init ran the enrolment flow whenever pairingComplete was false, which asked
+  // for a code as though an already-paired browser were new.
+  assert.doesNotMatch(command, /runDashboardPairing/);
+  assert.doesNotMatch(command, /claimDashboardPairing/);
+  assert.match(command, /No browser is paired with this machine yet/);
+});
+
+test('a mesh pairing is recorded, so later commands know about it', async () => {
+  const source = await import('node:fs/promises')
+    .then(({ readFile }) => readFile(new URL('../src/cli.js', import.meta.url), 'utf8'));
+
+  // Nothing on the mesh path set pairingComplete, so it stayed false forever
+  // and every later command behaved as though no browser had ever paired.
+  const grants = source.split('completeDashboardPairing(index, { root })').length - 1;
+  assert.ok(grants >= 2, `both pairing paths should record the pairing, found ${grants}`);
+});

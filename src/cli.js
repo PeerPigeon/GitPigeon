@@ -54,27 +54,37 @@ import { GITPIGEON_VERSION, IS_STANDALONE } from './version.js';
 
 const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
 
-First time here? Open gitpigeon.dev in your browser, then run
-\`git pigeon pair\` on this machine and approve it.
-\`git pigeon pair\` also prints a one-time link for a device on another network,
-and accepts a \`gitpigeon://pair/...\` link issued by an approved browser.
+Getting started
+  1. Install GitPigeon on this machine.
+  2. Open gitpigeon.dev and run \`git pigeon pair\`, then confirm the code.
+  3. In any repository you want to sync, run \`git pigeon init\`.
 
-Usage:
-  git pigeon pair [LINK] [--dashboard] [--rotate]
-  git pigeon init [INVITE] [DIRECTORY]
-  git pigeon install [--enroll | --no-enroll]
-  git pigeon enroll
-  git pigeon list
-  git pigeon unwatch [REPOSITORY]
-  git pigeon start [--poll DURATION]
-  git pigeon restart [--poll DURATION]
-  git pigeon stop
-  git pigeon watch [off] [--poll DURATION]
-  git pigeon invite
-  git pigeon track FILE...
+Pair a browser or device
+  git pigeon pair                 Approve whatever is waiting, and print a
+                                  one-time link for a device elsewhere
+  git pigeon pair LINK            Join an index from a gitpigeon://pair link
+  git pigeon pair --rotate        Replace the index secret first; every paired
+                                  device and browser must pair again
+
+Repositories
+  git pigeon init [INVITE] [DIR]  Start syncing a repository
+  git pigeon unwatch [REPO]       Stop syncing one
+  git pigeon list                 Show what this machine syncs
+  git pigeon invite               Print an invite for one repository
+  git pigeon sync [--wait D] [--force]
+                                  Sync once and exit
+
+Private files
+  git pigeon track FILE...        Sync a file without committing it to Git
   git pigeon untrack FILE...
   git pigeon tracked
-  git pigeon sync [--wait DURATION] [--force]
+
+Background service
+  git pigeon start [--poll D]
+  git pigeon restart [--poll D]
+  git pigeon stop
+
+Checking on things
   git pigeon status [--json]
   git pigeon doctor
 
@@ -580,17 +590,8 @@ async function commandInit(args, cwd, verbose) {
     root: indexRoot,
     pid: null,
   });
-  const pairing = await claimDashboardPairing();
-  if (pairing) {
-    // The index capability may have changed. Restart the one service so its
-    // PeerPigeon node is created with the durable index's current secret.
-    await stopWatchService(indexRoot);
-  }
   const watcher = await startIndexedWatchService({ verbose });
   await waitForWatchServiceRepository(indexRoot, repository.root);
-  if (pairing) {
-    await runDashboardPairing(pairing, verbose);
-  }
 
   if (created && !invite) {
     console.log('GitPigeon initialized and watching in the background.');
@@ -605,6 +606,13 @@ async function commandInit(args, cwd, verbose) {
         ? 'is already registered with the machine-wide watcher service'
         : 'was added to the machine-wide watcher service';
     console.log(`GitPigeon is configured and ${state}.`);
+  }
+  // Registering a repository is not pairing a browser. Running the enrolment
+  // flow from here interrupted an unrelated command and asked for a code as
+  // though a browser already paired with this machine were a new one.
+  const machineIndex = await loadMachineIndex({ root: indexRoot });
+  if (!machineIndex.pairingComplete) {
+    console.log('\nNo browser is paired with this machine yet. Run `git pigeon pair` to add one.');
   }
   const discovered = await workspace.list();
   if (discovered.length) console.log(`Private files: ${discovered.length} automatically protected from Git.`);
@@ -717,7 +725,10 @@ async function grantToWaitingBrowser(root, verbose, log, {
           nativeDevicePublicKey: identity.publicKey,
           repositories: [],
         });
-        if (!confirmed) console.log('That browser has not confirmed yet. Approve it there to finish.');
+        // Record it, or every later command keeps behaving as though no
+        // browser has ever been paired with this machine.
+        if (confirmed) await completeDashboardPairing(index, { root }).catch((error) => log.debug?.(error.message));
+        else console.log('That browser has not confirmed yet. Approve it there to finish.');
         return true;
       }
       if (!opened && Date.now() - startedAt >= openAfterMs) {
@@ -1035,6 +1046,7 @@ async function commandPair(args, verbose) {
         console.log('It may have been closed or lost its connection. Reload it and run `git pigeon pair` again.');
         return;
       }
+      await completeDashboardPairing(index, { root }).catch((error) => log.debug?.(error.message));
       console.log(`\nPaired ${pairingLabel(request)}.`);
       // Pairing alone left the machine serving nothing, so the browser showed
       // zero device peers with nothing to confirm against. The service joins
