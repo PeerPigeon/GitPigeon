@@ -308,6 +308,57 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   };
 }
 
+/**
+ * Offer pairing for as long as this machine is running, with no deadline.
+ *
+ * Pairing used to be offered only while `install` or `pair` sat in the
+ * foreground, and only for a few minutes. Install two machines, open a browser
+ * a minute later, and nothing answered because both commands had already
+ * exited. The watcher is the long-lived thing, so it is what listens.
+ */
+async function startPairingService(root, log) {
+  const responder = await startDeviceApprovalResponder({ logger: log });
+  const offered = new Set();
+  let closed = false;
+
+  const tick = async () => {
+    if (closed) return;
+    const index = await loadMachineIndex({ root });
+    // Once a browser is paired, approving anything else is that browser's
+    // decision to make, not this machine's.
+    if (index.pairingComplete) return;
+    const identity = await loadOrCreateNativeDeviceIdentity({ root });
+    for (const request of responder.pending()) {
+      if (request.requesterKind !== 'browser' || offered.has(request.requestId)) continue;
+      offered.add(request.requestId);
+      const code = await responder.codeFor(request.requestId).catch(() => null);
+      if (!code) continue;
+      log.info?.(`${request.deviceName} is asking to pair. Approve it there if it shows ${code}.`);
+      const { confirmed } = await responder.approve(request.requestId, {
+        index: { indexId: index.indexId, secret: index.secret, publisherId: index.publisherId },
+        nativeDevicePublicKey: identity.publicKey,
+        deviceName: deviceHostName(),
+        repositories: [],
+      });
+      if (!confirmed) continue;
+      await completeDashboardPairing(index, { root }).catch((error) => log.debug?.(error.message));
+      log.info?.(`Paired ${request.deviceName}.`);
+    }
+  };
+
+  const timer = setInterval(() => { tick().catch((error) => log.debug?.(error.message)); }, 1_000);
+  timer.unref?.();
+  tick().catch((error) => log.debug?.(error.message));
+  return {
+    async close() {
+      if (closed) return;
+      closed = true;
+      clearInterval(timer);
+      await responder.close().catch(() => {});
+    },
+  };
+}
+
 async function runWatchService({ root, token, pollMs, verbose = false }) {
   const log = logger(verbose);
   const serviceInstanceId = randomBytes(16).toString('hex');
@@ -334,6 +385,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let automaticUpdates;
   let installedUpdate;
   let controlServer;
+  let pairingService;
   let restartAfterRotation = false;
 
   const publishServiceRepositoryState = async () => {
@@ -462,6 +514,9 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       },
     });
     await reconcile();
+    // Keep offering to pair for as long as this machine runs, so a browser
+    // opened at any time is answered.
+    pairingService = await startPairingService(root, log);
     // Paired peers can remove a repository or rotate the index secret.
     controlServer = new ControlServer({
       node: machineIndex.node,
@@ -518,6 +573,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     for (const record of sessions.values()) await stopSession(record);
     await markMachinePigeonsStopped({ root, pid: process.pid });
     controlServer?.stop();
+    if (pairingService) await pairingService.close();
     if (lanApprovals) await lanApprovals.close();
     if (machineIndex) await machineIndex.close();
     if (control) await control.close();
@@ -694,63 +750,6 @@ async function commandEnroll(args, verbose) {
   console.log(`This device is now approved for GitPigeon index ${index.indexId.slice(0, 10)}.`);
 }
 
-/**
- * Wait for a browser to announce itself, opening one only if none turns up.
- *
- * Joining the mesh and hearing an announcement takes far longer than it feels
- * like it should, so a short timeout here fell through to the enrolment-link
- * page every time — the one that asks the person to type a code instead of
- * confirming one.
- */
-async function grantToWaitingBrowser(root, verbose, log, {
-  openAfterMs = 15_000,
-  timeoutMs = 5 * 60_000,
-} = {}) {
-  const responder = await startDeviceApprovalResponder({ logger: log });
-  const startedAt = Date.now();
-  let opened = false;
-  try {
-    while (Date.now() - startedAt < timeoutMs) {
-      const request = responder.pending().find((value) => value.requesterKind === 'browser');
-      if (request) {
-        const code = await responder.codeFor(request.requestId);
-        const index = await loadMachineIndex({ root });
-        const identity = await loadOrCreateNativeDeviceIdentity({ root });
-        console.log(`\n${request.deviceName} is waiting.\n`);
-        console.log(`  Approve the watcher there once it shows this code: ${code}\n`);
-        // Encrypted to that browser's key. It stores nothing until the person
-        // confirms the code, which is what makes the check mean anything.
-        const { confirmed } = await responder.approve(request.requestId, {
-          index: { indexId: index.indexId, secret: index.secret, publisherId: index.publisherId },
-          nativeDevicePublicKey: identity.publicKey,
-          // Several unconfigured machines can offer at once. Without a name
-          // the browser has nothing to choose between them by.
-          deviceName: deviceHostName(),
-          repositories: [],
-        });
-        // Record it, or every later command keeps behaving as though no
-        // browser has ever been paired with this machine.
-        if (confirmed) await completeDashboardPairing(index, { root }).catch((error) => log.debug?.(error.message));
-        else console.log('That browser has not confirmed yet. Approve it there to finish.');
-        return true;
-      }
-      if (!opened && Date.now() - startedAt >= openAfterMs) {
-        opened = true;
-        const dashboard = process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/';
-        // A plain page, not an enrolment link: it announces itself and is
-        // granted access, so nobody has to type anything.
-        if (openDashboard(dashboard)) console.log(`\nNo browser was open, so GitPigeon opened ${dashboard}.`);
-        else console.log(`\nOpen ${dashboard} to finish pairing this machine.`);
-      }
-      await sleep(500);
-    }
-    console.log('\nNo browser appeared. Run `git pigeon pair` when one is open.');
-    return false;
-  } finally {
-    await responder.close().catch(() => {});
-  }
-}
-
 async function commandInstall(args, verbose) {
   const enroll = takeFlag(args, '--enroll');
   const noEnroll = takeFlag(args, '--no-enroll');
@@ -782,39 +781,34 @@ async function commandInstall(args, verbose) {
   if (!enroll && unconfigured) {
     const root = machineIndexRoot();
     const log = logger(verbose);
+    // The service offers pairing for as long as it runs, so this command does
+    // not need to hold the terminal open waiting for a browser.
     await startWatchService({ root, verbose });
+    console.log('\nThis machine is ready to pair and will keep offering.');
 
-    // Two things can be true of an unconfigured machine and it cannot tell
-    // which from here: it may be the first device, or another device joining a
-    // setup that already exists. So it does both and takes whichever answers.
-    //
-    // Announcing is what makes an approved browser elsewhere raise its
-    // approval prompt; without it a second machine on the network would
-    // silently start an index of its own instead of joining yours.
+    // It may also be joining a setup that already exists, which only an
+    // approved browser elsewhere can authorize. Announce for a while so that
+    // browser can prompt, then leave the service listening either way.
     const identity = await loadOrCreateNativeDeviceIdentity({ root });
-    const joining = requestLanDeviceApproval(identity, {
+    const joined = await requestLanDeviceApproval(identity, {
+      timeoutMs: 30_000,
       logger: log,
       onRequest: () => console.log('Announced this machine to any approved GitPigeon browser.'),
-    }).then((value) => ({ kind: 'joined', value }), (error) => {
-      log.debug?.(`Enrolment discovery ended: ${error.message}`);
-      return null;
-    });
-    const owning = grantToWaitingBrowser(root, verbose, log)
-      .then((granted) => granted ? { kind: 'owned' } : null, () => null);
+    }).catch(() => null);
 
-    const [first] = await Promise.all([Promise.race([joining, owning].map((p) => p.then((v) => v ?? new Promise(() => {}))))]);
-    if (first?.kind === 'joined') {
-      const { request, grant } = first.value;
-      if (grant.requestId !== request.requestId || !grant.index) {
-        throw new Error('The approved device grant did not contain a GitPigeon index capability');
-      }
+    if (joined?.grant?.index) {
       await stopWatchService(root);
-      const index = await adoptMachineIndexCapability(grant.index, { root });
-      const added = await materializeGrantedRepositories(grant.repositories, { root });
+      const index = await adoptMachineIndexCapability(joined.grant.index, { root });
+      const added = await materializeGrantedRepositories(joined.grant.repositories, { root });
       await startWatchService({ root, verbose });
       if (added.length) console.log(`Added ${added.length} shared ${added.length === 1 ? 'repository' : 'repositories'}.`);
       console.log(`This device joined GitPigeon index ${index.indexId.slice(0, 10)}.`);
+      return;
     }
+
+    const dashboard = process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/';
+    console.log(`\nOpen ${dashboard} and approve this machine when it shows a code.`);
+    openDashboard(dashboard);
     return;
   }
   await commandEnroll([], verbose);
