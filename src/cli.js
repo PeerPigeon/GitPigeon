@@ -55,10 +55,10 @@ const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
 
 First time here? Open gitpigeon.dev in your browser, then run
 \`git pigeon pair\` on this machine and approve it.
-Adding a device on another network? Use \`git pigeon pair --link\`.
+\`git pigeon pair\` also prints a one-time link for a device on another network.
 
 Usage:
-  git pigeon pair [--link] [--dashboard] [--rotate]
+  git pigeon pair [--dashboard] [--rotate]
   git pigeon init [INVITE] [DIRECTORY]
   git pigeon install [--enroll | --no-enroll]
   git pigeon enroll
@@ -740,28 +740,59 @@ async function readLine(prompt) {
 }
 
 /**
- * A device on another network cannot hear this machine's discovery
- * announcements, so it is handed a one-time link instead. The capability
- * travels encrypted inside the fragment and needs a separate six-digit code to
- * open, so the link alone is not enough if it is intercepted.
+ * A one-time link for a device that cannot hear this machine's discovery
+ * announcements — anything on another network. The capability travels
+ * encrypted inside the fragment and needs a separate six-digit code to open,
+ * so an intercepted link is not enough on its own.
+ *
+ * Served alongside local discovery so both routes are always available; the
+ * short expiry is refreshed for as long as the command is waiting.
  */
-async function commandPairLink(args, verbose) {
-  const rotate = takeFlag(args, '--rotate');
-  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
-  const root = machineIndexRoot();
-  const pairing = await claimDashboardPairing({ root, force: true, rotate });
-  if (!pairing) throw new Error('Could not start a GitPigeon enrollment for this machine');
-  if (pairing.rotated) {
-    // The running service still holds the previous secret, so it has to come
-    // back on the new one or the newly paired device will not find it.
-    await stopWatchService(root);
-    await startWatchService({ root, verbose });
-  }
-  await runDashboardPairing(pairing, verbose, { open: false });
+function startPairingLink(root, verbose, log) {
+  let cancelled = false;
+  let current = null;
+  const serve = async () => {
+    while (!cancelled) {
+      const pairing = await claimDashboardPairing({ root, force: true, rotate: false });
+      if (!pairing) return null;
+      if (pairing.rotated) {
+        // The running service still holds the previous secret, so it has to
+        // come back on the new one or the paired device will not find it.
+        await stopWatchService(root);
+        await startWatchService({ root, verbose });
+      }
+      const identity = await loadOrCreateNativeDeviceIdentity({ root });
+      const enrollment = createDashboardEnrollment(
+        pairing.index,
+        process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/',
+        { automatic: false, nativeDevicePublicKey: identity.publicKey },
+      );
+      current = enrollment;
+      console.log('\nOr send this one-time link to a device on another network:\n');
+      console.log(`  ${enrollment.url}\n`);
+      console.log(`  code ${enrollment.displayCode}   (send it by a different route than the link)\n`);
+      try {
+        const result = await serveDashboardEnrollment(enrollment, { logger: log });
+        if (cancelled) return null;
+        await completeDashboardPairing(pairing.index, { root });
+        return result;
+      } catch (error) {
+        if (cancelled) return null;
+        // The window is deliberately short. Issue a fresh one rather than
+        // leaving a dead link on screen while the command is still waiting.
+        log.debug?.(`Pairing link expired: ${error.message}`);
+      }
+    }
+    return null;
+  };
+  return {
+    accepted: serve(),
+    get enrollment() { return current; },
+    cancel() { cancelled = true; },
+  };
 }
 
 async function commandPair(args, verbose) {
-  if (takeFlag(args, '--link')) return await commandPairLink(args, verbose);
   if (takeFlag(args, '--dashboard')) return await commandPairDashboard(args, verbose);
   // `--rotate` only ever meant anything to the dashboard enrollment flow.
   if (args.includes('--rotate')) return await commandPairDashboard(args, verbose);
@@ -777,6 +808,16 @@ async function commandPair(args, verbose) {
 
   console.log('Looking for a device or browser asking to pair…');
 
+  // Both routes run at once: local discovery for anything on this network, and
+  // a one-time link for anything that is not.
+  const link = startPairingLink(root, verbose, log);
+  let linkAccepted = false;
+  link.accepted.then((result) => {
+    if (!result) return;
+    linkAccepted = true;
+    console.log(`\nPaired ${result.browserId.slice(0, 16)}… through the one-time link.`);
+  }).catch((error) => log.debug?.(error.message));
+
   const responder = await startDeviceApprovalResponder({ logger: log });
   let connectedAt = null;
   let announcedConnection = false;
@@ -785,6 +826,7 @@ async function commandPair(args, verbose) {
   let explained = false;
   try {
     while (true) {
+      if (linkAccepted) return;
       const pending = responder.pending();
       if (connectedAt && !announcedConnection) {
         announcedConnection = true;
@@ -893,6 +935,7 @@ async function commandPair(args, verbose) {
       return;
     }
   } finally {
+    link.cancel();
     await responder.close();
   }
 }

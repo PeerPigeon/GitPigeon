@@ -16,21 +16,24 @@ test('the enrollment link carries no readable capability', () => {
   assert.match(enrollment.displayCode, /^[0-9]{3} [0-9]{3}$/);
 });
 
-test('pair --link prints the link instead of opening a browser', async () => {
+test('pair always prints a link, without a flag', async () => {
   const source = await readFile(new URL('../src/cli.js', import.meta.url), 'utf8');
-  const command = /async function commandPairLink\(args, verbose\) \{[\s\S]*?\n\}/.exec(source)?.[0] ?? '';
-  assert.ok(command, 'commandPairLink should be present');
+  const command = /async function commandPair\(args, verbose\) \{[\s\S]*?\n\}/.exec(source)?.[0] ?? '';
+  assert.ok(command, 'commandPair should be present');
 
-  // There is nothing to open here: the device joining is elsewhere.
-  assert.match(command, /open: false/);
-  assert.doesNotMatch(command, /openDashboard/);
-  // A rotation invalidates the running service's secret, so it has to restart
-  // or the newly paired device will not find it.
-  assert.match(command, /if \(pairing\.rotated\)/);
-  assert.match(command, /stopWatchService\(root\)/);
+  // Local discovery and the link run together, so a device on another network
+  // is never a separate mode the user has to know about.
+  assert.match(command, /startPairingLink\(root, verbose, log\)/);
+  assert.doesNotMatch(source, /commandPairLink/);
+  assert.doesNotMatch(source, /takeFlag\(args, '--link'\)/);
 
-  // The code must not travel with the link, and the browser-opening path is
-  // skipped entirely in link mode.
-  assert.match(source, /Send the code by a different route than the link/);
-  assert.match(source, /if \(!open\) return;/);
+  const server = /function startPairingLink\([\s\S]*?\n\}\n\n/.exec(source)?.[0] ?? '';
+  assert.ok(server, 'startPairingLink should be present');
+  // Nothing is opened locally; the device joining is elsewhere.
+  assert.doesNotMatch(server, /openDashboard/);
+  // A rotation invalidates the running service's secret.
+  assert.match(server, /if \(pairing\.rotated\)/);
+  assert.match(server, /stopWatchService\(root\)/);
+  // The code must not travel with the link.
+  assert.match(server, /send it by a different route than the link/);
 });
