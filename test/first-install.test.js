@@ -96,6 +96,16 @@ test('install prints the code the browser should be showing', async () => {
   assert.ok(branches >= 3, `every install path should report a code, found ${branches}`);
 });
 
+test('init in a folder inside another repository makes it its own repository', async () => {
+  const source = await import('node:fs/promises')
+    .then(({ readFile }) => readFile(new URL('../src/cli.js', import.meta.url), 'utf8'));
+  // `git pigeon init` means THIS directory. It used to silently register the
+  // ancestor repository discovery walked up to, and then to refuse outright;
+  // both answered a question nobody asked.
+  assert.match(source, /Initialized a new Git repository at \$\{cwd\}/);
+  assert.doesNotMatch(source, /run `git init` here first/);
+});
+
 test('a rotated secret is adopted, not mistaken for already-joined', async () => {
   const source = await import('node:fs/promises')
     .then(({ readFile }) => readFile(new URL('../src/cli.js', import.meta.url), 'utf8'));
