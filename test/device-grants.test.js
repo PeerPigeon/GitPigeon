@@ -27,9 +27,12 @@ class FakeApprovalNode {
     this.listeners = new Map();
     this.broadcasts = [];
     this.destroyed = false;
+    this.keyPair = { pub: 'fake-pub', epub: 'fake-epub', priv: 'p', epriv: 'ep' };
     // The node facade exposes the raw mesh for signaling diagnostics.
     this.mesh = { on: () => {} };
   }
+
+  getKeyPair() { return this.keyPair; }
 
   on(event, listener) {
     const listeners = this.listeners.get(event) ?? new Set();
@@ -122,10 +125,12 @@ test('a mesh pairing grant arrives through PeerPigeon encryption, not a second e
     assert.equal(fake.options.sessionId, DEVICE_APPROVAL_SESSION_ID);
     // sendEncryptedDirect throws on a node without crypto.
     assert.notEqual(fake.options.crypto, false);
-    assert.deepEqual(fake.broadcasts, [request]);
+    // The announcement now carries the requester's unsea encryption key, so
+    // approvals can be sealed to it and broadcast — delivery must not depend
+    // on a direct channel that may never form.
+    assert.deepEqual(fake.broadcasts, [{ ...request, epub: fake.getKeyPair().epub }]);
 
-    // PeerPigeon hands over an already-decrypted payload; the request carries
-    // no public key of its own because unsea encrypts to the peer key.
+    // But never a hand-rolled key of its own: unsea's key is the only one.
     assert.equal(request.publicKey, undefined);
     fake.emit('message', {
       local: false,

@@ -50,6 +50,9 @@ export function validateMeshPairingRequest(value, now = Date.now()) {
     requesterKind: value.requesterKind === 'browser' ? 'browser' : 'native',
     requestId,
     deviceName: String(value.deviceName || 'New device').trim().slice(0, 120),
+    ...(typeof value.epub === 'string' && value.epub.length > 0 && value.epub.length <= 200
+      ? { epub: value.epub }
+      : {}),
     ...(/^[0-9a-f]{64}$/.test(String(value.indexFingerprint ?? ''))
       ? { indexFingerprint: String(value.indexFingerprint) }
       : {}),
@@ -96,6 +99,7 @@ export function createMeshPairingRequest({
   arch = process.arch,
   indexId = null,
   indexSecret = null,
+  epub = null,
   diagnostics = null,
   now = Date.now(),
 } = {}) {
@@ -104,6 +108,11 @@ export function createMeshPairingRequest({
     kind: 'request',
     requesterKind: 'native',
     requestId,
+    // The sender's unsea encryption key. Anything that must reach only this
+    // peer — a grant, an approval, an adopt — is sealed to this key and
+    // broadcast, so delivery never depends on a direct channel existing.
+    // Broadcasts demonstrably arrive where direct sends demonstrably do not.
+    ...(epub ? { epub: String(epub).slice(0, 200) } : {}),
     ...(indexId && indexSecret ? { indexFingerprint: indexFingerprint(indexId, indexSecret) } : {}),
     // The machine states what its index half is doing, so a watcher whose
     // index node cannot reach anyone still says so through the mesh it can
@@ -133,6 +142,18 @@ function decode(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
+async function sealTo(epub, payload) {
+  const { encryptMessageWithMeta } = await import('unsea');
+  return await encryptMessageWithMeta(JSON.stringify(payload), { epub: String(epub) });
+}
+
+async function openSealed(cipher, node) {
+  const { decryptMessageWithMeta } = await import('unsea');
+  const opened = await decryptMessageWithMeta(cipher, node.getKeyPair().epriv);
+  const value = decode(opened);
+  return value && typeof value === 'object' ? value : null;
+}
+
 async function createNode(nodeFactory, keyPair) {
   const options = deviceApprovalNodeOptions(keyPair);
   if (nodeFactory) return nodeFactory(options);
@@ -154,17 +175,31 @@ export async function startDeviceApprovalRequester(request, {
   let closed = false;
 
   const receive = (message) => {
-    if (closed || message?.local || !message?.encrypted) return;
+    if (closed) return;
     const value = decode(message.data);
-    if (!value || value.protocol !== MESH_PAIRING_PROTOCOL || value.kind !== 'grant') return;
+    if (!value || value.protocol !== MESH_PAIRING_PROTOCOL) return;
     if (value.requestId !== valid.requestId) return;
-    // PeerPigeon decrypted this to our key, so no second unwrap is needed.
-    Promise.resolve(onGrant(value.capability))
-      .catch((error) => logger.debug?.(`Pairing grant: ${error.message}`));
+    if (value.kind === 'grant' && message?.encrypted && !message.local) {
+      // PeerPigeon decrypted this to our key, so no second unwrap is needed.
+      Promise.resolve(onGrant(value.capability))
+        .catch((error) => logger.debug?.(`Pairing grant: ${error.message}`));
+      return;
+    }
+    if (value.kind === 'sealed-grant' && value.cipher) {
+      // Sealed with unsea to the key this request announced; a broadcast
+      // arrives where a direct send may have no channel to travel on.
+      openSealed(value.cipher, node)
+        .then((grant) => grant && onGrant(grant.capability))
+        .catch((error) => logger.debug?.(`Sealed pairing grant: ${error.message}`));
+    }
   };
   const announce = () => {
     if (closed) return;
-    try { node.broadcast(valid); } catch (error) { logger.debug?.(`Pairing announcement: ${error.message}`); }
+    try {
+      node.broadcast({ ...valid, epub: node.getKeyPair().epub });
+    } catch (error) {
+      logger.debug?.(`Pairing announcement: ${error.message}`);
+    }
   };
 
   node.mesh.on('identity:ready', ({ clientId } = {}) => {
@@ -242,6 +277,13 @@ export async function startDeviceApprovalResponder({
         .catch((error) => logger.debug?.(`Pairing grant: ${error.message}`));
       return;
     }
+    if (value?.protocol === MESH_PAIRING_PROTOCOL && value.kind === 'sealed-grant') {
+      if (!onGrant || value.requestId !== offerRequestId || !value.cipher) return;
+      openSealed(value.cipher, node)
+        .then((grant) => grant && onGrant(grant.capability))
+        .catch((error) => logger.debug?.(`Sealed pairing grant: ${error.message}`));
+      return;
+    }
     // A browser this machine already offered itself to, asking it to join the
     // index it settled on, so a set of machines ends up together.
     if (value?.protocol === MESH_PAIRING_PROTOCOL && value.kind === 'adopt') {
@@ -293,6 +335,7 @@ export async function startDeviceApprovalResponder({
         deviceName: offerDeviceName,
         indexId: offerIndexId,
         indexSecret: offerIndexSecret,
+        epub: node.getKeyPair().epub,
         diagnostics: offerDiagnostics?.() ?? null,
       }));
     } catch (error) {
@@ -358,7 +401,36 @@ export async function startDeviceApprovalResponder({
         capability,
       });
       granted.add(record.peerId);
-      const send = () => node.sendEncryptedDirect(record.peerId, grant);
+      // Broadcast a sealed copy as well: only the requester's announced key
+      // can open it, and a broadcast arrives even when no direct channel to
+      // that peer ever formed — which is exactly when approvals used to
+      // vanish.
+      const sealed = record.request.epub
+        ? await sealTo(record.request.epub, {
+          protocol: MESH_PAIRING_PROTOCOL,
+          kind: 'grant',
+          requestId: record.request.requestId,
+          watcherPublicKey: node.getKeyPair().pub,
+          capability,
+        }).catch(() => null)
+        : null;
+      const send = async () => {
+        await node.sendEncryptedDirect(record.peerId, grant).catch((error) => {
+          logger.debug?.(`Direct grant: ${error?.message ?? error}`);
+        });
+        if (sealed) {
+          try {
+            node.broadcast({
+              protocol: MESH_PAIRING_PROTOCOL,
+              kind: 'sealed-grant',
+              requestId: record.request.requestId,
+              cipher: sealed,
+            });
+          } catch (error) {
+            logger.debug?.(`Sealed grant broadcast: ${error?.message ?? error}`);
+          }
+        }
+      };
       await send();
       let lastSentAt = Date.now();
       const deadline = lastSentAt + confirmMs;
