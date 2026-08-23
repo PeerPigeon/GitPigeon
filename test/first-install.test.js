@@ -31,3 +31,22 @@ test('joining an existing index is still possible on purpose', async () => {
   assert.match(command, /const enroll = takeFlag\(args, '--enroll'\)/);
   assert.match(command, /await commandEnroll\(\[\], verbose\)/);
 });
+
+test('an already-open browser is not buried under a new tab', async () => {
+  const source = await import('node:fs/promises')
+    .then(({ readFile }) => readFile(new URL('../src/cli.js', import.meta.url), 'utf8'));
+  const command = /async function commandInstall\([\s\S]*?\n\}/.exec(source)?.[0] ?? '';
+
+  // A browser on the approval screen is already announcing itself, so the
+  // installer looks before it opens anything.
+  const look = command.indexOf('findWaitingBrowser');
+  const openTab = command.indexOf('runDashboardPairing(pairing, verbose)');
+  assert.ok(look !== -1 && openTab !== -1 && look < openTab,
+    'the installer must look for a waiting browser before opening one');
+
+  // The person is at the browser, so the confirmation happens there: the
+  // terminal states the code and the browser holds the grant until it matches.
+  assert.match(command, /is already open and waiting/);
+  assert.match(command, /after checking it shows this code/);
+  assert.match(command, /responder\.approve\(request\.requestId/);
+});

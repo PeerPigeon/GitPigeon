@@ -686,6 +686,31 @@ async function commandEnroll(args, verbose) {
   console.log(`This device is now approved for GitPigeon index ${index.indexId.slice(0, 10)}.`);
 }
 
+/**
+ * Look briefly for a browser already sitting on the approval screen. It is
+ * announcing itself on the discovery room, so there is no reason to open
+ * another tab in front of it.
+ */
+async function findWaitingBrowser(log, timeoutMs = 12_000) {
+  let responder;
+  try {
+    responder = await startDeviceApprovalResponder({ logger: log });
+  } catch (error) {
+    log.debug?.(`Pairing discovery unavailable: ${error.message}`);
+    return null;
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const request = responder.pending().find((value) => value.requesterKind === 'browser');
+    // The caller keeps the responder: the grant has to go out over the same
+    // session that discovered this browser.
+    if (request) return { responder, request };
+    await sleep(500);
+  }
+  await responder.close().catch(() => {});
+  return null;
+}
+
 async function commandInstall(args, verbose) {
   const enroll = takeFlag(args, '--enroll');
   const noEnroll = takeFlag(args, '--no-enroll');
@@ -716,10 +741,37 @@ async function commandInstall(args, verbose) {
     || (!existing.pairingComplete && (existing.entries?.length ?? 0) === 0);
   if (!enroll && unconfigured) {
     const root = machineIndexRoot();
-    const pairing = await claimDashboardPairing({ root, force: true });
-    if (!pairing) throw new Error('Could not start a GitPigeon enrollment for this machine');
     await startWatchService({ root, verbose });
     console.log('\nThis is the first GitPigeon device on this machine, so it owns the index.');
+
+    // A browser sitting on the approval screen is announcing itself already.
+    // Opening another tab on top of it helps nobody, so look first.
+    const log = logger(verbose);
+    const found = await findWaitingBrowser(log);
+    if (found) {
+      const { responder, request } = found;
+      try {
+        const code = await responder.codeFor(request.requestId);
+        const index = await loadMachineIndex({ root });
+        const identity = await loadOrCreateNativeDeviceIdentity({ root });
+        console.log(`\n${request.deviceName} is already open and waiting.\n`);
+        console.log(`  Approve the watcher there after checking it shows this code: ${code}\n`);
+        // The grant is encrypted to that browser's key, so only it can read
+        // this. It still waits for the person to confirm the code before using
+        // it, which is what makes the confirmation mean anything.
+        await responder.approve(request.requestId, {
+          index: { indexId: index.indexId, secret: index.secret, publisherId: index.publisherId },
+          nativeDevicePublicKey: identity.publicKey,
+          repositories: [],
+        });
+      } finally {
+        await responder.close().catch(() => {});
+      }
+      return;
+    }
+
+    const pairing = await claimDashboardPairing({ root, force: true });
+    if (!pairing) throw new Error('Could not start a GitPigeon enrollment for this machine');
     await runDashboardPairing(pairing, verbose);
     return;
   }
