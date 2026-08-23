@@ -764,6 +764,42 @@ async function commandEnroll(args, verbose) {
   console.log(`This device is now approved for GitPigeon index ${index.indexId.slice(0, 10)}.`);
 }
 
+/**
+ * Print the code each browser should be showing, so the person can compare it
+ * without going to find the service log. The background service does the
+ * granting; this only reports, and gives up so the terminal comes back.
+ */
+async function reportPairingCodes(log, { timeoutMs = 2 * 60_000 } = {}) {
+  let responder;
+  try {
+    responder = await startDeviceApprovalResponder({ logger: log });
+  } catch (error) {
+    log.debug?.(`Pairing discovery unavailable: ${error.message}`);
+    return;
+  }
+  const seen = new Set();
+  const deadline = Date.now() + timeoutMs;
+  try {
+    while (Date.now() < deadline) {
+      for (const request of responder.pending()) {
+        if (request.requesterKind !== 'browser' || seen.has(request.requestId)) continue;
+        const code = await responder.codeFor(request.requestId).catch(() => null);
+        if (!code) continue;
+        seen.add(request.requestId);
+        console.log(`\n  ${request.deviceName} is asking to pair.`);
+        console.log(`  Approve it there if it shows this code: ${code}\n`);
+      }
+      await sleep(500);
+    }
+    if (!seen.size) {
+      console.log('\nNo browser asked to pair yet. This machine keeps offering;');
+      console.log('run `git pigeon pair` to see codes again.');
+    }
+  } finally {
+    await responder.close().catch(() => {});
+  }
+}
+
 async function commandInstall(args, verbose) {
   const enroll = takeFlag(args, '--enroll');
   const noEnroll = takeFlag(args, '--no-enroll');
@@ -823,6 +859,7 @@ async function commandInstall(args, verbose) {
     const dashboard = process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/';
     console.log(`\nOpen ${dashboard} and approve this machine when it shows a code.`);
     openDashboard(dashboard);
+    await reportPairingCodes(log);
     return;
   }
   await commandEnroll([], verbose);

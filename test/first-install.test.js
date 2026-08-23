@@ -71,3 +71,20 @@ test('a mesh pairing is recorded, so later commands know about it', async () => 
   const grants = source.split('completeDashboardPairing(index, { root })').length - 1;
   assert.ok(grants >= 2, `both pairing paths should record the pairing, found ${grants}`);
 });
+
+test('install prints the code the browser should be showing', async () => {
+  const source = await import('node:fs/promises')
+    .then(({ readFile }) => readFile(new URL('../src/cli.js', import.meta.url), 'utf8'));
+  const command = /async function commandInstall\([\s\S]*?\n\}/.exec(source)?.[0] ?? '';
+  const reporter = /async function reportPairingCodes\([\s\S]*?\n\}\n\n/.exec(source)?.[0] ?? '';
+  assert.ok(reporter, 'reportPairingCodes should be present');
+
+  // The code only ever reached the service log, so there was nothing in the
+  // terminal to compare the browser against.
+  assert.match(command, /await reportPairingCodes\(log\)/);
+  assert.match(reporter, /Approve it there if it shows this code/);
+  // It reports only; the background service is what grants, and this must give
+  // up so the terminal comes back.
+  assert.doesNotMatch(reporter, /responder\.approve\(/);
+  assert.match(reporter, /timeoutMs = 2 \* 60_000/);
+});
