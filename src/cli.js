@@ -336,7 +336,10 @@ async function startPairingService(root, log, { indexDiagnostics = null } = {}) 
     offerDeviceName: deviceHostName(),
     // So a browser that already took this machine in stops asking to approve
     // it again every time it announces.
-    offerIndexId: (await loadMachineIndex({ root }).catch(() => null))?.indexId ?? null,
+    ...await (async () => {
+      const current = await loadMachineIndex({ root }).catch(() => null);
+      return { offerIndexId: current?.indexId ?? null, offerIndexSecret: current?.secret ?? null };
+    })(),
     offerDiagnostics: () => ({ build: GITPIGEON_VERSION, ...(indexDiagnostics?.() ?? {}) }),
     onGrant: adopt,
     // A browser this machine offered itself to can ask it to join the index it

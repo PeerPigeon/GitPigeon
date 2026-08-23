@@ -231,6 +231,7 @@ test('a machine announces which index it already belongs to', async (t) => {
   const offer = await startDeviceApprovalResponder({
     offerDeviceName: 'Daniels-MacBook-Pro',
     offerIndexId: 'f00ab7ea24fe377da70fc7148bfdd047',
+    offerIndexSecret: 's'.repeat(43),
     keyPair: { pub: 'pro-public-key', priv: 'p', epub: 'e', epriv: 'ep' },
     nodeFactory: (options) => { node = new FakeApprovalNode(options); return node; },
   });
@@ -240,12 +241,21 @@ test('a machine announces which index it already belongs to', async (t) => {
   // again every time it announced, which is not an approval anyone can make
   // sense of. It compares this against its own index and stays quiet.
   const [announced] = node.broadcasts.filter((value) => value?.kind === 'request');
-  assert.equal(announced.indexFingerprint, indexFingerprint('f00ab7ea24fe377da70fc7148bfdd047'));
+  assert.equal(announced.indexFingerprint, indexFingerprint('f00ab7ea24fe377da70fc7148bfdd047', 's'.repeat(43)));
+
+  // The fingerprint must change when the secret rotates: a machine holding a
+  // rotated-away secret is NOT a current member, and treating it as one
+  // suppressed the approval prompt that would have re-admitted it.
+  assert.notEqual(
+    indexFingerprint('f00ab7ea24fe377da70fc7148bfdd047', 's'.repeat(43)),
+    indexFingerprint('f00ab7ea24fe377da70fc7148bfdd047', 'rotated'.padEnd(43, 'x')),
+  );
   assert.match(announced.indexFingerprint, /^[0-9a-f]{64}$/);
 
   // The announcement is not encrypted, so the index id itself must not be on
   // it — and neither must anything derived from the secret.
   assert.ok(!JSON.stringify(announced).includes('f00ab7ea24fe377da70fc7148bfdd047'));
+  assert.ok(!JSON.stringify(announced).includes('s'.repeat(43)));
 
   // A machine with no index yet has nothing to claim.
   assert.equal(validateMeshPairingRequest(createMeshPairingRequest({

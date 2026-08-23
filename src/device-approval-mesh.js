@@ -75,11 +75,17 @@ export function validateMeshPairingRequest(value, now = Date.now()) {
  * to recognise a machine it has already taken in, without either side putting
  * the index id — let alone its secret — on an unencrypted announcement.
  */
-export function indexFingerprint(indexId) {
-  if (!indexId) return null;
+export function indexFingerprint(indexId, secret) {
+  if (!indexId || !secret) return null;
+  // v2 covers the secret as well. Hashing only the index id made a machine
+  // holding a rotated-away secret look identical to a current member, so the
+  // browser suppressed the very approval prompt that would have handed it the
+  // new secret — permanently locked out while announcing "already yours".
   return createHash('sha256')
-    .update('gitpigeon:index-fingerprint:v1\0')
+    .update('gitpigeon:index-fingerprint:v2\0')
     .update(String(indexId))
+    .update('\0')
+    .update(String(secret))
     .digest('hex');
 }
 
@@ -89,6 +95,7 @@ export function createMeshPairingRequest({
   platform = process.platform,
   arch = process.arch,
   indexId = null,
+  indexSecret = null,
   diagnostics = null,
   now = Date.now(),
 } = {}) {
@@ -97,7 +104,7 @@ export function createMeshPairingRequest({
     kind: 'request',
     requesterKind: 'native',
     requestId,
-    ...(indexId ? { indexFingerprint: indexFingerprint(indexId) } : {}),
+    ...(indexId && indexSecret ? { indexFingerprint: indexFingerprint(indexId, indexSecret) } : {}),
     // The machine states what its index half is doing, so a watcher whose
     // index node cannot reach anyone still says so through the mesh it can
     // reach. Carries no secrets: a build string, peer count, publish age,
@@ -204,6 +211,7 @@ export async function startDeviceApprovalResponder({
   // browser could end up linked to one machine's pair and never see the other.
   offerDeviceName = null,
   offerIndexId = null,
+  offerIndexSecret = null,
   offerDiagnostics = null,
   onGrant = null,
 } = {}) {
@@ -284,6 +292,7 @@ export async function startDeviceApprovalResponder({
         requestId: offerRequestId,
         deviceName: offerDeviceName,
         indexId: offerIndexId,
+        indexSecret: offerIndexSecret,
         diagnostics: offerDiagnostics?.() ?? null,
       }));
     } catch (error) {
