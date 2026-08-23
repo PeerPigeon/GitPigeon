@@ -80,8 +80,11 @@ test('install prints the code the browser should be showing', async () => {
   assert.ok(reporter, 'reportPairingCodes should be present');
 
   // The code only ever reached the service log, so there was nothing in the
-  // terminal to compare the browser against.
+  // terminal to compare the browser against — and an already-paired machine
+  // returned in silence without printing anything at all.
   assert.match(command, /await reportPairingCodes\(log\)/);
+  const branches = command.split('reportPairingCodes(').length - 1;
+  assert.ok(branches >= 3, `every install path should report a code, found ${branches}`);
   assert.match(reporter, /Approve it there if it shows this code/);
   // It reports only; the background service is what grants, and this must give
   // up so the terminal comes back.

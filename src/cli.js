@@ -815,6 +815,10 @@ async function commandInstall(args, verbose) {
   }
   if (noEnroll || (!enroll && existing?.pairingComplete)) {
     if (existing) await startWatchService({ root: machineIndexRoot(), verbose });
+    // An already-paired machine still pairs new browsers, and the person
+    // installing still needs the code to compare. Returning silently here left
+    // them with nothing on screen at all.
+    if (!noEnroll) await reportPairingCodes(logger(verbose));
     return;
   }
   // A machine that has never paired a browser and has no repositories is the
@@ -853,6 +857,7 @@ async function commandInstall(args, verbose) {
       await startWatchService({ root, verbose });
       if (added.length) console.log(`Added ${added.length} shared ${added.length === 1 ? 'repository' : 'repositories'}.`);
       console.log(`This device joined GitPigeon index ${index.indexId.slice(0, 10)}.`);
+      await reportPairingCodes(log);
       return;
     }
 
@@ -863,6 +868,7 @@ async function commandInstall(args, verbose) {
     return;
   }
   await commandEnroll([], verbose);
+  await reportPairingCodes(logger(verbose));
 }
 
 async function commandPairDashboard(args, verbose) {
