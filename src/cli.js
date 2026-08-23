@@ -321,7 +321,12 @@ async function startPairingService(root, log, { indexDiagnostics = null } = {}) 
   const adopt = async (capability) => {
     if (!capability?.index?.indexId) return;
     const current = await loadMachineIndex({ root });
-    if (current.indexId === capability.index.indexId) return;
+    // Same index AND same secret is the only nothing-to-do case. Comparing
+    // the id alone made a machine left behind by a secret rotation drop the
+    // very capability that would have re-admitted it: the id survives
+    // rotation, so it said "already there" while staying locked out.
+    if (current.indexId === capability.index.indexId
+      && current.secret === capability.index.secret) return;
     await adoptMachineIndexCapability(capability.index, { root });
     log.info?.(`Joined GitPigeon index ${String(capability.index.indexId).slice(0, 10)}; restarting`);
     await stopWatchService(root);

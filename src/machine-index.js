@@ -212,7 +212,9 @@ export async function adoptMachineIndexCapability(capability, { root = machineIn
       if (error?.code !== 'ENOENT') throw error;
       value = freshState();
     }
-    if (value.entries.length > 0 && (value.indexId !== indexId || value.secret !== secret)) {
+    // A rotated secret for the same index is this index, re-keyed — refusing
+    // it stranded any machine with repositories on the old secret forever.
+    if (value.entries.length > 0 && value.indexId !== indexId) {
       throw new Error('This device already belongs to a different GitPigeon index with registered repositories');
     }
     value.indexId = indexId;

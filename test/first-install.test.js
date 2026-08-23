@@ -95,3 +95,16 @@ test('install prints the code the browser should be showing', async () => {
   const branches = command.split('reportPairingCode(').length - 1;
   assert.ok(branches >= 3, `every install path should report a code, found ${branches}`);
 });
+
+test('a rotated secret is adopted, not mistaken for already-joined', async () => {
+  const source = await import('node:fs/promises')
+    .then(({ readFile }) => readFile(new URL('../src/cli.js', import.meta.url), 'utf8'));
+  // Rotation keeps the index id. Deciding "nothing to do" on the id alone made
+  // a machine left behind by a rotation drop the capability that would have
+  // re-admitted it — approved in the browser, ignored on the machine.
+  assert.match(source, /current\.indexId === capability\.index\.indexId\n\s*&& current\.secret === capability\.index\.secret\) return;/);
+
+  const machineIndex = await import('node:fs/promises')
+    .then(({ readFile }) => readFile(new URL('../src/machine-index.js', import.meta.url), 'utf8'));
+  assert.match(machineIndex, /value\.entries\.length > 0 && value\.indexId !== indexId/);
+});
