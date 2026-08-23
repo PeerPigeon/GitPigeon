@@ -80,6 +80,25 @@ test('rotating the index secret is what actually revokes access', async (t) => {
   assert.equal(after.pairingComplete, false);
 });
 
+test('rotating asks the watcher to restart, because its node holds the old secret', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'gitpigeon-control-restart-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const node = new FakeNode();
+  let rotatedSignals = 0;
+  const server = new ControlServer({ node, indexId, root, onRotated: () => { rotatedSignals += 1; } });
+  server.start();
+  t.after(() => server.stop());
+
+  node.receive('browser', indexId, CONTROL_CHANNEL, { kind: 'rotate-index', requestId: 'r6' }, 'direct');
+  await settle();
+
+  // The reply goes out first; a mesh session built on the previous secret
+  // cannot reach anything paired with the new one, so it must not keep running.
+  assert.equal(node.directFrames(CONTROL_CHANNEL)[0].ok, true);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(rotatedSignals, 1);
+});
+
 test('an unknown repository or command is refused, not silently ignored', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'gitpigeon-control-bad-'));
   t.after(() => rm(root, { recursive: true, force: true }));

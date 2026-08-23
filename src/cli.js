@@ -321,6 +321,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let automaticUpdates;
   let installedUpdate;
   let controlServer;
+  let restartAfterRotation = false;
 
   const publishServiceRepositoryState = async () => {
     if (!control) return;
@@ -455,6 +456,13 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       root,
       logger: log,
       onChanged: () => reconcile(),
+      onRotated: () => {
+        // The node was built with the previous secret, so it can no longer
+        // reach anything paired with the new one. Restart rather than keep
+        // running a mesh session nobody can decrypt.
+        restartAfterRotation = true;
+        stop();
+      },
     });
     controlServer.start();
     try {
@@ -500,6 +508,11 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     if (lanApprovals) await lanApprovals.close();
     if (machineIndex) await machineIndex.close();
     if (control) await control.close();
+  }
+  if (restartAfterRotation && !installedUpdate) {
+    log.info('Restarting the watcher service on the rotated index secret');
+    await startWatchService({ root, pollMs, verbose });
+    return;
   }
   if (installedUpdate) {
     try {

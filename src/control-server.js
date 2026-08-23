@@ -17,12 +17,13 @@ export const CONTROL_PROTOCOL = 'gitpigeon/control/1';
 const REPOSITORY_ID = /^[a-zA-Z0-9_-]{8,128}$/;
 
 export class ControlServer {
-  constructor({ node, indexId, root, logger = {}, onChanged = async () => {} }) {
+  constructor({ node, indexId, root, logger = {}, onChanged = async () => {}, onRotated = () => {} }) {
     this.node = node;
     this.indexId = indexId;
     this.root = root;
     this.logger = logger;
     this.onChanged = onChanged;
+    this.onRotated = onRotated;
     this.unsubscribe = null;
   }
 
@@ -69,6 +70,11 @@ export class ControlServer {
       // because the capability they hold is this secret.
       const rotated = await rotateMachineIndexSecret({ root: this.root });
       this.logger.warn?.('Rotated the Pigeon index secret; every paired device and browser must pair again');
+      // Reply before the restart tears this node down, or the caller is left
+      // waiting on an answer that can no longer be sent.
+      setTimeout(() => {
+        try { this.onRotated(); } catch (error) { this.logger.error?.(error); }
+      }, 250).unref?.();
       return { indexId: rotated.indexId };
     }
     throw new Error(`Unsupported control command: ${String(frame.kind ?? 'none')}`);
