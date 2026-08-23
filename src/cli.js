@@ -20,6 +20,7 @@ import {
 import { GitRepository } from './git.js';
 import { createInvite, parseInvite } from './invite.js';
 import { createDashboardEnrollment, serveDashboardEnrollment } from './dashboard-pairing.js';
+import { isPairLink, parsePairLink } from './pair-link.js';
 import {
   adoptMachineIndexCapability,
   claimDashboardPairing,
@@ -55,10 +56,11 @@ const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
 
 First time here? Open gitpigeon.dev in your browser, then run
 \`git pigeon pair\` on this machine and approve it.
-\`git pigeon pair\` also prints a one-time link for a device on another network.
+\`git pigeon pair\` also prints a one-time link for a device on another network,
+and accepts a \`gitpigeon://pair/...\` link issued by an approved browser.
 
 Usage:
-  git pigeon pair [--dashboard] [--rotate]
+  git pigeon pair [LINK] [--dashboard] [--rotate]
   git pigeon init [INVITE] [DIRECTORY]
   git pigeon install [--enroll | --no-enroll]
   git pigeon enroll
@@ -792,7 +794,30 @@ function startPairingLink(root, verbose, log) {
   };
 }
 
+/**
+ * Join an index from a link the browser issued. This is the direction discovery
+ * cannot cover: a machine on another network never hears announcements from
+ * here, so the capability is carried to it instead.
+ */
+async function commandPairFromLink(value, verbose) {
+  const capability = parsePairLink(value);
+  const root = machineIndexRoot();
+  await adoptMachineIndexCapability(capability, { root });
+  console.log(`Joined the Pigeon index ${capability.indexId.slice(0, 10)}.`);
+  // The service was built against whatever index this machine had before, so
+  // it has to come back on the adopted one to be visible at all.
+  await stopWatchService(root);
+  const watcher = await startWatchService({ root, verbose });
+  console.log(`Watcher service running as PID ${watcher.pid}.`);
+  console.log('This machine now appears in that browser. Run `git pigeon init` in a repository to sync one.');
+}
+
 async function commandPair(args, verbose) {
+  if (args[0] && isPairLink(args[0])) {
+    const link = args.shift();
+    if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+    return await commandPairFromLink(link, verbose);
+  }
   if (takeFlag(args, '--dashboard')) return await commandPairDashboard(args, verbose);
   // `--rotate` only ever meant anything to the dashboard enrollment flow.
   if (args.includes('--rotate')) return await commandPairDashboard(args, verbose);
