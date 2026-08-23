@@ -574,6 +574,13 @@ async function connectMachineDirectory(index, logger = {}, {
   let lastDirectoryFingerprint = null;
   let lastPublishedAt = null;
   let lastIndexError = null;
+  // What this machine's own key looks like from its own store, captured each
+  // publish. A machine that puts records and never checks whether they win
+  // believes it is healthy while the swarm rejects everything it says.
+  let selfPutVersion = null;
+  let selfSeenVersion = null;
+  let selfSeenName = null;
+  let rosterSeenVersion = null;
   // Every publisher id seen from any source this run. Roster writes union
   // this in, so one bad read of the shared record can never erase members.
   const knownRosterIds = new Set([index.publisherId]);
@@ -637,6 +644,9 @@ async function connectMachineDirectory(index, logger = {}, {
         // those responses merge before advancing the record locally.
         await sleep(1_000);
         const settled = await storage.get('public', rosterKey);
+        const ownRecord = await storage.get('public', publisherKey);
+        selfSeenVersion = ownRecord?.version ?? null;
+        selfSeenName = ownRecord?.value?.deviceName ?? null;
         for (const record of [settled, roster]) {
           for (const publisherId of rosterPublisherIds(record?.value, index.indexId)) {
             knownRosterIds.add(publisherId);
@@ -669,6 +679,7 @@ async function connectMachineDirectory(index, logger = {}, {
       const directoryChanged = fingerprint !== lastDirectoryFingerprint;
       if (connected) {
         const existingRoster = await storage.get('public', rosterKey);
+        rosterSeenVersion = existingRoster?.version ?? null;
         for (const publisherId of rosterPublisherIds(existingRoster?.value, current.indexId)) {
           knownRosterIds.add(publisherId);
         }
@@ -681,6 +692,7 @@ async function connectMachineDirectory(index, logger = {}, {
       // renegotiating. Storage will carry the newest record to every browser
       // as soon as the mesh reconnects instead of exposing a stale watcher.
       const record = await storage.put('public', publisherKey, value);
+      selfPutVersion = record?.version ?? null;
       lastPublishedAt = Date.now();
       lastDirectoryFingerprint = fingerprint;
       if (directoryChanged) logger.debug?.(`Publisher directory updated at version ${record?.version ?? 'unknown'} with ${current.entries.length} ${current.entries.length === 1 ? 'repository' : 'repositories'}`);
@@ -738,6 +750,10 @@ async function connectMachineDirectory(index, logger = {}, {
         indexPeers: node.getConnectedPeers().length,
         publishedAgoMs: lastPublishedAt === null ? null : Date.now() - lastPublishedAt,
         ...(lastIndexError ? { indexError: lastIndexError } : {}),
+        ...(selfPutVersion !== null ? { selfPutVersion: String(selfPutVersion).slice(0, 40) } : {}),
+        ...(selfSeenVersion !== null ? { selfSeenVersion: String(selfSeenVersion).slice(0, 40) } : {}),
+        ...(selfSeenName !== null ? { selfSeenName: String(selfSeenName).slice(0, 60) } : {}),
+        ...(rosterSeenVersion !== null ? { rosterSeenVersion: String(rosterSeenVersion).slice(0, 40) } : {}),
       };
     },
     async close() {

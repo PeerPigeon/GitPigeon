@@ -58,6 +58,10 @@ export function validateMeshPairingRequest(value, now = Date.now()) {
       indexPeers: Number.isSafeInteger(value.diagnostics.indexPeers) ? value.diagnostics.indexPeers : null,
       publishedAgoMs: Number.isSafeInteger(value.diagnostics.publishedAgoMs) ? value.diagnostics.publishedAgoMs : null,
       ...(value.diagnostics.indexError ? { indexError: String(value.diagnostics.indexError).slice(0, 300) } : {}),
+      ...(value.diagnostics.selfPutVersion ? { selfPutVersion: String(value.diagnostics.selfPutVersion).slice(0, 40) } : {}),
+      ...(value.diagnostics.selfSeenVersion ? { selfSeenVersion: String(value.diagnostics.selfSeenVersion).slice(0, 40) } : {}),
+      ...(value.diagnostics.selfSeenName ? { selfSeenName: String(value.diagnostics.selfSeenName).slice(0, 60) } : {}),
+      ...(value.diagnostics.rosterSeenVersion ? { rosterSeenVersion: String(value.diagnostics.rosterSeenVersion).slice(0, 40) } : {}),
     } } : {}),
     platform: String(value.platform || 'unknown').slice(0, 32),
     arch: String(value.arch || 'unknown').slice(0, 32),
@@ -103,6 +107,10 @@ export function createMeshPairingRequest({
       indexPeers: Number.isSafeInteger(diagnostics.indexPeers) ? diagnostics.indexPeers : null,
       publishedAgoMs: Number.isSafeInteger(diagnostics.publishedAgoMs) ? diagnostics.publishedAgoMs : null,
       ...(diagnostics.indexError ? { indexError: String(diagnostics.indexError).slice(0, 300) } : {}),
+      ...(diagnostics.selfPutVersion ? { selfPutVersion: String(diagnostics.selfPutVersion).slice(0, 40) } : {}),
+      ...(diagnostics.selfSeenVersion ? { selfSeenVersion: String(diagnostics.selfSeenVersion).slice(0, 40) } : {}),
+      ...(diagnostics.selfSeenName ? { selfSeenName: String(diagnostics.selfSeenName).slice(0, 60) } : {}),
+      ...(diagnostics.rosterSeenVersion ? { rosterSeenVersion: String(diagnostics.rosterSeenVersion).slice(0, 40) } : {}),
     } } : {}),
     deviceName: String(deviceName || 'New device').trim().slice(0, 120),
     platform: String(platform).slice(0, 32),
@@ -239,7 +247,7 @@ export async function startDeviceApprovalResponder({
     if (request.requesterKind === 'native' && request.diagnostics) {
       const d = request.diagnostics;
       // Publish age moves every round; bucket it so only real changes log.
-      const line = `${request.deviceName} build=${d.build || '?'} indexPeers=${d.indexPeers ?? '?'} published=${d.publishedAgoMs === null ? 'never' : Math.round(d.publishedAgoMs / 60_000) + 'm ago'}${d.indexError ? ` error="${d.indexError}"` : ''}`;
+      const line = `${request.deviceName} build=${d.build || '?'} indexPeers=${d.indexPeers ?? '?'} published=${d.publishedAgoMs === null ? 'never' : Math.round(d.publishedAgoMs / 60_000) + 'm ago'}${d.selfPutVersion ? ` selfPut=${d.selfPutVersion}` : ''}${d.selfSeenVersion ? ` selfSeen=${d.selfSeenVersion}` : ''}${d.selfSeenName ? ` selfSeenName="${d.selfSeenName}"` : ''}${d.rosterSeenVersion ? ` roster=${d.rosterSeenVersion}` : ''}${d.indexError ? ` error="${d.indexError}"` : ''}`;
       if (statusLines.get(request.requestId) !== line) {
         statusLines.set(request.requestId, line);
         logger.info?.(`[watcher-status] ${line}`);
