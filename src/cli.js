@@ -41,7 +41,7 @@ import {
   parseNativeCloneUrl,
   validateNativeClonePayload,
 } from './device-grants.js';
-import { startDeviceApprovalResponder, startWatcherOffer } from './device-approval-mesh.js';
+import { startDeviceApprovalResponder } from './device-approval-mesh.js';
 import { loadPairingKeyPair, localPairingCode } from './pairing-identity.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
 import { installNativeIntegration } from './native-install.js';
@@ -327,21 +327,17 @@ async function startPairingService(root, log) {
     await stopWatchService(root);
     await startWatchService({ root });
   };
-  // Announce this machine for as long as the watcher runs, so a browser that
-  // has already paired with one machine still sees the next one and can open
-  // an approval prompt for it.
-  const offer = await startWatcherOffer({
-    deviceName: deviceHostName(),
-    // So a browser that already took this machine in stops asking to approve
-    // it again every time it announces.
-    indexId: (await loadMachineIndex({ root }).catch(() => null))?.indexId ?? null,
-    keyPair,
-    logger: log,
-    onGrant: adopt,
-  });
   const responder = await startDeviceApprovalResponder({
     logger: log,
     keyPair,
+    // Announce this machine for as long as the watcher runs, so a browser that
+    // has already paired with one machine still sees the next one. Same node as
+    // the responder: one peer per machine on the approval mesh.
+    offerDeviceName: deviceHostName(),
+    // So a browser that already took this machine in stops asking to approve
+    // it again every time it announces.
+    offerIndexId: (await loadMachineIndex({ root }).catch(() => null))?.indexId ?? null,
+    onGrant: adopt,
     // A browser this machine offered itself to can ask it to join the index it
     // settled on, which is how several machines end up together.
     onAdopt: adopt,
@@ -384,7 +380,6 @@ async function startPairingService(root, log) {
       if (closed) return;
       closed = true;
       clearInterval(timer);
-      await offer.close().catch(() => {});
       await responder.close().catch(() => {});
     },
   };

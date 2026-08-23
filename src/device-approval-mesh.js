@@ -8,7 +8,11 @@ import { installNativeWebRTC } from './webrtc.js';
 // field carried in the announcement. `sendEncryptedDirect` already performs an
 // authenticated per-peer exchange against the peer key PeerPigeon discovered,
 // so none of that belongs here.
-export const DEVICE_APPROVAL_NETWORK_ID = 'gitpigeon-device-approval-v1';
+// Overridable so a test can run watchers and browsers on a network of their
+// own. Without it there is no way to exercise pairing except on the one real
+// network every installed watcher is listening to.
+export const DEVICE_APPROVAL_NETWORK_ID = process.env.GITPIGEON_APPROVAL_NETWORK_ID
+  || 'gitpigeon-device-approval-v1';
 export const DEVICE_APPROVAL_SESSION_ID = 'approved-browser-discovery-v1';
 export const MESH_PAIRING_PROTOCOL = 'gitpigeon-mesh-pairing/1';
 const REQUEST_ID = /^[a-f0-9]{32}$/;
@@ -173,8 +177,18 @@ export async function startDeviceApprovalResponder({
   nodeFactory,
   requestStaleMs = 20_000,
   keyPair,
+  // Offering this machine and answering browsers are the same job on the same
+  // mesh, so they share one node. A second node per machine put two peers on
+  // the approval mesh for every device, and with a small partial mesh the
+  // browser could end up linked to one machine's pair and never see the other.
+  offerDeviceName = null,
+  offerIndexId = null,
+  onGrant = null,
 } = {}) {
   const node = await createNode(nodeFactory, keyPair);
+  const offerRequestId = keyPair?.pub
+    ? createHash('sha256').update('gitpigeon:offer-id:v1\0').update(String(keyPair.pub)).digest('hex').slice(0, 32)
+    : null;
   const requests = new Map();
   // Peers this machine has already handed a capability to. Only they may ask
   // it to join an index, so a stranger cannot redirect this machine.
@@ -188,6 +202,13 @@ export async function startDeviceApprovalResponder({
     if (value?.protocol === MESH_PAIRING_PROTOCOL && value.kind === 'accepted') {
       const acked = requests.get(String(value.requestId ?? ''));
       if (acked) acked.accepted = true;
+      return;
+    }
+    // A browser approving this machine's own offer, handing it an index.
+    if (value?.protocol === MESH_PAIRING_PROTOCOL && value.kind === 'grant') {
+      if (!onGrant || !message.encrypted || value.requestId !== offerRequestId) return;
+      Promise.resolve(onGrant(value.capability))
+        .catch((error) => logger.debug?.(`Pairing grant: ${error.message}`));
       return;
     }
     // A browser this machine already offered itself to, asking it to join the
@@ -224,13 +245,33 @@ export async function startDeviceApprovalResponder({
   node.mesh.on('signaling:connected', ({ signalingServer } = {}) => {
     logger.debug?.(`[pairing] signaling connected through ${signalingServer ?? 'a federated relay'}`);
   });
+  const announceOffer = () => {
+    if (closed || !offerRequestId || !offerDeviceName) return;
+    try {
+      node.broadcast(createMeshPairingRequest({
+        requestId: offerRequestId,
+        deviceName: offerDeviceName,
+        indexId: offerIndexId,
+      }));
+    } catch (error) {
+      logger.debug?.(`Watcher offer: ${error.message}`);
+    }
+  };
   node.on('message', receive);
+  node.on('peerConnected', announceOffer);
   node.on('error', (error) => logger.debug?.(`Pairing mesh: ${error?.message ?? error}`));
 
   await node.start();
+  announceOffer();
+  // Minted fresh each round: a pairing request expires, and approvers reject
+  // stale ones, so rebroadcasting one object made a machine visible only for
+  // its first few minutes.
+  const offerTimer = setInterval(announceOffer, ANNOUNCE_INTERVAL_MS);
+  offerTimer.unref?.();
 
   return {
     node,
+    offerRequestId,
     pending() {
       const now = Date.now();
       for (const [requestId, record] of requests) {
@@ -299,83 +340,6 @@ export async function startDeviceApprovalResponder({
       if (closed) return;
       closed = true;
       node.off('message', receive);
-      await node.destroy();
-    },
-  };
-}
-
-/**
- * Offer this machine to every browser, for as long as the watcher runs.
- *
- * Nothing used to do this. The service only ever listened for browsers asking
- * to pair, and only an unpaired browser asks — so a browser that had already
- * paired with one machine could never see a second machine, and no approval
- * modal could open for it. The watcher is the long-lived side, so it announces.
- *
- * The announcement is minted fresh each round rather than rebroadcast. A
- * pairing request carries a five minute expiry and approvers reject stale ones,
- * so repeating one object made a watcher visible only for its first few
- * minutes, then silently invisible.
- *
- * The request id is derived from this machine's own key so it stays the same
- * across restarts and browsers list one row per machine — not a new row every
- * announcement, and not one row for several machines.
- */
-export async function startWatcherOffer({
-  deviceName,
-  indexId = null,
-  keyPair,
-  logger = {},
-  onGrant = () => {},
-  nodeFactory,
-} = {}) {
-  if (!keyPair?.pub) throw new Error('A watcher offer requires this machine\'s pairing key pair');
-  const node = await createNode(nodeFactory, keyPair);
-  const requestId = createHash('sha256')
-    .update('gitpigeon:offer-id:v1\0')
-    .update(String(keyPair.pub))
-    .digest('hex')
-    .slice(0, 32);
-  let closed = false;
-
-  const receive = (message) => {
-    if (closed || message?.local || !message?.encrypted) return;
-    const value = decode(message.data);
-    if (!value || value.protocol !== MESH_PAIRING_PROTOCOL || value.kind !== 'grant') return;
-    if (value.requestId !== requestId) return;
-    // PeerPigeon decrypted this to our key, so no second unwrap is needed.
-    Promise.resolve(onGrant(value.capability))
-      .catch((error) => logger.debug?.(`Pairing grant: ${error.message}`));
-  };
-  const announce = () => {
-    if (closed) return;
-    try {
-      node.broadcast(createMeshPairingRequest({ requestId, deviceName, indexId }));
-    } catch (error) {
-      logger.debug?.(`Watcher offer: ${error.message}`);
-    }
-  };
-
-  node.on('message', receive);
-  node.on('peerConnected', announce);
-  node.on('error', (error) => logger.debug?.(`Watcher offer: ${error?.message ?? error}`));
-  await node.start();
-  announce();
-  const timer = setInterval(announce, ANNOUNCE_INTERVAL_MS);
-  timer.unref?.();
-
-  return {
-    node,
-    requestId,
-    code() {
-      return pairingCode(keyPair.pub);
-    },
-    async close() {
-      if (closed) return;
-      closed = true;
-      clearInterval(timer);
-      node.off('message', receive);
-      node.off('peerConnected', announce);
       await node.destroy();
     },
   };

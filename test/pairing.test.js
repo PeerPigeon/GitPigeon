@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { indexFingerprint, startWatcherOffer, validateMeshPairingRequest } from '../src/device-approval-mesh.js';
+import { indexFingerprint, validateMeshPairingRequest } from '../src/device-approval-mesh.js';
 import { pairingCode } from '../src/pairing-identity.js';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
@@ -21,7 +21,8 @@ class FakeApprovalNode extends EventEmitter {
 
   async start() {}
   broadcast(value) { this.broadcasts.push(value); }
-  getKeyPair() { return { pub: 'local-public-key' }; }
+  // The real node is built with this key pair, so its own key is that key.
+  getKeyPair() { return this.options.crypto?.keyPair ?? { pub: 'local-public-key' }; }
   getPublicKey(peerId) { return this.keys.get(peerId) ?? null; }
   async waitForPeerKey(peerId) {
     const known = this.keys.get(peerId);
@@ -187,8 +188,8 @@ test('pair never opens a page of its own', async () => {
 
 test('the watcher offers itself to browsers that are already paired', async (t) => {
   let node;
-  const offer = await startWatcherOffer({
-    deviceName: 'Dans-MacBook-Air',
+  const offer = await startDeviceApprovalResponder({
+    offerDeviceName: 'Dans-MacBook-Air',
     keyPair: { pub: 'air-public-key', priv: 'p', epub: 'e', epriv: 'ep' },
     nodeFactory: (options) => { node = new FakeApprovalNode(options); return node; },
   });
@@ -206,6 +207,11 @@ test('the watcher offers itself to browsers that are already paired', async (t) 
   // printed when it was installed.
   assert.equal(offer.code(), pairingCode('air-public-key'));
 
+  // One peer per machine on the approval mesh: announcing and answering are
+  // the same job. A second node per device crowded a small partial mesh, and a
+  // browser could end up linked to one machine's pair and never see the other.
+  assert.equal(node.options.networkId, 'gitpigeon-device-approval-v1');
+
   // A pairing request expires, and approvers reject stale ones, so rebroadcast
   // of one fixed object made a machine visible only for its first few minutes.
   const first = announced[0];
@@ -222,9 +228,9 @@ test('the watcher offers itself to browsers that are already paired', async (t) 
 
 test('a machine announces which index it already belongs to', async (t) => {
   let node;
-  const offer = await startWatcherOffer({
-    deviceName: 'Daniels-MacBook-Pro',
-    indexId: 'f00ab7ea24fe377da70fc7148bfdd047',
+  const offer = await startDeviceApprovalResponder({
+    offerDeviceName: 'Daniels-MacBook-Pro',
+    offerIndexId: 'f00ab7ea24fe377da70fc7148bfdd047',
     keyPair: { pub: 'pro-public-key', priv: 'p', epub: 'e', epriv: 'ep' },
     nodeFactory: (options) => { node = new FakeApprovalNode(options); return node; },
   });
