@@ -703,6 +703,19 @@ async function commandInstall(args, verbose) {
     if (existing) await startWatchService({ root: machineIndexRoot(), verbose });
     return;
   }
+  // A machine with no index of its own is the first device, not one joining
+  // somebody else's. Sending it to enroll deadlocked a new user: it waited for
+  // an already-approved browser, while the only browser open was waiting for
+  // this machine. Here it owns the index and approves the browser instead.
+  if (!enroll && !existing) {
+    const root = machineIndexRoot();
+    const pairing = await claimDashboardPairing({ root, force: true });
+    if (!pairing) throw new Error('Could not start a GitPigeon enrollment for this machine');
+    await startWatchService({ root, verbose });
+    console.log('\nThis is the first GitPigeon device on this machine, so it owns the index.');
+    await runDashboardPairing(pairing, verbose);
+    return;
+  }
   await commandEnroll([], verbose);
 }
 
