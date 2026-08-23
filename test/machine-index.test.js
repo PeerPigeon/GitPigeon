@@ -68,8 +68,21 @@ test('machine index securely groups active repositories for PeerPigeon publicati
     kind: 'publishers',
     indexId: state.indexId,
     publishers: ['1'.repeat(32)],
-  }, 1_700_000_000_000);
+  }, [], 1_700_000_000_000);
   assert.deepEqual(roster.publishers, ['1'.repeat(32), state.publisherId].sort());
+
+  // The roster is key discovery and must only ever grow by union. Rebuilding
+  // it from one unreadable copy erased every other machine's membership: they
+  // kept publishing, but nobody looked their keys up any more.
+  const remembered = publisherRosterValue(state, null, ['2'.repeat(32)], 1_700_000_000_000);
+  assert.deepEqual(remembered.publishers, ['2'.repeat(32), state.publisherId].sort());
+  const both = publisherRosterValue(state, {
+    protocol: 'gitpigeon-index/1',
+    kind: 'publishers',
+    indexId: state.indexId,
+    publishers: ['1'.repeat(32)],
+  }, ['2'.repeat(32)], 1_700_000_000_000);
+  assert.deepEqual(both.publishers, ['1'.repeat(32), '2'.repeat(32), state.publisherId].sort());
   const publisherPeerId = 'peer-transport-id';
   const publisher = publisherDirectoryValue(
     state,

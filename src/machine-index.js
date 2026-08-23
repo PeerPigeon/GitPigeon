@@ -338,15 +338,28 @@ export function directoryValue(index, entries, now = Date.now(), serviceInstance
   };
 }
 
-export function publisherRosterValue(index, previous, now = Date.now()) {
-  const publishers = new Set(
-    previous?.protocol === INDEX_PROTOCOL
-      && previous?.kind === 'publishers'
-      && previous?.indexId === index.indexId
-      && Array.isArray(previous.publishers)
-      ? previous.publishers.filter((publisherId) => PUBLISHER_ID.test(String(publisherId)))
-      : [],
-  );
+/**
+ * The roster is key discovery, nothing more: which publisher keys exist, so a
+ * fresh member knows what to retrieve. It must only ever grow by union.
+ *
+ * It used to be rebuilt from whichever single copy the writer happened to
+ * read. One machine reading a missing or invalid copy then wrote a roster
+ * containing only itself, and — the record being last-writer-wins — erased
+ * every other machine's membership. Machines kept publishing, but nobody
+ * looked their keys up any more: watchers flapped in and out of dashboards
+ * while believing themselves healthy.
+ */
+export function rosterPublisherIds(value, indexId) {
+  if (value?.protocol !== INDEX_PROTOCOL || value?.kind !== 'publishers') return [];
+  if (value.indexId !== indexId || !Array.isArray(value.publishers)) return [];
+  return value.publishers.filter((publisherId) => PUBLISHER_ID.test(String(publisherId)));
+}
+
+export function publisherRosterValue(index, previous, extraPublisherIds = [], now = Date.now()) {
+  const publishers = new Set([
+    ...rosterPublisherIds(previous, index.indexId),
+    ...[...extraPublisherIds].filter((publisherId) => PUBLISHER_ID.test(String(publisherId))),
+  ]);
   publishers.add(index.publisherId);
   return {
     protocol: INDEX_PROTOCOL,
@@ -507,6 +520,9 @@ async function connectMachineDirectory(index, logger = {}, {
   let lastDirectoryFingerprint = null;
   let lastPublishedAt = null;
   let lastIndexError = null;
+  // Every publisher id seen from any source this run. Roster writes union
+  // this in, so one bad read of the shared record can never erase members.
+  const knownRosterIds = new Set([index.publisherId]);
   let lastRosterReconcileAt = 0;
   const rosterKey = indexPublishersKey(index.indexId);
   const publisherKey = publisherDirectoryKey(index.indexId, index.publisherId);
@@ -517,9 +533,10 @@ async function connectMachineDirectory(index, logger = {}, {
     const operation = remoteQueue.then(async () => {
       if (closed || !ready || !node.storage || node.getConnectedPeers().length === 0) return;
       const roster = await node.storage.retrieve("public", rosterKey, { timeoutMs: 2_000 });
-      const publisherIds = Array.isArray(roster?.value?.publishers)
-        ? [...new Set(roster.value.publishers.map(String).filter((value) => PUBLISHER_ID.test(value)))]
-        : [];
+      for (const publisherId of rosterPublisherIds(roster?.value, index.indexId)) {
+        knownRosterIds.add(publisherId);
+      }
+      const publisherIds = [...knownRosterIds];
       const capabilities = [];
       for (const publisherId of publisherIds) {
         if (publisherId === index.publisherId) continue;
@@ -566,6 +583,11 @@ async function connectMachineDirectory(index, logger = {}, {
         // those responses merge before advancing the record locally.
         await sleep(1_000);
         const settled = await storage.get('public', rosterKey);
+        for (const record of [settled, roster]) {
+          for (const publisherId of rosterPublisherIds(record?.value, index.indexId)) {
+            knownRosterIds.add(publisherId);
+          }
+        }
         logger.debug?.(`Index publisher roster reconciled at version ${settled?.version ?? roster?.version ?? 'none'}`);
         needsReconcile = false;
         lastRosterReconcileAt = Date.now();
@@ -587,7 +609,10 @@ async function connectMachineDirectory(index, logger = {}, {
       const directoryChanged = fingerprint !== lastDirectoryFingerprint;
       if (connected) {
         const existingRoster = await storage.get('public', rosterKey);
-        const roster = publisherRosterValue(current, existingRoster?.value);
+        for (const publisherId of rosterPublisherIds(existingRoster?.value, current.indexId)) {
+          knownRosterIds.add(publisherId);
+        }
+        const roster = publisherRosterValue(current, existingRoster?.value, knownRosterIds);
         if (!existingRoster || JSON.stringify(existingRoster.value?.publishers) !== JSON.stringify(roster.publishers)) {
           await storage.put('public', rosterKey, roster);
         }
@@ -672,7 +697,7 @@ async function connectMachineDirectory(index, logger = {}, {
         const current = await loadMachineIndex({ root });
         if (node.getConnectedPeers().length > 0) {
           const existingRoster = await node.storage?.get('public', rosterKey);
-          await node.storage?.put('public', rosterKey, publisherRosterValue(current, existingRoster?.value));
+          await node.storage?.put('public', rosterKey, publisherRosterValue(current, existingRoster?.value, knownRosterIds));
           await node.storage?.put('public', publisherKey, publisherDirectoryValue(
             current,
             current.entries,
