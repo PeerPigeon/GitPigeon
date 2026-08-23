@@ -53,7 +53,12 @@ test('machine index securely groups active repositories for PeerPigeon publicati
   const published = directoryValue(state, active, 1_700_000_000_000, watcherServiceId);
   assert.equal(published.protocol, 'gitpigeon-index/1');
   assert.equal(published.updatedAt, '2023-11-14T22:13:20.000Z');
-  assert.deepEqual(published.pigeons, [
+  assert.deepEqual(published.pigeons.map(({ registeredAt, ...rest }) => {
+    // Every pigeon states when it was registered, so tombstones and
+    // re-registrations can be ordered; the exact instant is not the point.
+    assert.ok(Number.isFinite(Date.parse(registeredAt)));
+    return rest;
+  }), [
     { repositoryId: 'alpha-pigeon', secret: 'a'.repeat(64), name: 'alpha', watcherCount: 1, watcherServiceId },
     { repositoryId: 'beta-pigeon', secret: 'b'.repeat(64), name: 'beta', watcherCount: 1, watcherServiceId },
   ]);

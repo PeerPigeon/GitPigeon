@@ -1,5 +1,5 @@
 import { chmod, mkdir, stat, writeFile } from 'node:fs/promises';
-import { hostname } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { createRequire } from 'node:module';
@@ -300,11 +300,17 @@ export class TerminalServer {
     const pathValue = [BIN_DIRECTORY, process.env.PATH].filter(Boolean).join(path.delimiter);
     let terminal;
     try {
+      // The terminal belongs to the device; the repository directory is only
+      // the preferred working directory. A watcher can carry a repository it
+      // has no local copy of yet, and refusing a shell over a missing folder
+      // helped nobody.
+      let cwd = this.repository.root;
+      try { await stat(cwd); } catch { cwd = homedir(); }
       terminal = await this.spawnPty(command.shell, command.args, {
         name: 'xterm-256color',
         cols,
         rows,
-        cwd: this.repository.root,
+        cwd,
         env: {
           ...process.env,
           PATH: pathValue,

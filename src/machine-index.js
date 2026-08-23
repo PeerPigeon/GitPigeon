@@ -101,7 +101,12 @@ function validEntry(value) {
   if (!DEVICE.test(repositoryId) || !SECRET.test(secret) || !DEVICE.test(deviceId) || !name) return null;
   if (pid !== null && (!Number.isSafeInteger(pid) || pid < 1)) return null;
   if (signalingServer && !/^wss?:\/\//i.test(signalingServer)) return null;
-  return { repository, repositoryId, secret, deviceId, name, pid, ...(signalingServer ? { signalingServer } : {}) };
+  const registeredAt = Date.parse(String(value.registeredAt ?? ''));
+  return {
+    repository, repositoryId, secret, deviceId, name, pid,
+    ...(Number.isFinite(registeredAt) ? { registeredAt: new Date(registeredAt).toISOString() } : {}),
+    ...(signalingServer ? { signalingServer } : {}),
+  };
 }
 
 function validateState(value) {
@@ -236,10 +241,13 @@ export async function registerMachinePigeon(repository, config, { root = machine
       deviceId: config.deviceId,
       name: path.basename(repository.root),
       pid,
+      registeredAt: new Date().toISOString(),
       signalingServer: config.signalingServer,
     });
     if (!entry) throw new Error('Could not register this repository with the encrypted GitPigeon index');
     value.entries = [...value.entries.filter((item) => item.repository !== repository.root), entry];
+    // Registering again is the statement that overrides any earlier removal.
+    value.removed = (value.removed ?? []).filter((item) => item.repositoryId !== entry.repositoryId);
     await writeState(root, value);
     return value;
   });
@@ -370,6 +378,7 @@ export function directoryValue(index, entries, now = Date.now(), serviceInstance
         ...(entry.signalingServer ? { signalingServer: entry.signalingServer } : {}),
         ...(entry.snapshot ? { snapshot: entry.snapshot } : {}),
         ...(entry.empty ? { empty: true } : {}),
+        ...(entry.registeredAt ? { registeredAt: entry.registeredAt } : {}),
       });
     } else {
       current.watcherCount += active;
@@ -601,6 +610,7 @@ async function connectMachineDirectory(index, logger = {}, {
       }
       const publisherIds = [...knownRosterIds];
       const capabilities = [];
+      const remoteTombstones = new Map();
       for (const publisherId of publisherIds) {
         if (publisherId === index.publisherId) continue;
         const key = publisherDirectoryKey(index.indexId, publisherId);
@@ -613,8 +623,37 @@ async function connectMachineDirectory(index, logger = {}, {
           || value.indexId !== index.indexId || value.publisherId !== publisherId
           || !Array.isArray(value.pigeons)) continue;
         capabilities.push(...value.pigeons);
+        for (const item of Array.isArray(value.removed) ? value.removed : []) {
+          const removedAt = Date.parse(String(item?.removedAt ?? ''));
+          if (!Number.isFinite(removedAt)) continue;
+          const known = remoteTombstones.get(String(item.repositoryId)) ?? 0;
+          remoteTombstones.set(String(item.repositoryId), Math.max(known, removedAt));
+        }
       }
-      if (capabilities.length) await onRemoteRepositories(capabilities);
+      // Unwatching must win fleet-wide. Machines used to re-materialize a
+      // repository some other machine had just removed, and hand it straight
+      // back — removal could never converge. A tombstone beats any entry or
+      // grant registered before it; registering again afterwards beats the
+      // tombstone.
+      const current = await loadMachineIndex({ root });
+      const localTombstones = new Map((current.removed ?? [])
+        .map((item) => [item.repositoryId, Date.parse(item.removedAt) || 0]));
+      for (const [repositoryId, removedAt] of remoteTombstones) {
+        const entry = current.entries.find((item) => item.repositoryId === repositoryId);
+        const registeredAt = entry?.registeredAt ? Date.parse(entry.registeredAt) || 0 : 0;
+        if (entry && registeredAt < removedAt) {
+          await unregisterMachinePigeon({ root: entry.repository }, { root, now: removedAt });
+          logger.info?.(`Removed ${entry.name}: another machine unwatched it`);
+        }
+        if ((localTombstones.get(repositoryId) ?? 0) < removedAt) localTombstones.set(repositoryId, removedAt);
+      }
+      const alive = capabilities.filter((pigeon) => {
+        const tombstone = localTombstones.get(String(pigeon?.repositoryId)) ?? 0;
+        if (!tombstone) return true;
+        const registeredAt = Date.parse(String(pigeon?.registeredAt ?? '')) || 0;
+        return registeredAt > tombstone;
+      });
+      if (alive.length) await onRemoteRepositories(alive);
     });
     remoteQueue = operation.catch((error) => logger.error?.(error));
     return operation;

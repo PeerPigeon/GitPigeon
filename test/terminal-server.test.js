@@ -121,7 +121,11 @@ test('watcher terminal opens one bounded PTY and cleans it up on close', async (
 
   assert.equal(server.activeSessionCount(), 1);
   assert.equal(spawned.length, 1);
-  assert.equal(spawned[0].options.cwd, '/tmp/example-repository');
+  // /tmp/example-repository does not exist, and the terminal belongs to the
+  // device: a missing repository directory falls back to the home directory
+  // rather than refusing a shell.
+  const { homedir } = await import('node:os');
+  assert.equal(spawned[0].options.cwd, homedir());
   assert.match(spawned[0].options.env.GITPIGEON_DEVICE_ROSTER, /^[A-Za-z0-9_-]+$/);
   assert.equal(node.directFrames(TERMINAL_CHANNEL)[0]?.kind, 'opened');
   assert.match(spawned[0].terminal.writes[0], /gitpigeon test-device:\$/);
