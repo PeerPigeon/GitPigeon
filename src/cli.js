@@ -42,6 +42,7 @@ import {
   validateNativeClonePayload,
 } from './device-grants.js';
 import { startDeviceApprovalResponder } from './device-approval-mesh.js';
+import { loadPairingKeyPair, localPairingCode } from './pairing-identity.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
 import { installNativeIntegration } from './native-install.js';
 import { ControlServer } from './control-server.js';
@@ -318,6 +319,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
 async function startPairingService(root, log) {
   const responder = await startDeviceApprovalResponder({
     logger: log,
+    keyPair: await loadPairingKeyPair(root),
     // A browser this machine offered itself to can ask it to join the index it
     // settled on, which is how several machines end up together.
     onAdopt: async (capability) => {
@@ -765,41 +767,18 @@ async function commandEnroll(args, verbose) {
 }
 
 /**
- * Print the code any waiting browser should be showing, then hand the terminal
- * back. Installing is not a foreground task, so this looks briefly rather than
- * holding the prompt; the background service keeps offering either way.
+ * State this machine's pairing code and return.
+ *
+ * This used to start a mesh node and wait for a browser to ask, because the
+ * code mixed both peers' keys and so did not exist until then — which held the
+ * terminal with nothing on screen. The watcher owns its own code now, so this
+ * reads it off disk and prints it immediately.
  */
-async function reportPairingCodes(log, { timeoutMs = 12_000 } = {}) {
-  let responder;
-  try {
-    responder = await startDeviceApprovalResponder({ logger: log });
-  } catch (error) {
-    // Never fail silently here: a bare return left the terminal looking as
-    // though nothing had been attempted.
-    console.log(`\nCould not look for a browser to pair: ${error.message}`);
-    console.log('Run `git pigeon pair` once a browser is open.');
-    return;
-  }
-  const seen = new Set();
-  const deadline = Date.now() + timeoutMs;
-  try {
-    while (Date.now() < deadline) {
-      for (const request of responder.pending()) {
-        if (request.requesterKind !== 'browser' || seen.has(request.requestId)) continue;
-        const code = await responder.codeFor(request.requestId).catch(() => null);
-        if (!code) continue;
-        seen.add(request.requestId);
-        console.log(`\n  ${request.deviceName} is asking to pair.`);
-        console.log(`  Approve it there if it shows this code: ${code}`);
-      }
-      if (seen.size) return;
-      await sleep(500);
-    }
-    console.log('\nNo browser is waiting. This machine keeps offering in the background;');
-    console.log('open gitpigeon.dev and run `git pigeon pair` to see its code.');
-  } finally {
-    await responder.close().catch(() => {});
-  }
+async function reportPairingCode(root = machineIndexRoot()) {
+  const code = await localPairingCode(root);
+  console.log(`\n  This machine's pairing code: ${code}`);
+  console.log('  Approve this machine in your browser only if it shows the same code.');
+  return code;
 }
 
 async function commandInstall(args, verbose) {
@@ -820,7 +799,7 @@ async function commandInstall(args, verbose) {
     // An already-paired machine still pairs new browsers, and the person
     // installing still needs the code to compare. Returning silently here left
     // them with nothing on screen at all.
-    if (!noEnroll) await reportPairingCodes(logger(verbose));
+    if (!noEnroll) await reportPairingCode();
     return;
   }
   // A machine that has never paired a browser and has no repositories is the
@@ -836,41 +815,19 @@ async function commandInstall(args, verbose) {
     || (!existing.pairingComplete && (existing.entries?.length ?? 0) === 0);
   if (!enroll && unconfigured) {
     const root = machineIndexRoot();
-    const log = logger(verbose);
-    // The service offers pairing for as long as it runs, so this command does
-    // not need to hold the terminal open waiting for a browser.
+    // The service offers pairing for as long as it runs, and adopts an index if
+    // an approved browser elsewhere hands it one, so this command has nothing
+    // to wait for. It used to hold the terminal while it announced itself.
     await startWatchService({ root, verbose });
     console.log('\nThis machine is ready to pair and will keep offering.');
-
-    // It may also be joining a setup that already exists, which only an
-    // approved browser elsewhere can authorize. Announce for a while so that
-    // browser can prompt, then leave the service listening either way.
-    const identity = await loadOrCreateNativeDeviceIdentity({ root });
-    const joined = await requestLanDeviceApproval(identity, {
-      timeoutMs: 30_000,
-      logger: log,
-      onRequest: () => console.log('Announced this machine to any approved GitPigeon browser.'),
-    }).catch(() => null);
-
-    if (joined?.grant?.index) {
-      await stopWatchService(root);
-      const index = await adoptMachineIndexCapability(joined.grant.index, { root });
-      const added = await materializeGrantedRepositories(joined.grant.repositories, { root });
-      await startWatchService({ root, verbose });
-      if (added.length) console.log(`Added ${added.length} shared ${added.length === 1 ? 'repository' : 'repositories'}.`);
-      console.log(`This device joined GitPigeon index ${index.indexId.slice(0, 10)}.`);
-      await reportPairingCodes(log);
-      return;
-    }
-
+    await reportPairingCode(root);
     const dashboard = process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/';
-    console.log(`\nOpen ${dashboard} and approve this machine when it shows a code.`);
+    console.log(`\nApprove it at ${dashboard} once the code above matches.`);
     openDashboard(dashboard);
-    await reportPairingCodes(log);
     return;
   }
   await commandEnroll([], verbose);
-  await reportPairingCodes(logger(verbose));
+  await reportPairingCode();
 }
 
 async function commandPairDashboard(args, verbose) {
@@ -1010,7 +967,10 @@ async function commandPair(args, verbose) {
     console.log(`\nPaired ${result.browserId.slice(0, 16)}… through the one-time link.`);
   }).catch((error) => log.debug?.(error.message));
 
-  const responder = await startDeviceApprovalResponder({ logger: log });
+  const responder = await startDeviceApprovalResponder({
+    logger: log,
+    keyPair: await loadPairingKeyPair(root),
+  });
   let connectedAt = null;
   let announcedConnection = false;
   responder.node.mesh.on('signaling:connected', () => { connectedAt ??= Date.now(); });

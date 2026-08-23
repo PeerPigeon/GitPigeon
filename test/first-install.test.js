@@ -16,9 +16,10 @@ test('a first install leaves something listening rather than a deadline', async 
   assert.doesNotMatch(command, /grantToWaitingBrowser/);
 
   // It may instead be joining a setup that already exists, which only an
-  // approved browser elsewhere can authorize.
-  assert.match(command, /requestLanDeviceApproval\(identity/);
-  assert.match(command, /adoptMachineIndexCapability\(joined\.grant\.index, \{ root \}\)/);
+  // approved browser elsewhere can authorize — but the running service does
+  // that, so this command waits for nothing and returns the prompt.
+  assert.doesNotMatch(command, /requestLanDeviceApproval\(identity/);
+  assert.doesNotMatch(command, /timeoutMs/);
 
   // The enrolment page asks the person to type a code; nothing here uses it.
   assert.doesNotMatch(command, /runDashboardPairing/);
@@ -76,24 +77,17 @@ test('install prints the code the browser should be showing', async () => {
   const source = await import('node:fs/promises')
     .then(({ readFile }) => readFile(new URL('../src/cli.js', import.meta.url), 'utf8'));
   const command = /async function commandInstall\([\s\S]*?\n\}/.exec(source)?.[0] ?? '';
-  const reporter = /async function reportPairingCodes\([\s\S]*?\n\}\n\n/.exec(source)?.[0] ?? '';
-  assert.ok(reporter, 'reportPairingCodes should be present');
+  const reporter = /async function reportPairingCode\([\s\S]*?\n\}\n\n/.exec(source)?.[0] ?? '';
+  assert.ok(reporter, 'reportPairingCode should be present');
 
-  // The code only ever reached the service log, so there was nothing in the
-  // terminal to compare the browser against — and an already-paired machine
-  // returned in silence without printing anything at all.
-  assert.match(command, /await reportPairingCodes\(log\)/);
-  const branches = command.split('reportPairingCodes(').length - 1;
+  // The code used to mix both peers' keys, so it did not exist until a browser
+  // asked: install had nothing to print and held the terminal waiting instead.
+  // The watcher owns its code now, so this reads it off disk and returns.
+  assert.match(reporter, /localPairingCode\(root\)/);
+  assert.match(reporter, /only if it shows the same code/);
+  assert.doesNotMatch(reporter, /startDeviceApprovalResponder/);
+  assert.doesNotMatch(reporter, /while \(/);
+
+  const branches = command.split('reportPairingCode(').length - 1;
   assert.ok(branches >= 3, `every install path should report a code, found ${branches}`);
-  assert.match(reporter, /Approve it there if it shows this code/);
-  // It reports only; the background service is what grants, and this must give
-  // up so the terminal comes back.
-  assert.doesNotMatch(reporter, /responder\.approve\(/);
-  // Installing is not a foreground task, so this looks briefly and returns
-  // rather than holding the prompt.
-  assert.match(reporter, /timeoutMs = 12_000/);
-  assert.match(reporter, /if \(seen\.size\) return;/);
-  // A bare return in the catch left the terminal looking as though nothing had
-  // been attempted at all.
-  assert.match(reporter, /Could not look for a browser to pair/);
 });

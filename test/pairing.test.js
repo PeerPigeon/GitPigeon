@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
+import { pairingCode } from '../src/pairing-identity.js';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import {
   createMeshPairingRequest,
-  pairingCode,
   startDeviceApprovalResponder,
 } from '../src/device-approval-mesh.js';
 
@@ -51,23 +51,17 @@ const acknowledge = (node, peerId, request) => node.emit('message', {
   data: { protocol: 'gitpigeon-mesh-pairing/1', kind: 'accepted', requestId: request.requestId },
 });
 
-test('a pairing code identifies the pair, not just the browser', () => {
-  assert.match(pairingCode('browser-key', 'watcher-key'), /^[0-9]{6}$/);
-  assert.equal(pairingCode('browser-key', 'watcher-key'), pairingCode('browser-key', 'watcher-key'));
+test('a pairing code identifies the watcher and needs no browser', () => {
+  assert.match(pairingCode('watcher-key'), /^[0-9]{6}$/);
+  assert.equal(pairingCode('watcher-key'), pairingCode('watcher-key'));
 
-  // Two machines offering the same browser must show different digits, or
-  // confirming the code says nothing about which machine is being approved.
-  assert.notEqual(
-    pairingCode('browser-key', 'watcher-one'),
-    pairingCode('browser-key', 'watcher-two'),
-  );
-  // And the same machine offering two browsers must differ too.
-  assert.notEqual(
-    pairingCode('browser-one', 'watcher-key'),
-    pairingCode('browser-two', 'watcher-key'),
-  );
-  assert.throws(() => pairingCode('', 'watcher-key'), /public keys/);
-  assert.throws(() => pairingCode('browser-key', ''), /public keys/);
+  // Two machines must show different digits, or confirming the code says
+  // nothing about which machine is being approved.
+  assert.notEqual(pairingCode('watcher-one'), pairingCode('watcher-two'));
+
+  // Deriving from the watcher alone is the point: a machine can state its code
+  // at install time, before any browser exists to mix a key in.
+  assert.throws(() => pairingCode(''), /watcher public key/);
 });
 
 test('both sides show the same code for the same requester', async (t) => {
@@ -82,12 +76,11 @@ test('both sides show the same code for the same requester', async (t) => {
   announce(node, 'browser', request);
   await settle();
 
-  // The requester derives from its own key pair; the approver derives from the
-  // key PeerPigeon discovered for that peer. Same key, same digits.
-  assert.equal(
-    await responder.codeFor(request.requestId),
-    pairingCode('requester-public-key', 'local-public-key'),
-  );
+  // The browser derives from the key PeerPigeon discovered for this machine,
+  // and this machine derives from its own. Same key, same digits — and it does
+  // not depend on which browser is asking.
+  assert.equal(await responder.codeFor(request.requestId), pairingCode('local-public-key'));
+  assert.equal(responder.code(), pairingCode('local-public-key'));
 });
 
 test('the responder lists requests and grants only the chosen one', async (t) => {

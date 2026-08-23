@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { pairingCode } from './pairing-identity.js';
 import { installNativeWebRTC } from './webrtc.js';
 
 // Pairing over the mesh uses PeerPigeon's own encryption, which is unsea
@@ -14,12 +14,15 @@ const REQUEST_ID = /^[a-f0-9]{32}$/;
 const ANNOUNCE_INTERVAL_MS = 5_000;
 const PAIRING_TTL_MS = 5 * 60_000;
 
-export function deviceApprovalNodeOptions() {
+export function deviceApprovalNodeOptions(keyPair) {
   return {
     // Crypto must be on: the grant travels through sendEncryptedDirect, which
     // throws on a node without it. The announcement itself stays public — it
     // carries no secret and every approver needs to see it.
-    crypto: {},
+    // A stable key pair keeps this machine's pairing code the same across
+    // restarts; without one PeerPigeon mints a fresh identity every start and
+    // the code printed at install would not survive the next boot.
+    crypto: keyPair ? { keyPair } : {},
     networkId: DEVICE_APPROVAL_NETWORK_ID,
     sessionId: DEVICE_APPROVAL_SESSION_ID,
     minPeers: 1,
@@ -28,29 +31,6 @@ export function deviceApprovalNodeOptions() {
     autoDiscover: true,
     autoConnect: true,
   };
-}
-
-/**
- * Six digits both sides derive from the requester's PeerPigeon public key —
- * the same key unsea encrypts the grant to. Nothing extra crosses the mesh:
- * the requester reads its own key, the approver reads the key PeerPigeon
- * discovered for that peer, and a human checks they agree before a capability
- * is released. A mismatch means the grant would go to a different key.
- */
-export function pairingCode(browserPublicKey, watcherPublicKey) {
-  const browser = String(browserPublicKey ?? '');
-  const watcher = String(watcherPublicKey ?? '');
-  if (!browser || !watcher) throw new Error('A pairing code requires both peers\' public keys');
-  // Both keys, so the digits identify this pair and not just the browser.
-  // Deriving from the browser alone made every machine show the same code, so
-  // confirming it said nothing about which machine was being approved.
-  const digest = createHash('sha256')
-    .update('gitpigeon:pair-code:v3\0')
-    .update(browser)
-    .update('\0')
-    .update(watcher)
-    .digest();
-  return String(digest.readUInt32BE(0) % 1_000_000).padStart(6, '0');
 }
 
 export function validateMeshPairingRequest(value, now = Date.now()) {
@@ -102,11 +82,12 @@ function decode(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
-async function createNode(nodeFactory) {
-  if (nodeFactory) return nodeFactory(deviceApprovalNodeOptions());
+async function createNode(nodeFactory, keyPair) {
+  const options = deviceApprovalNodeOptions(keyPair);
+  if (nodeFactory) return nodeFactory(options);
   await installNativeWebRTC();
   const { PeerPigeonNode } = await import('peerpigeon');
-  return new PeerPigeonNode(deviceApprovalNodeOptions());
+  return new PeerPigeonNode(options);
 }
 
 /** The side asking to be paired. */
@@ -114,10 +95,11 @@ export async function startDeviceApprovalRequester(request, {
   logger = {},
   onGrant = () => {},
   nodeFactory,
+  keyPair,
 } = {}) {
   const valid = validateMeshPairingRequest(request);
   if (!valid) throw new Error('Invalid GitPigeon pairing request');
-  const node = await createNode(nodeFactory);
+  const node = await createNode(nodeFactory, keyPair);
   let closed = false;
 
   const receive = (message) => {
@@ -149,9 +131,9 @@ export async function startDeviceApprovalRequester(request, {
   return {
     node,
     request: valid,
-    /** This peer's own PeerPigeon key, paired with the approver's. */
+    /** The approving watcher's key, which is what the digits identify. */
     code(watcherPublicKey) {
-      return pairingCode(node.getKeyPair().pub, watcherPublicKey);
+      return pairingCode(watcherPublicKey);
     },
     async close() {
       if (closed) return;
@@ -171,9 +153,9 @@ export async function startDeviceApprovalResponder({
   onAdopt = null,
   nodeFactory,
   requestStaleMs = 20_000,
-  keyTimeoutMs = 8_000,
+  keyPair,
 } = {}) {
-  const node = await createNode(nodeFactory);
+  const node = await createNode(nodeFactory, keyPair);
   const requests = new Map();
   // Peers this machine has already handed a capability to. Only they may ask
   // it to join an index, so a stranger cannot redirect this machine.
@@ -240,13 +222,16 @@ export async function startDeviceApprovalResponder({
         .sort((left, right) => left.request.issuedAt.localeCompare(right.request.issuedAt))
         .map(({ request }) => request);
     },
-    /** The requester's PeerPigeon key, as discovered by this node. */
-    async codeFor(requestId) {
-      const record = requests.get(String(requestId));
-      if (!record) throw new Error('That pairing request is no longer being advertised');
-      const known = node.getPublicKey(record.peerId)
-        ?? await node.waitForPeerKey(record.peerId, keyTimeoutMs);
-      return pairingCode(known.pub, node.getKeyPair().pub);
+    /**
+     * This machine's own code. It is the same for every browser, because the
+     * digits identify the watcher being approved, not the pair — so it can be
+     * shown before any browser has asked.
+     */
+    code() {
+      return pairingCode(node.getKeyPair().pub);
+    },
+    async codeFor() {
+      return pairingCode(node.getKeyPair().pub);
     },
     /**
      * Hand a capability to one requester. PeerPigeon encrypts it to that peer's
