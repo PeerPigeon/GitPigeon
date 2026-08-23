@@ -49,19 +49,34 @@ await build({
 // a pipe, in a daemon — and exits 1 before the shell ever runs: the shipped
 // binary never had a working terminal on macOS at all.
 const prebuild = `${process.platform}-${process.arch}`;
-const prebuilds = path.join(root, "node_modules", "node-pty", "prebuilds", prebuild);
-const assets = {};
-for (const name of process.platform === "win32"
+const ptyRoot = path.join(root, "node_modules", "node-pty");
+const assetNames = process.platform === "win32"
   ? ["pty.node", "winpty-agent.exe", "winpty.dll", "conpty.node", "conpty.dll", "OpenConsole.exe"]
-  : ["pty.node", "spawn-helper"]) {
-  const file = path.join(prebuilds, name);
-  try {
-    await stat(file);
-    assets[`pty/${name}`] = file;
-  } catch { /* not every platform ships every helper */ }
+  : ["pty.node", "spawn-helper"];
+async function collectPtyAssets() {
+  const found = {};
+  for (const base of [path.join(ptyRoot, "prebuilds", prebuild), path.join(ptyRoot, "build", "Release")]) {
+    for (const name of assetNames) {
+      if (found[`pty/${name}`]) continue;
+      const file = path.join(base, name);
+      try {
+        await stat(file);
+        found[`pty/${name}`] = file;
+      } catch { /* keep looking */ }
+    }
+  }
+  return found;
+}
+let assets = await collectPtyAssets();
+if (!assets["pty/pty.node"] && process.platform !== "win32") {
+  // Linux ships no prebuild; node-pty compiles at install time, which the
+  // repository's ignore-scripts pin skips. Compile it here instead.
+  console.log(`No node-pty prebuild for ${prebuild}; compiling it…`);
+  await run("npm", ["rebuild", "node-pty", "--ignore-scripts=false", "--foreground-scripts"]);
+  assets = await collectPtyAssets();
 }
 if (!assets["pty/pty.node"] && process.platform !== "win32") {
-  throw new Error(`node-pty prebuild missing for ${prebuild}; the terminal would be dead in this binary`);
+  throw new Error(`node-pty could not be built for ${prebuild}; the terminal would be dead in this binary`);
 }
 await writeFile(config, `${JSON.stringify({
   main: bundle,
