@@ -7,6 +7,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { readInstalledUpdate } from './auto-update.js';
+import { GITPIGEON_VERSION } from './version.js';
 
 const STANDALONE = typeof __GITPIGEON_STANDALONE__ === 'boolean'
   ? __GITPIGEON_STANDALONE__
@@ -213,7 +214,10 @@ export async function startWatchService({
   if (!root) throw new Error('GitPigeon service state root is required');
   return await withServiceStartLock(root, async () => {
     const current = await watchServiceStatus(root);
-    if (current.running && current.compatible) return { started: false, ...current };
+    // A running service from an older build keeps serving its own code, so a
+    // freshly installed release would never take effect.
+    const stale = current.running && current.buildVersion !== GITPIGEON_VERSION;
+    if (current.running && current.compatible && !stale) return { started: false, ...current };
 
     // Replace every legacy per-repository watcher before creating the one
     // machine service. The startup lock prevents two callers from spawning it.
@@ -309,6 +313,10 @@ export async function createWatchServiceControl(root, token, stop) {
   const state = {
     version: 1,
     serviceProtocol: SERVICE_PROTOCOL_VERSION,
+    // Which build is actually running. A protocol number only changes when the
+    // wire changes, so without this a new release could install and leave the
+    // previous process serving indefinitely.
+    buildVersion: GITPIGEON_VERSION,
     pid: process.pid,
     token,
     ready: false,

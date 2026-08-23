@@ -188,3 +188,16 @@ test("approved enrollment materializes every shared repository in the native ind
   ]);
   assert.equal((await materializeGrantedRepositories(capabilities, { root: stateRoot, base: cloneRoot })).length, 0);
 });
+
+test('a service from an older build is not treated as already running', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../src/daemon.js', import.meta.url), 'utf8');
+
+  // A running service keeps serving its own code. The protocol number only
+  // changes when the wire changes, so without a build check a new release
+  // installed and the previous process carried on serving indefinitely — new
+  // behaviour never took effect.
+  assert.match(source, /buildVersion: GITPIGEON_VERSION/);
+  assert.match(source, /const stale = current\.running && current\.buildVersion !== GITPIGEON_VERSION/);
+  assert.match(source, /if \(current\.running && current\.compatible && !stale\) return/);
+});
