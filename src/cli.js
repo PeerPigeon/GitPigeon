@@ -703,11 +703,18 @@ async function commandInstall(args, verbose) {
     if (existing) await startWatchService({ root: machineIndexRoot(), verbose });
     return;
   }
-  // A machine with no index of its own is the first device, not one joining
-  // somebody else's. Sending it to enroll deadlocked a new user: it waited for
+  // A machine that has never paired a browser and has no repositories is the
+  // first device, not one joining somebody else's — whether or not a state file
+  // happens to exist. Sending it to enroll deadlocked a new user: it waited for
   // an already-approved browser, while the only browser open was waiting for
   // this machine. Here it owns the index and approves the browser instead.
-  if (!enroll && !existing) {
+  //
+  // Keying this on the absence of a file was not enough: an abandoned or
+  // half-finished setup leaves one behind, and that machine is still
+  // unconfigured.
+  const unconfigured = !existing
+    || (!existing.pairingComplete && (existing.entries?.length ?? 0) === 0);
+  if (!enroll && unconfigured) {
     const root = machineIndexRoot();
     const pairing = await claimDashboardPairing({ root, force: true });
     if (!pairing) throw new Error('Could not start a GitPigeon enrollment for this machine');
