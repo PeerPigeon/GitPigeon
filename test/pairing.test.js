@@ -147,12 +147,25 @@ test('an expired or silent request stops being offered', async (t) => {
   );
 });
 
-test('pair opens a page only when no browser is already waiting', async () => {
+test('pair never opens a page of its own', async () => {
   const source = await import('node:fs/promises')
     .then(({ readFile }) => readFile(new URL('../src/cli.js', import.meta.url), 'utf8'));
   const command = /async function commandPair\(args, verbose\) \{[\s\S]*?\n\}/.exec(source)?.[0] ?? '';
   assert.ok(command, 'commandPair should be present');
-  assert.match(command, /if \(!pending\.length && !openedDashboard/);
+
+  // Only an unpaired browser announces itself. Opening a tab from here lands on
+  // the same already-paired origin, so it stays just as silent as the page the
+  // user already had open — it only ever added noise.
+  assert.doesNotMatch(command, /openDashboard/);
+  assert.match(command, /already paired will not appear/);
+
+  // Joining the mesh and hearing a gossip announcement takes far longer than a
+  // few seconds, so the hint waits for signaling to connect and then for a real
+  // window on top of that. Reporting on it sooner said a waiting browser was
+  // not there.
+  assert.match(command, /connectedAt && Date\.now\(\) - connectedAt >= DISCOVERY_HINT_MS/);
+  assert.doesNotMatch(command, /Date\.now\(\) - startedAt/);
+
   const dashboardCall = command.indexOf('commandPairDashboard');
   const dashboardFlag = command.indexOf("takeFlag(args, '--dashboard')");
   assert.ok(dashboardFlag !== -1 && dashboardCall !== -1 && dashboardFlag < dashboardCall);

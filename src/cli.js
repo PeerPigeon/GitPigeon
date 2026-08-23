@@ -678,9 +678,11 @@ async function commandPairDashboard(args, verbose) {
   await runDashboardPairing(pairing, verbose);
 }
 
-// How long to let an already-open browser announce itself before assuming there
-// is none and opening one.
-const DISCOVERY_GRACE_MS = 3_000;
+// Joining the mesh, dialling a peer, and receiving a gossip announcement takes
+// far longer than it feels like it should. Saying anything about what is or is
+// not out there before that has had time to happen is just wrong, so the hint
+// waits for the mesh to connect and then for a real window on top of that.
+const DISCOVERY_HINT_MS = 20_000;
 
 function pairingLabel(request) {
   if (request.requesterKind === 'browser') {
@@ -716,25 +718,30 @@ async function commandPair(args, verbose) {
 
   console.log('Looking for a device or browser asking to pair…');
 
-  const startedAt = Date.now();
   const responder = await startDeviceApprovalResponder({ logger: log });
+  let connectedAt = null;
+  let announcedConnection = false;
+  responder.node.mesh.on('signaling:connected', () => { connectedAt ??= Date.now(); });
   let announced = new Set();
-  let openedDashboard = false;
+  let explained = false;
   try {
     while (true) {
       const pending = responder.pending();
-      // Only open a page when nothing is already waiting. A browser that is
-      // sitting on the approval screen is the whole reason this command was
-      // run; opening another tab on top of it is just noise.
-      if (!pending.length && !openedDashboard && Date.now() - startedAt >= DISCOVERY_GRACE_MS) {
-        openedDashboard = true;
+      if (connectedAt && !announcedConnection) {
+        announcedConnection = true;
+        console.log('Connected to the mesh. Press Ctrl+C to stop.');
+      }
+      // Never open a page, and never claim nothing is out there until the mesh
+      // has actually been up long enough to have heard it. Only an unpaired
+      // browser announces itself, so a tab opened from here would be paired
+      // already and stay just as silent as the one the user already had open.
+      if (!pending.length && !explained && connectedAt && Date.now() - connectedAt >= DISCOVERY_HINT_MS) {
+        explained = true;
         const dashboard = process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/';
-        if (openDashboard(dashboard)) {
-          console.log(`No browser is waiting, so GitPigeon opened ${dashboard}.`);
-        } else {
-          console.log(`No browser is waiting. Open ${dashboard} on the device you want to add.`);
-        }
-        console.log('Press Ctrl+C to stop.\n');
+        console.log(`\nStill nothing asking to pair. Open ${dashboard} on the device you want to add,`);
+        console.log('and leave it on the pairing screen.');
+        console.log('A browser that is already paired will not appear here. To pair one again, clear');
+        console.log('its GitPigeon site data or use a private window.\n');
       }
       for (const request of pending) {
         if (announced.has(request.requestId)) continue;
