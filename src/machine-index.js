@@ -123,6 +123,14 @@ function validateState(value) {
     pairingComplete: value.version >= 3 && value.pairingComplete === true,
     pairingMode: value.version === 1 ? 'legacy' : value.pairingMode === 'secure' ? 'secure' : 'legacy',
     entries,
+    // Stated removals survive restarts, or a browser cache outlives them.
+    removed: Array.isArray(value.removed)
+      ? value.removed
+        .filter((item) => DEVICE.test(String(item?.repositoryId ?? ''))
+          && Number.isFinite(Date.parse(String(item?.removedAt ?? ''))))
+        .map((item) => ({ repositoryId: String(item.repositoryId), removedAt: String(item.removedAt) }))
+        .slice(-100)
+      : [],
   };
 }
 
@@ -235,11 +243,24 @@ export async function registerMachinePigeon(repository, config, { root = machine
   });
 }
 
-export async function unregisterMachinePigeon(repository, { root = machineIndexRoot() } = {}) {
+export async function unregisterMachinePigeon(repository, { root = machineIndexRoot(), now = Date.now() } = {}) {
   return await withLock(root, async () => {
     const value = await readState(root);
     const previous = value.entries.length;
+    const dropped = value.entries.filter((item) => item.repository === repository.root);
     value.entries = value.entries.filter((item) => item.repository !== repository.root);
+    // Removal must be a stated fact, not an absence. Browsers keep a cached
+    // copy of the directory precisely so a machine going offline does not
+    // blank the dashboard — which also meant a removed repository never
+    // disappeared: the live record simply stopped mentioning it, and the
+    // cache filled the silence forever.
+    const tombstones = new Map((value.removed ?? []).map((item) => [item.repositoryId, item]));
+    for (const item of dropped) {
+      tombstones.set(item.repositoryId, { repositoryId: item.repositoryId, removedAt: new Date(now).toISOString() });
+    }
+    value.removed = [...tombstones.values()]
+      .filter((item) => now - Date.parse(item.removedAt) < REMOVED_MEMORY_MS)
+      .slice(-100);
     await writeState(root, value);
     return { removed: value.entries.length !== previous, state: value };
   });
@@ -328,6 +349,10 @@ export function publisherDirectoryKey(indexId, publisherId) {
   return `gitpigeon/index/v1/${indexId}/publisher/${publisherId}`;
 }
 
+// A month of remembering what was removed is plenty: any browser that has
+// not connected in that long refreshes its whole cache anyway.
+export const REMOVED_MEMORY_MS = 30 * 24 * 60 * 60_000;
+
 export function directoryValue(index, entries, now = Date.now(), serviceInstanceId = null) {
   const grouped = new Map();
   for (const entry of entries) {
@@ -350,11 +375,20 @@ export function directoryValue(index, entries, now = Date.now(), serviceInstance
       if (entry.snapshot || !entry.empty) delete current.empty;
     }
   }
+  const removed = (index.removed ?? [])
+    .filter((item) => DEVICE.test(String(item?.repositoryId ?? ''))
+      && Number.isFinite(Date.parse(String(item?.removedAt ?? '')))
+      && now - Date.parse(item.removedAt) < REMOVED_MEMORY_MS
+      && !grouped.has(item.repositoryId))
+    .map((item) => ({ repositoryId: item.repositoryId, removedAt: item.removedAt }));
   return {
     protocol: INDEX_PROTOCOL,
     indexId: index.indexId,
     updatedAt: new Date(now).toISOString(),
     pigeons: [...grouped.values()].sort((left, right) => left.name.localeCompare(right.name)),
+    // Stated removals, so browsers evict their cached copy instead of letting
+    // it outlive the repository.
+    ...(removed.length ? { removed } : {}),
   };
 }
 

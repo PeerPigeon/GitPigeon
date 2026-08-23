@@ -216,3 +216,41 @@ test('an approved fresh device adopts the shared encrypted index without replaci
     /different GitPigeon index/,
   );
 });
+
+test('an unwatched repository is stated as removed, not just omitted', async (t) => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const { registerMachinePigeon, unregisterMachinePigeon, loadMachineIndex, directoryValue } =
+    await import('../src/machine-index.js');
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-tombstone-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = { root: path.join(root, 'repo'), gitDir: path.join(root, 'repo/.git') };
+  const config = {
+    repositoryId: 'c'.repeat(32),
+    secret: 'z'.repeat(43),
+    deviceId: 'd'.repeat(32),
+    name: 'test',
+  };
+  await registerMachinePigeon(repository, config, { root, pid: null });
+  await unregisterMachinePigeon(repository, { root });
+
+  // Browsers keep a cached directory copy so an offline machine does not
+  // blank the dashboard — which means simple omission can never remove a
+  // repository. Removal has to be said out loud, and survive restarts.
+  const state = await loadMachineIndex({ root });
+  assert.equal(state.entries.length, 0);
+  assert.equal(state.removed.length, 1);
+  assert.equal(state.removed[0].repositoryId, 'c'.repeat(32));
+
+  const value = directoryValue(state, []);
+  assert.equal(value.removed.length, 1);
+  assert.equal(value.removed[0].repositoryId, 'c'.repeat(32));
+
+  // Re-registering the repository must win over its old tombstone.
+  await registerMachinePigeon(repository, config, { root, pid: null });
+  const back = await loadMachineIndex({ root });
+  const republished = directoryValue(back, back.entries);
+  assert.equal(republished.removed, undefined);
+  assert.equal(republished.pigeons.length, 1);
+});
