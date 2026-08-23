@@ -284,8 +284,14 @@ export class TerminalServer {
 
   async #open(peerId, frame, id) {
     if (this.sessions.has(id)) return;
-    const peerSessions = [...this.sessions.values()].filter((session) => session.peerId === peerId).length;
-    if (this.sessions.size >= MAX_SESSIONS || peerSessions >= MAX_SESSIONS_PER_PEER) {
+    // A new session from a peer replaces that peer's old one. Close frames are
+    // easy to lose — a reloaded tab or a timed-out attempt leaves a zombie
+    // session — and refusing the peer over its own zombie locked people out
+    // of their own machine until the sweep.
+    for (const session of [...this.sessions.values()]) {
+      if (session.peerId === peerId) this.#close(session);
+    }
+    if (this.sessions.size >= MAX_SESSIONS) {
       await this.#send(peerId, frame.sessionId, 'error', 0, { message: 'This watcher has reached its terminal session limit.' });
       return;
     }
