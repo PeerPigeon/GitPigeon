@@ -332,6 +332,9 @@ async function startPairingService(root, log) {
   // an approval prompt for it.
   const offer = await startWatcherOffer({
     deviceName: deviceHostName(),
+    // So a browser that already took this machine in stops asking to approve
+    // it again every time it announces.
+    indexId: (await loadMachineIndex({ root }).catch(() => null))?.indexId ?? null,
     keyPair,
     logger: log,
     onGrant: adopt,

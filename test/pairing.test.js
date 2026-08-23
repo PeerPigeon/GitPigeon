@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { startWatcherOffer } from '../src/device-approval-mesh.js';
+import { indexFingerprint, startWatcherOffer, validateMeshPairingRequest } from '../src/device-approval-mesh.js';
 import { pairingCode } from '../src/pairing-identity.js';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
@@ -218,4 +218,32 @@ test('the watcher offers itself to browsers that are already paired', async (t) 
 
   // Restarting must not change what the browser is asked to compare against.
   assert.equal(again[0].requestId, first.requestId);
+});
+
+test('a machine announces which index it already belongs to', async (t) => {
+  let node;
+  const offer = await startWatcherOffer({
+    deviceName: 'Daniels-MacBook-Pro',
+    indexId: 'f00ab7ea24fe377da70fc7148bfdd047',
+    keyPair: { pub: 'pro-public-key', priv: 'p', epub: 'e', epriv: 'ep' },
+    nodeFactory: (options) => { node = new FakeApprovalNode(options); return node; },
+  });
+  t.after(() => offer.close());
+
+  // A browser that already took this machine in was asked to authorise it
+  // again every time it announced, which is not an approval anyone can make
+  // sense of. It compares this against its own index and stays quiet.
+  const [announced] = node.broadcasts.filter((value) => value?.kind === 'request');
+  assert.equal(announced.indexFingerprint, indexFingerprint('f00ab7ea24fe377da70fc7148bfdd047'));
+  assert.match(announced.indexFingerprint, /^[0-9a-f]{64}$/);
+
+  // The announcement is not encrypted, so the index id itself must not be on
+  // it — and neither must anything derived from the secret.
+  assert.ok(!JSON.stringify(announced).includes('f00ab7ea24fe377da70fc7148bfdd047'));
+
+  // A machine with no index yet has nothing to claim.
+  assert.equal(validateMeshPairingRequest(createMeshPairingRequest({
+    requestId: 'a'.repeat(32),
+    deviceName: 'New machine',
+  })).indexFingerprint, undefined);
 });

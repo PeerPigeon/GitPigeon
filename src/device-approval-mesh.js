@@ -50,6 +50,9 @@ export function validateMeshPairingRequest(value, now = Date.now()) {
     requesterKind: value.requesterKind === 'browser' ? 'browser' : 'native',
     requestId,
     deviceName: String(value.deviceName || 'New device').trim().slice(0, 120),
+    ...(/^[0-9a-f]{64}$/.test(String(value.indexFingerprint ?? ''))
+      ? { indexFingerprint: String(value.indexFingerprint) }
+      : {}),
     platform: String(value.platform || 'unknown').slice(0, 32),
     arch: String(value.arch || 'unknown').slice(0, 32),
     issuedAt: new Date(issuedAt).toISOString(),
@@ -57,11 +60,25 @@ export function validateMeshPairingRequest(value, now = Date.now()) {
   };
 }
 
+/**
+ * A public, one-way name for an index. A browser compares this against its own
+ * to recognise a machine it has already taken in, without either side putting
+ * the index id — let alone its secret — on an unencrypted announcement.
+ */
+export function indexFingerprint(indexId) {
+  if (!indexId) return null;
+  return createHash('sha256')
+    .update('gitpigeon:index-fingerprint:v1\0')
+    .update(String(indexId))
+    .digest('hex');
+}
+
 export function createMeshPairingRequest({
   requestId,
   deviceName,
   platform = process.platform,
   arch = process.arch,
+  indexId = null,
   now = Date.now(),
 } = {}) {
   return {
@@ -69,6 +86,7 @@ export function createMeshPairingRequest({
     kind: 'request',
     requesterKind: 'native',
     requestId,
+    ...(indexId ? { indexFingerprint: indexFingerprint(indexId) } : {}),
     deviceName: String(deviceName || 'New device').trim().slice(0, 120),
     platform: String(platform).slice(0, 32),
     arch: String(arch).slice(0, 32),
@@ -305,6 +323,7 @@ export async function startDeviceApprovalResponder({
  */
 export async function startWatcherOffer({
   deviceName,
+  indexId = null,
   keyPair,
   logger = {},
   onGrant = () => {},
@@ -331,7 +350,7 @@ export async function startWatcherOffer({
   const announce = () => {
     if (closed) return;
     try {
-      node.broadcast(createMeshPairingRequest({ requestId, deviceName }));
+      node.broadcast(createMeshPairingRequest({ requestId, deviceName, indexId }));
     } catch (error) {
       logger.debug?.(`Watcher offer: ${error.message}`);
     }
