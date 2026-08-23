@@ -467,14 +467,7 @@ async function connectMachineDirectory(index, logger = {}, {
     crypto: { roomId: `gitpigeon:index:${index.indexId}`, roomSecret: index.secret },
     networkId: INDEX_NETWORK_ID,
     sessionId: index.indexId,
-    minPeers: 1,
-    // Keep every normal browser/device member directly reachable. A tiny
-    // partial mesh can otherwise fill with browser peers and shed the only
-    // native index publisher while it rebalances.
-    maxPeers: 5,
-    tolerantPeers: 0,
-    autoDiscover: true,
-    autoConnect: true,
+    // Peer formation is PeerPigeon's decision; see peerpigeon.js.
     storage: {
       userId: `index-publisher-${index.publisherId}`,
       sessionId: `${INDEX_NETWORK_ID}:${index.indexId}`,

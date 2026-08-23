@@ -30,11 +30,7 @@ export function deviceApprovalNodeOptions(keyPair) {
     crypto: keyPair ? { keyPair } : {},
     networkId: DEVICE_APPROVAL_NETWORK_ID,
     sessionId: DEVICE_APPROVAL_SESSION_ID,
-    minPeers: 1,
-    maxPeers: 5,
-    tolerantPeers: 0,
-    autoDiscover: true,
-    autoConnect: true,
+    // Peer formation is PeerPigeon's decision; see peerpigeon.js.
   };
 }
 

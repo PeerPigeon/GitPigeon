@@ -1,5 +1,5 @@
 import { repositoryCrypto } from './channel.js';
-import { NETWORK_ID, repositoryRoomTopology, storagePrefix } from './constants.js';
+import { NETWORK_ID, storagePrefix } from './constants.js';
 import { machineIndexRoot } from './machine-index.js';
 import { installNativeStorage } from './native-storage.js';
 import { installNativeWebRTC } from './webrtc.js';
@@ -33,13 +33,11 @@ export async function connectPeerPigeon(config, logger = {}, { stateRoot = machi
     crypto: repositoryCrypto(config.repositoryId, config.secret),
     networkId: NETWORK_ID,
     sessionId: config.repositoryId,
-    // Keep small repository rooms fully meshed. A minimum of one makes every
-    // browser stop dialing as soon as it reaches this watcher, producing a
-    // star in which browsers cannot see one another.
-    ...repositoryRoomTopology(),
-    tolerantPeers: 0,
-    autoDiscover: true,
-    autoConnect: true,
+    // No peer-formation overrides. How a mesh forms — peer counts, tolerance,
+    // discovery — is PeerPigeon's decision, and GitPigeon capping rooms at
+    // five peers with zero tolerance left no slack for ghost entries from
+    // restarted services: real negotiations were shed while dead ones held
+    // slots, and the mesh stalled.
     storage: {
       userId: config.deviceId,
       sessionId: `${NETWORK_ID}:${config.repositoryId}`,

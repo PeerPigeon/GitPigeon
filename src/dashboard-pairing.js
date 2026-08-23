@@ -161,11 +161,7 @@ export async function serveDashboardEnrollment(enrollment, {
     crypto: false,
     networkId: PAIRING_NETWORK_ID,
     sessionId: enrollment.pairingId,
-    minPeers: 1,
-    maxPeers: 4,
-    tolerantPeers: 1,
-    autoDiscover: true,
-    autoConnect: true,
+    // Peer formation is PeerPigeon's decision; see peerpigeon.js.
     storage: {
       userId: `native-${randomBytes(16).toString('hex')}`,
       sessionId: `${PAIRING_NETWORK_ID}:${enrollment.pairingId}`,

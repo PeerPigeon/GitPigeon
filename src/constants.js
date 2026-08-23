@@ -1,10 +1,5 @@
 export const PROTOCOL = 'gitpigeon/1';
 export const NETWORK_ID = 'gitpigeon-v1';
-export const REPOSITORY_ROOM_PEERS = 5;
-
-export function repositoryRoomTopology() {
-  return { minPeers: 1, maxPeers: REPOSITORY_ROOM_PEERS };
-}
 export const CONFIG_VERSION = 1;
 export const CONFIG_FILE = 'config.json';
 // A raw chunk is base64 encoded, encrypted by PeerPigeon Storage, and wrapped
