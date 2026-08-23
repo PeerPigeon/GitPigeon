@@ -4,6 +4,7 @@ import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/prom
 import { homedir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { deviceHostName } from './device-name.js';
 import { installNativeStorage } from './native-storage.js';
 import { installNativeWebRTC } from './webrtc.js';
 
@@ -356,13 +357,23 @@ export function publisherRosterValue(index, previous, now = Date.now()) {
   };
 }
 
-export function publisherDirectoryValue(index, entries, now = Date.now(), serviceInstanceId = null, peerId = null) {
+export function publisherDirectoryValue(
+  index,
+  entries,
+  now = Date.now(),
+  serviceInstanceId = null,
+  peerId = null,
+  deviceName = null,
+) {
   return {
     ...directoryValue(index, entries, now, serviceInstanceId),
     kind: 'publisher-directory',
     publisherId: index.publisherId,
     ...(serviceInstanceId ? { serviceInstanceId } : {}),
     ...(peerId ? { peerId } : {}),
+    // Which machine this is. A publisher ID alone names nothing a person
+    // recognises, so a list of watchers read as a list of hex strings.
+    ...(deviceName ? { deviceName: String(deviceName).slice(0, 120) } : {}),
   };
 }
 
@@ -574,6 +585,7 @@ async function connectMachineDirectory(index, logger = {}, {
         Date.now(),
         serviceInstanceId,
         node.getClientId(),
+        deviceHostName(),
       );
       const fingerprint = JSON.stringify(value.pigeons);
       const directoryChanged = fingerprint !== lastDirectoryFingerprint;
