@@ -231,9 +231,18 @@ export async function adoptMachineIndexCapability(capability, { root = machineIn
   });
 }
 
-export async function registerMachinePigeon(repository, config, { root = machineIndexRoot(), pid = process.pid } = {}) {
+export async function registerMachinePigeon(repository, config, {
+  root = machineIndexRoot(),
+  pid = process.pid,
+  // Only a person's explicit `git pigeon init` is a statement that overrides
+  // an earlier removal. The service also re-registers entries to refresh
+  // their PID on every start; letting that bump timestamps and clear
+  // tombstones resurrected removed repositories on each restart.
+  fresh = false,
+} = {}) {
   return await withLock(root, async () => {
     const value = await readState(root);
+    const previous = value.entries.find((item) => item.repository === repository.root);
     const entry = validEntry({
       repository: repository.root,
       repositoryId: config.repositoryId,
@@ -241,13 +250,23 @@ export async function registerMachinePigeon(repository, config, { root = machine
       deviceId: config.deviceId,
       name: path.basename(repository.root),
       pid,
-      registeredAt: new Date().toISOString(),
+      registeredAt: fresh || !previous?.registeredAt ? new Date().toISOString() : previous.registeredAt,
       signalingServer: config.signalingServer,
     });
     if (!entry) throw new Error('Could not register this repository with the encrypted GitPigeon index');
+    if (!fresh) {
+      const tombstone = (value.removed ?? []).find((item) => item.repositoryId === entry.repositoryId);
+      if (tombstone) {
+        // The repository was removed and nothing since was an intentional
+        // re-registration; keep it removed.
+        await writeState(root, value);
+        return value;
+      }
+    }
     value.entries = [...value.entries.filter((item) => item.repository !== repository.root), entry];
-    // Registering again is the statement that overrides any earlier removal.
-    value.removed = (value.removed ?? []).filter((item) => item.repositoryId !== entry.repositoryId);
+    if (fresh) {
+      value.removed = (value.removed ?? []).filter((item) => item.repositoryId !== entry.repositoryId);
+    }
     await writeState(root, value);
     return value;
   });
@@ -638,6 +657,18 @@ async function connectMachineDirectory(index, logger = {}, {
       const current = await loadMachineIndex({ root });
       const localTombstones = new Map((current.removed ?? [])
         .map((item) => [item.repositoryId, Date.parse(item.removedAt) || 0]));
+      // Local tombstones apply to local entries too. A still-listed entry
+      // blocked its own tombstone from ever being published, while the
+      // tombstone never removed the entry — a deadlock where nothing
+      // converged.
+      for (const entry of current.entries) {
+        const removedAt = localTombstones.get(entry.repositoryId) ?? 0;
+        const registeredAt = entry.registeredAt ? Date.parse(entry.registeredAt) || 0 : 0;
+        if (removedAt && registeredAt < removedAt) {
+          await unregisterMachinePigeon({ root: entry.repository }, { root, now: removedAt });
+          logger.info?.(`Removed ${entry.name}: it was unwatched here earlier`);
+        }
+      }
       for (const [repositoryId, removedAt] of remoteTombstones) {
         const entry = current.entries.find((item) => item.repositoryId === repositoryId);
         const registeredAt = entry?.registeredAt ? Date.parse(entry.registeredAt) || 0 : 0;

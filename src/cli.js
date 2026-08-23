@@ -693,6 +693,7 @@ async function commandInit(args, cwd, verbose) {
   await registerMachinePigeon(repository, config, {
     root: indexRoot,
     pid: null,
+    fresh: true,
   });
   const watcher = await startIndexedWatchService({ verbose });
   await waitForWatchServiceRepository(indexRoot, repository.root);
@@ -1229,6 +1230,7 @@ async function commandWatch(args, cwd, verbose) {
   await registerMachinePigeon(repository, config, {
     root,
     pid: null,
+    fresh: true,
   });
   const result = await startWatchService({ root, pollMs, verbose });
   await waitForWatchServiceRepository(root, repository.root);

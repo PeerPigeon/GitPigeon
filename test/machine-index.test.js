@@ -252,8 +252,16 @@ test('an unwatched repository is stated as removed, not just omitted', async (t)
   assert.equal(value.removed.length, 1);
   assert.equal(value.removed[0].repositoryId, 'c'.repeat(32));
 
-  // Re-registering the repository must win over its old tombstone.
+  // The service re-registers entries to refresh PIDs on every start; that
+  // must NOT resurrect a removed repository or clear its tombstone —
+  // restarting the watcher used to undo every unwatch.
   await registerMachinePigeon(repository, config, { root, pid: null });
+  const still = await loadMachineIndex({ root });
+  assert.equal(still.entries.length, 0);
+  assert.equal(still.removed.length, 1);
+
+  // Only a person's explicit `git pigeon init` overrides the tombstone.
+  await registerMachinePigeon(repository, config, { root, pid: null, fresh: true });
   const back = await loadMachineIndex({ root });
   const republished = directoryValue(back, back.entries);
   assert.equal(republished.removed, undefined);
