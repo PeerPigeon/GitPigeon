@@ -14,8 +14,7 @@ test('a first install owns the index instead of waiting to be approved', async (
   // An abandoned or half-finished setup leaves a state file behind, and that
   // machine is still unconfigured, so the absence of a file is not the test.
   assert.match(command, /!existing\.pairingComplete && \(existing\.entries\?\.length \?\? 0\) === 0/);
-  assert.match(command, /claimDashboardPairing\(\{ root, force: true \}\)/);
-  assert.match(command, /runDashboardPairing\(pairing, verbose\)/);
+  assert.match(command, /grantToWaitingBrowser\(root, verbose/);
 
   // The deadlocking path must come after that check, and only for a machine
   // that is deliberately joining an existing index.
@@ -32,21 +31,25 @@ test('joining an existing index is still possible on purpose', async () => {
   assert.match(command, /await commandEnroll\(\[\], verbose\)/);
 });
 
-test('an already-open browser is not buried under a new tab', async () => {
+test('a first install never asks anyone to type a code', async () => {
   const source = await import('node:fs/promises')
     .then(({ readFile }) => readFile(new URL('../src/cli.js', import.meta.url), 'utf8'));
   const command = /async function commandInstall\([\s\S]*?\n\}/.exec(source)?.[0] ?? '';
 
-  // A browser on the approval screen is already announcing itself, so the
-  // installer looks before it opens anything.
-  const look = command.indexOf('findWaitingBrowser');
-  const openTab = command.indexOf('runDashboardPairing(pairing, verbose)');
-  assert.ok(look !== -1 && openTab !== -1 && look < openTab,
-    'the installer must look for a waiting browser before opening one');
+  // The enrolment-link page asks the person to type a code. The person is
+  // looking at a browser that is already announcing itself, so the watcher
+  // grants to it and the browser confirms the code instead.
+  assert.match(command, /grantToWaitingBrowser\(root, verbose/);
+  assert.doesNotMatch(command, /runDashboardPairing/);
+  assert.doesNotMatch(command, /claimDashboardPairing/);
 
-  // The person is at the browser, so the confirmation happens there: the
-  // terminal states the code and the browser holds the grant until it matches.
-  assert.match(command, /is already open and waiting/);
-  assert.match(command, /after checking it shows this code/);
-  assert.match(command, /responder\.approve\(request\.requestId/);
+  const helper = /async function grantToWaitingBrowser\([\s\S]*?\n\}\n\n/.exec(source)?.[0] ?? '';
+  assert.ok(helper, 'grantToWaitingBrowser should be present');
+  // Joining the mesh takes far longer than a few seconds; a short timeout is
+  // what made this fall through to the code prompt.
+  assert.match(helper, /openAfterMs = 15_000/);
+  assert.match(helper, /timeoutMs = 5 \* 60_000/);
+  // If it does open a page it is the plain one, which announces itself.
+  assert.doesNotMatch(helper, /enrollment\.url/);
+  assert.match(helper, /once it shows this code/);
 });

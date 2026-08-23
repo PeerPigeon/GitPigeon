@@ -687,28 +687,54 @@ async function commandEnroll(args, verbose) {
 }
 
 /**
- * Look briefly for a browser already sitting on the approval screen. It is
- * announcing itself on the discovery room, so there is no reason to open
- * another tab in front of it.
+ * Wait for a browser to announce itself, opening one only if none turns up.
+ *
+ * Joining the mesh and hearing an announcement takes far longer than it feels
+ * like it should, so a short timeout here fell through to the enrolment-link
+ * page every time — the one that asks the person to type a code instead of
+ * confirming one.
  */
-async function findWaitingBrowser(log, timeoutMs = 12_000) {
-  let responder;
+async function grantToWaitingBrowser(root, verbose, log, {
+  openAfterMs = 15_000,
+  timeoutMs = 5 * 60_000,
+} = {}) {
+  const responder = await startDeviceApprovalResponder({ logger: log });
+  const startedAt = Date.now();
+  let opened = false;
   try {
-    responder = await startDeviceApprovalResponder({ logger: log });
-  } catch (error) {
-    log.debug?.(`Pairing discovery unavailable: ${error.message}`);
-    return null;
+    while (Date.now() - startedAt < timeoutMs) {
+      const request = responder.pending().find((value) => value.requesterKind === 'browser');
+      if (request) {
+        const code = await responder.codeFor(request.requestId);
+        const index = await loadMachineIndex({ root });
+        const identity = await loadOrCreateNativeDeviceIdentity({ root });
+        console.log(`\n${request.deviceName} is waiting.\n`);
+        console.log(`  Approve the watcher there once it shows this code: ${code}\n`);
+        // Encrypted to that browser's key. It stores nothing until the person
+        // confirms the code, which is what makes the check mean anything.
+        const { confirmed } = await responder.approve(request.requestId, {
+          index: { indexId: index.indexId, secret: index.secret, publisherId: index.publisherId },
+          nativeDevicePublicKey: identity.publicKey,
+          repositories: [],
+        });
+        if (!confirmed) console.log('That browser has not confirmed yet. Approve it there to finish.');
+        return true;
+      }
+      if (!opened && Date.now() - startedAt >= openAfterMs) {
+        opened = true;
+        const dashboard = process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/';
+        // A plain page, not an enrolment link: it announces itself and is
+        // granted access, so nobody has to type anything.
+        if (openDashboard(dashboard)) console.log(`\nNo browser was open, so GitPigeon opened ${dashboard}.`);
+        else console.log(`\nOpen ${dashboard} to finish pairing this machine.`);
+      }
+      await sleep(500);
+    }
+    console.log('\nNo browser appeared. Run `git pigeon pair` when one is open.');
+    return false;
+  } finally {
+    await responder.close().catch(() => {});
   }
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const request = responder.pending().find((value) => value.requesterKind === 'browser');
-    // The caller keeps the responder: the grant has to go out over the same
-    // session that discovered this browser.
-    if (request) return { responder, request };
-    await sleep(500);
-  }
-  await responder.close().catch(() => {});
-  return null;
 }
 
 async function commandInstall(args, verbose) {
@@ -743,36 +769,7 @@ async function commandInstall(args, verbose) {
     const root = machineIndexRoot();
     await startWatchService({ root, verbose });
     console.log('\nThis is the first GitPigeon device on this machine, so it owns the index.');
-
-    // A browser sitting on the approval screen is announcing itself already.
-    // Opening another tab on top of it helps nobody, so look first.
-    const log = logger(verbose);
-    const found = await findWaitingBrowser(log);
-    if (found) {
-      const { responder, request } = found;
-      try {
-        const code = await responder.codeFor(request.requestId);
-        const index = await loadMachineIndex({ root });
-        const identity = await loadOrCreateNativeDeviceIdentity({ root });
-        console.log(`\n${request.deviceName} is already open and waiting.\n`);
-        console.log(`  Approve the watcher there after checking it shows this code: ${code}\n`);
-        // The grant is encrypted to that browser's key, so only it can read
-        // this. It still waits for the person to confirm the code before using
-        // it, which is what makes the confirmation mean anything.
-        await responder.approve(request.requestId, {
-          index: { indexId: index.indexId, secret: index.secret, publisherId: index.publisherId },
-          nativeDevicePublicKey: identity.publicKey,
-          repositories: [],
-        });
-      } finally {
-        await responder.close().catch(() => {});
-      }
-      return;
-    }
-
-    const pairing = await claimDashboardPairing({ root, force: true });
-    if (!pairing) throw new Error('Could not start a GitPigeon enrollment for this machine');
-    await runDashboardPairing(pairing, verbose);
+    await grantToWaitingBrowser(root, verbose, logger(verbose));
     return;
   }
   await commandEnroll([], verbose);
