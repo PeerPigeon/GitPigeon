@@ -765,16 +765,19 @@ async function commandEnroll(args, verbose) {
 }
 
 /**
- * Print the code each browser should be showing, so the person can compare it
- * without going to find the service log. The background service does the
- * granting; this only reports, and gives up so the terminal comes back.
+ * Print the code any waiting browser should be showing, then hand the terminal
+ * back. Installing is not a foreground task, so this looks briefly rather than
+ * holding the prompt; the background service keeps offering either way.
  */
-async function reportPairingCodes(log, { timeoutMs = 2 * 60_000 } = {}) {
+async function reportPairingCodes(log, { timeoutMs = 12_000 } = {}) {
   let responder;
   try {
     responder = await startDeviceApprovalResponder({ logger: log });
   } catch (error) {
-    log.debug?.(`Pairing discovery unavailable: ${error.message}`);
+    // Never fail silently here: a bare return left the terminal looking as
+    // though nothing had been attempted.
+    console.log(`\nCould not look for a browser to pair: ${error.message}`);
+    console.log('Run `git pigeon pair` once a browser is open.');
     return;
   }
   const seen = new Set();
@@ -787,14 +790,13 @@ async function reportPairingCodes(log, { timeoutMs = 2 * 60_000 } = {}) {
         if (!code) continue;
         seen.add(request.requestId);
         console.log(`\n  ${request.deviceName} is asking to pair.`);
-        console.log(`  Approve it there if it shows this code: ${code}\n`);
+        console.log(`  Approve it there if it shows this code: ${code}`);
       }
+      if (seen.size) return;
       await sleep(500);
     }
-    if (!seen.size) {
-      console.log('\nNo browser asked to pair yet. This machine keeps offering;');
-      console.log('run `git pigeon pair` to see codes again.');
-    }
+    console.log('\nNo browser is waiting. This machine keeps offering in the background;');
+    console.log('open gitpigeon.dev and run `git pigeon pair` to see its code.');
   } finally {
     await responder.close().catch(() => {});
   }

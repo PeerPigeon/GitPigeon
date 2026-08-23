@@ -89,5 +89,11 @@ test('install prints the code the browser should be showing', async () => {
   // It reports only; the background service is what grants, and this must give
   // up so the terminal comes back.
   assert.doesNotMatch(reporter, /responder\.approve\(/);
-  assert.match(reporter, /timeoutMs = 2 \* 60_000/);
+  // Installing is not a foreground task, so this looks briefly and returns
+  // rather than holding the prompt.
+  assert.match(reporter, /timeoutMs = 12_000/);
+  assert.match(reporter, /if \(seen\.size\) return;/);
+  // A bare return in the catch left the terminal looking as though nothing had
+  // been attempted at all.
+  assert.match(reporter, /Could not look for a browser to pair/);
 });
