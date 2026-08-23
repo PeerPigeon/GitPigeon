@@ -50,8 +50,10 @@ export * from './device-approval-mesh.js';
 export * from './lan-enrollment.js';
 export * from './native-install.js';
 export { connectPeerPigeon } from './peerpigeon.js';
+export { ControlServer, CONTROL_PROTOCOL } from './control-server.js';
 export {
   CHANNEL_PROTOCOL,
+  CONTROL_CHANNEL,
   MAX_FRAME_BYTES,
   REALTIME_CHANNEL,
   SNAPSHOT_CHANNEL,

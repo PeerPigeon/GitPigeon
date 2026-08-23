@@ -16,6 +16,11 @@ export const CHANNEL_PROTOCOL = 'gitpigeon/2';
 export const SNAPSHOT_CHANNEL = 'snapshot';
 export const REALTIME_CHANNEL = 'realtime';
 export const TERMINAL_CHANNEL = 'terminal';
+export const CONTROL_CHANNEL = 'control';
+
+// Reserved by the envelope. A payload must not use these names; they identify
+// where a frame belongs and are written last so they cannot be overwritten.
+export const RESERVED_FRAME_FIELDS = Object.freeze(['protocol', 'repositoryId', 'channel']);
 
 // PeerPigeon does not fragment a gossip payload, so a frame has to fit one
 // data-channel message. Snapshot payloads are already split into manifest
@@ -28,11 +33,15 @@ export function repositoryCrypto(repositoryId, secret) {
 }
 
 function encode(repositoryId, channel, frame) {
+  // Envelope fields are written last so a payload cannot overwrite them. A
+  // control frame naming a repository carries its own `repositoryId`, and
+  // spreading the payload over the envelope replaced the routing identity with
+  // it, so the receiver dropped the frame as belonging to somewhere else.
   const plaintext = JSON.stringify({
+    ...frame,
     protocol: CHANNEL_PROTOCOL,
     repositoryId,
     channel,
-    ...frame,
   });
   if (plaintext.length > MAX_FRAME_BYTES) {
     throw new Error(`GitPigeon ${channel} frame is too large for one PeerPigeon message`);

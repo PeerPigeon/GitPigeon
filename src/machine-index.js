@@ -383,6 +383,23 @@ export async function claimDashboardPairing({
   });
 }
 
+/**
+ * Replace the index secret. This is the only real revocation available: the
+ * capability a paired device or browser holds is this secret, so removing an
+ * entry from a roster hides it without taking anything away. Every remaining
+ * peer must pair again afterwards.
+ */
+export async function rotateMachineIndexSecret({ root = machineIndexRoot() } = {}) {
+  return await withLock(root, async () => {
+    const value = await readState(root);
+    value.secret = randomBytes(32).toString('base64url');
+    value.pairingMode = 'secure';
+    value.pairingComplete = false;
+    await writeState(root, value);
+    return value;
+  });
+}
+
 export async function completeDashboardPairing(index, { root = machineIndexRoot() } = {}) {
   return await withLock(root, async () => {
     const value = await readState(root);

@@ -36,11 +36,13 @@ export class FakeNode extends EventEmitter {
       encrypted: true,
       local: false,
       fromPeerId,
+      // Envelope fields last, matching encode() in src/channel.js: a payload
+      // must not be able to overwrite the routing identity.
       data: JSON.stringify({
+        ...frame,
         protocol: CHANNEL_PROTOCOL,
         repositoryId,
         channel,
-        ...frame,
       }),
     });
   }

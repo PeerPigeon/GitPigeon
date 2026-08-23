@@ -43,6 +43,7 @@ import {
 import { startDeviceApprovalResponder } from './device-approval-mesh.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
 import { installNativeIntegration } from './native-install.js';
+import { ControlServer } from './control-server.js';
 import { RepositorySynchronizer } from './protocol.js';
 import { TerminalServer } from './terminal-server.js';
 import { RealtimeWorkspaceServer } from './realtime-server.js';
@@ -319,6 +320,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let reconciling = false;
   let automaticUpdates;
   let installedUpdate;
+  let controlServer;
 
   const publishServiceRepositoryState = async () => {
     if (!control) return;
@@ -446,6 +448,15 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       },
     });
     await reconcile();
+    // Paired peers can remove a repository or rotate the index secret.
+    controlServer = new ControlServer({
+      node: machineIndex.node,
+      indexId: machineIndex.index.indexId,
+      root,
+      logger: log,
+      onChanged: () => reconcile(),
+    });
+    controlServer.start();
     try {
       lanApprovals = await startLanApprovalService(machineIndex, {
         logger: log,
@@ -485,6 +496,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     while (reconciling) await sleep(10);
     for (const record of sessions.values()) await stopSession(record);
     await markMachinePigeonsStopped({ root, pid: process.pid });
+    controlServer?.stop();
     if (lanApprovals) await lanApprovals.close();
     if (machineIndex) await machineIndex.close();
     if (control) await control.close();
