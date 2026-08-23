@@ -630,7 +630,19 @@ async function discoverOrInitialize(cwd, directory) {
     return await GitRepository.init(target);
   }
   try {
-    return await GitRepository.discover(cwd);
+    const repository = await GitRepository.discover(cwd);
+    // Discovery walks upward, so running init in a plain folder that happens
+    // to live inside some other repository silently registered that whole
+    // ancestor — a Pigeon named after a directory the person never mentioned.
+    // Which repository was meant is not guessable; say the options instead.
+    if (path.resolve(repository.root) !== path.resolve(cwd)) {
+      throw new Error([
+        `This directory is not the root of a Git repository, but it is inside one: ${repository.root}`,
+        `  To sync that repository, run \`git pigeon init\` from ${repository.root}`,
+        '  To make this directory its own repository, run `git init` here first.',
+      ].join('\n'));
+    }
+    return repository;
   } catch (error) {
     if (!String(error.message).includes('Not a Git repository')) throw error;
     return await GitRepository.init(cwd);

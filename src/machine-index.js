@@ -3,6 +3,10 @@ import { spawn } from 'node:child_process';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 import process from 'node:process';
 import { deviceHostName } from './device-name.js';
 import { installNativeStorage } from './native-storage.js';
@@ -26,6 +30,20 @@ const LOCK_STALE_MS = 10_000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Whether the repository has no commits at all. An empty repository never
+ * produces a snapshot, so without saying so the browser waits for a bundle
+ * that cannot exist and spins forever on a folder someone just created.
+ */
+async function repositoryIsEmpty(repository) {
+  try {
+    await execFileAsync('git', ['-C', repository, 'rev-parse', '-q', '--verify', 'HEAD^{commit}']);
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 async function repositorySnapshotHint(entry, serviceInstanceId, machineIndexId) {
@@ -324,10 +342,12 @@ export function directoryValue(index, entries, now = Date.now(), serviceInstance
         ...(active && serviceInstanceId ? { watcherServiceId: serviceInstanceId } : {}),
         ...(entry.signalingServer ? { signalingServer: entry.signalingServer } : {}),
         ...(entry.snapshot ? { snapshot: entry.snapshot } : {}),
+        ...(entry.empty ? { empty: true } : {}),
       });
     } else {
       current.watcherCount += active;
       if (!current.snapshot && entry.snapshot) current.snapshot = entry.snapshot;
+      if (entry.snapshot || !entry.empty) delete current.empty;
     }
   }
   return {
@@ -593,10 +613,16 @@ async function connectMachineDirectory(index, logger = {}, {
         lastRosterReconcileAt = Date.now();
       }
       const current = await loadMachineIndex({ root });
-      const entries = await Promise.all(current.entries.map(async (entry) => ({
-        ...entry,
-        snapshot: await repositorySnapshotHint(entry, serviceInstanceId, current.indexId),
-      })));
+      const entries = await Promise.all(current.entries.map(async (entry) => {
+        const snapshot = await repositorySnapshotHint(entry, serviceInstanceId, current.indexId);
+        return {
+          ...entry,
+          snapshot,
+          // Only checked while there is no snapshot: that is the window in
+          // which the browser would otherwise wait forever.
+          empty: snapshot ? false : await repositoryIsEmpty(entry.repository),
+        };
+      }));
       const value = publisherDirectoryValue(
         current,
         entries,
