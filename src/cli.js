@@ -723,6 +723,9 @@ async function grantToWaitingBrowser(root, verbose, log, {
         const { confirmed } = await responder.approve(request.requestId, {
           index: { indexId: index.indexId, secret: index.secret, publisherId: index.publisherId },
           nativeDevicePublicKey: identity.publicKey,
+          // Several unconfigured machines can offer at once. Without a name
+          // the browser has nothing to choose between them by.
+          deviceName: deviceHostName(),
           repositories: [],
         });
         // Record it, or every later command keeps behaving as though no
@@ -1039,6 +1042,7 @@ async function commandPair(args, verbose) {
           publisherId: index.publisherId,
         },
         nativeDevicePublicKey: identity.publicKey,
+        deviceName: deviceHostName(),
         repositories,
       });
       if (!confirmed) {
