@@ -43,6 +43,14 @@ test('a first install never asks anyone to type a code', async () => {
   assert.doesNotMatch(command, /runDashboardPairing/);
   assert.doesNotMatch(command, /claimDashboardPairing/);
 
+  // An unconfigured machine cannot tell whether it is the first device or one
+  // joining an existing setup, so it does both and takes whichever answers.
+  // Without announcing, a second machine would quietly start its own index
+  // instead of joining, and no approved browser would ever prompt.
+  assert.match(command, /requestLanDeviceApproval\(identity/);
+  assert.match(command, /adoptMachineIndexCapability\(grant\.index, \{ root \}\)/);
+  assert.match(command, /Promise\.race/);
+
   const helper = /async function grantToWaitingBrowser\([\s\S]*?\n\}\n\n/.exec(source)?.[0] ?? '';
   assert.ok(helper, 'grantToWaitingBrowser should be present');
   // Joining the mesh takes far longer than a few seconds; a short timeout is

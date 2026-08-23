@@ -767,9 +767,40 @@ async function commandInstall(args, verbose) {
     || (!existing.pairingComplete && (existing.entries?.length ?? 0) === 0);
   if (!enroll && unconfigured) {
     const root = machineIndexRoot();
+    const log = logger(verbose);
     await startWatchService({ root, verbose });
-    console.log('\nThis is the first GitPigeon device on this machine, so it owns the index.');
-    await grantToWaitingBrowser(root, verbose, logger(verbose));
+
+    // Two things can be true of an unconfigured machine and it cannot tell
+    // which from here: it may be the first device, or another device joining a
+    // setup that already exists. So it does both and takes whichever answers.
+    //
+    // Announcing is what makes an approved browser elsewhere raise its
+    // approval prompt; without it a second machine on the network would
+    // silently start an index of its own instead of joining yours.
+    const identity = await loadOrCreateNativeDeviceIdentity({ root });
+    const joining = requestLanDeviceApproval(identity, {
+      logger: log,
+      onRequest: () => console.log('Announced this machine to any approved GitPigeon browser.'),
+    }).then((value) => ({ kind: 'joined', value }), (error) => {
+      log.debug?.(`Enrolment discovery ended: ${error.message}`);
+      return null;
+    });
+    const owning = grantToWaitingBrowser(root, verbose, log)
+      .then((granted) => granted ? { kind: 'owned' } : null, () => null);
+
+    const [first] = await Promise.all([Promise.race([joining, owning].map((p) => p.then((v) => v ?? new Promise(() => {}))))]);
+    if (first?.kind === 'joined') {
+      const { request, grant } = first.value;
+      if (grant.requestId !== request.requestId || !grant.index) {
+        throw new Error('The approved device grant did not contain a GitPigeon index capability');
+      }
+      await stopWatchService(root);
+      const index = await adoptMachineIndexCapability(grant.index, { root });
+      const added = await materializeGrantedRepositories(grant.repositories, { root });
+      await startWatchService({ root, verbose });
+      if (added.length) console.log(`Added ${added.length} shared ${added.length === 1 ? 'repository' : 'repositories'}.`);
+      console.log(`This device joined GitPigeon index ${index.indexId.slice(0, 10)}.`);
+    }
     return;
   }
   await commandEnroll([], verbose);
