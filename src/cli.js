@@ -60,33 +60,32 @@ Getting started
   3. In any repository you want to sync, run \`git pigeon init\`.
 
 Pair a browser or device
-  git pigeon pair                 Approve whatever is waiting, and print a
-                                  one-time link for a device elsewhere
-  git pigeon pair LINK            Join an index from a gitpigeon://pair link
-  git pigeon pair --rotate        Replace the index secret first; every paired
-                                  device and browser must pair again
+  git pigeon pair                       Approve whatever is waiting, and
+                                        print a link for a device elsewhere
+  git pigeon pair LINK                  Join an index from a pairing link
+  git pigeon pair --rotate              Replace the index secret first
+                                        (everything paired pairs again)
 
 Repositories
-  git pigeon init [INVITE] [DIR]  Start syncing a repository
-  git pigeon unwatch [REPO]       Stop syncing one
-  git pigeon list                 Show what this machine syncs
-  git pigeon invite               Print an invite for one repository
-  git pigeon sync [--wait D] [--force]
-                                  Sync once and exit
+  git pigeon init [INVITE] [DIR]        Start syncing a repository
+  git pigeon unwatch [REPO]             Stop syncing one
+  git pigeon list                       Show what this machine syncs
+  git pigeon invite                     Print an invite for one repository
+  git pigeon sync [--wait D] [--force]  Sync once and exit
 
 Private files
-  git pigeon track FILE...        Sync a file without committing it to Git
-  git pigeon untrack FILE...
-  git pigeon tracked
+  git pigeon track FILE...              Sync a file, never committing it
+  git pigeon untrack FILE...            Stop syncing it privately
+  git pigeon tracked                    List privately synced files
 
 Background service
-  git pigeon start [--poll D]
-  git pigeon restart [--poll D]
-  git pigeon stop
+  git pigeon start [--poll D]           Start the watcher
+  git pigeon restart [--poll D]         Restart it
+  git pigeon stop                       Stop it
 
 Checking on things
-  git pigeon status [--json]
-  git pigeon doctor
+  git pigeon status [--json]            Show this repository's sync state
+  git pigeon doctor                     Check this machine's setup
 
 Durations accept ms, s, or m (for example: 500ms, 10s, 2m).
 Because the executable is named git-pigeon, both \`git pigeon\` and
