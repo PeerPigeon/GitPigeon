@@ -41,7 +41,7 @@ import {
   parseNativeCloneUrl,
   validateNativeClonePayload,
 } from './device-grants.js';
-import { startDeviceApprovalResponder } from './device-approval-mesh.js';
+import { startDeviceApprovalResponder, startWatcherOffer } from './device-approval-mesh.js';
 import { loadPairingKeyPair, localPairingCode } from './pairing-identity.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
 import { installNativeIntegration } from './native-install.js';
@@ -317,20 +317,31 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
  * exited. The watcher is the long-lived thing, so it is what listens.
  */
 async function startPairingService(root, log) {
+  const keyPair = await loadPairingKeyPair(root);
+  const adopt = async (capability) => {
+    if (!capability?.index?.indexId) return;
+    const current = await loadMachineIndex({ root });
+    if (current.indexId === capability.index.indexId) return;
+    await adoptMachineIndexCapability(capability.index, { root });
+    log.info?.(`Joined GitPigeon index ${String(capability.index.indexId).slice(0, 10)}; restarting`);
+    await stopWatchService(root);
+    await startWatchService({ root });
+  };
+  // Announce this machine for as long as the watcher runs, so a browser that
+  // has already paired with one machine still sees the next one and can open
+  // an approval prompt for it.
+  const offer = await startWatcherOffer({
+    deviceName: deviceHostName(),
+    keyPair,
+    logger: log,
+    onGrant: adopt,
+  });
   const responder = await startDeviceApprovalResponder({
     logger: log,
-    keyPair: await loadPairingKeyPair(root),
+    keyPair,
     // A browser this machine offered itself to can ask it to join the index it
     // settled on, which is how several machines end up together.
-    onAdopt: async (capability) => {
-      if (!capability?.index?.indexId) return;
-      const current = await loadMachineIndex({ root });
-      if (current.indexId === capability.index.indexId) return;
-      await adoptMachineIndexCapability(capability.index, { root });
-      log.info?.(`Joined GitPigeon index ${String(capability.index.indexId).slice(0, 10)}; restarting`);
-      await stopWatchService(root);
-      await startWatchService({ root });
-    },
+    onAdopt: adopt,
   });
   const offered = new Set();
   let closed = false;
@@ -370,6 +381,7 @@ async function startPairingService(root, log) {
       if (closed) return;
       closed = true;
       clearInterval(timer);
+      await offer.close().catch(() => {});
       await responder.close().catch(() => {});
     },
   };

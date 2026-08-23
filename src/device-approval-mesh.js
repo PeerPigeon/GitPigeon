@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { pairingCode } from './pairing-identity.js';
 import { installNativeWebRTC } from './webrtc.js';
 
@@ -280,6 +281,82 @@ export async function startDeviceApprovalResponder({
       if (closed) return;
       closed = true;
       node.off('message', receive);
+      await node.destroy();
+    },
+  };
+}
+
+/**
+ * Offer this machine to every browser, for as long as the watcher runs.
+ *
+ * Nothing used to do this. The service only ever listened for browsers asking
+ * to pair, and only an unpaired browser asks — so a browser that had already
+ * paired with one machine could never see a second machine, and no approval
+ * modal could open for it. The watcher is the long-lived side, so it announces.
+ *
+ * The announcement is minted fresh each round rather than rebroadcast. A
+ * pairing request carries a five minute expiry and approvers reject stale ones,
+ * so repeating one object made a watcher visible only for its first few
+ * minutes, then silently invisible.
+ *
+ * The request id is derived from this machine's own key so it stays the same
+ * across restarts and browsers list one row per machine — not a new row every
+ * announcement, and not one row for several machines.
+ */
+export async function startWatcherOffer({
+  deviceName,
+  keyPair,
+  logger = {},
+  onGrant = () => {},
+  nodeFactory,
+} = {}) {
+  if (!keyPair?.pub) throw new Error('A watcher offer requires this machine\'s pairing key pair');
+  const node = await createNode(nodeFactory, keyPair);
+  const requestId = createHash('sha256')
+    .update('gitpigeon:offer-id:v1\0')
+    .update(String(keyPair.pub))
+    .digest('hex')
+    .slice(0, 32);
+  let closed = false;
+
+  const receive = (message) => {
+    if (closed || message?.local || !message?.encrypted) return;
+    const value = decode(message.data);
+    if (!value || value.protocol !== MESH_PAIRING_PROTOCOL || value.kind !== 'grant') return;
+    if (value.requestId !== requestId) return;
+    // PeerPigeon decrypted this to our key, so no second unwrap is needed.
+    Promise.resolve(onGrant(value.capability))
+      .catch((error) => logger.debug?.(`Pairing grant: ${error.message}`));
+  };
+  const announce = () => {
+    if (closed) return;
+    try {
+      node.broadcast(createMeshPairingRequest({ requestId, deviceName }));
+    } catch (error) {
+      logger.debug?.(`Watcher offer: ${error.message}`);
+    }
+  };
+
+  node.on('message', receive);
+  node.on('peerConnected', announce);
+  node.on('error', (error) => logger.debug?.(`Watcher offer: ${error?.message ?? error}`));
+  await node.start();
+  announce();
+  const timer = setInterval(announce, ANNOUNCE_INTERVAL_MS);
+  timer.unref?.();
+
+  return {
+    node,
+    requestId,
+    code() {
+      return pairingCode(keyPair.pub);
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      clearInterval(timer);
+      node.off('message', receive);
+      node.off('peerConnected', announce);
       await node.destroy();
     },
   };

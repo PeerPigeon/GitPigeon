@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { startWatcherOffer } from '../src/device-approval-mesh.js';
 import { pairingCode } from '../src/pairing-identity.js';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
@@ -12,13 +13,14 @@ class FakeApprovalNode extends EventEmitter {
     super();
     this.options = options;
     this.direct = [];
+    this.broadcasts = [];
     this.destroyed = false;
     this.keys = new Map();
     this.mesh = { on: () => {} };
   }
 
   async start() {}
-  broadcast() {}
+  broadcast(value) { this.broadcasts.push(value); }
   getKeyPair() { return { pub: 'local-public-key' }; }
   getPublicKey(peerId) { return this.keys.get(peerId) ?? null; }
   async waitForPeerKey(peerId) {
@@ -181,4 +183,39 @@ test('pair never opens a page of its own', async () => {
   const dashboardCall = command.indexOf('commandPairDashboard');
   const dashboardFlag = command.indexOf("takeFlag(args, '--dashboard')");
   assert.ok(dashboardFlag !== -1 && dashboardCall !== -1 && dashboardFlag < dashboardCall);
+});
+
+test('the watcher offers itself to browsers that are already paired', async (t) => {
+  let node;
+  const offer = await startWatcherOffer({
+    deviceName: 'Dans-MacBook-Air',
+    keyPair: { pub: 'air-public-key', priv: 'p', epub: 'e', epriv: 'ep' },
+    nodeFactory: (options) => { node = new FakeApprovalNode(options); return node; },
+  });
+  t.after(() => offer.close());
+
+  // Nothing used to announce. The service only listened for browsers asking to
+  // pair, and only an unpaired browser asks — so installing a second machine
+  // while a browser was already paired opened no approval prompt at all.
+  const announced = node.broadcasts.filter((value) => value?.kind === 'request');
+  assert.ok(announced.length, 'the watcher should announce itself');
+  assert.equal(announced[0].requesterKind, 'native');
+  assert.equal(announced[0].deviceName, 'Dans-MacBook-Air');
+
+  // The digits a browser derives from this machine's key are the ones it
+  // printed when it was installed.
+  assert.equal(offer.code(), pairingCode('air-public-key'));
+
+  // A pairing request expires, and approvers reject stale ones, so rebroadcast
+  // of one fixed object made a machine visible only for its first few minutes.
+  const first = announced[0];
+  node.broadcasts.length = 0;
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  node.emit('peerConnected', { peerId: 'browser' });
+  const again = node.broadcasts.filter((value) => value?.kind === 'request');
+  assert.ok(again.length, 'the watcher should keep announcing');
+  assert.notEqual(again[0].issuedAt + again[0].expiresAt, first.issuedAt + first.expiresAt);
+
+  // Restarting must not change what the browser is asked to compare against.
+  assert.equal(again[0].requestId, first.requestId);
 });
