@@ -80,6 +80,21 @@ test('start launches the watcher on an empty index so a paired machine is a peer
   assert.equal(started, true);
 });
 
+test('restart stops the service even when the index is empty', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-restart-empty-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const order = [];
+  // Without this, `git pigeon restart` reported success on an empty index
+  // without restarting, so a service holding stale state kept running.
+  await commandStart([], {
+    restart: true,
+    indexRoot: path.join(root, 'state'),
+    stopService: async () => { order.push('stop'); },
+    startService: async () => { order.push('start'); return { started: true, pid: 4242 }; },
+  });
+  assert.deepEqual(order, ['stop', 'start']);
+});
+
 test('restart replaces the watcher and reports the completed restart', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-restart-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));

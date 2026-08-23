@@ -1023,6 +1023,10 @@ export async function commandStart(args, {
   // on an empty index left a freshly paired machine invisible with no way to
   // confirm it, short of registering a repository first.
   if (!repositories.length) {
+    // `restart` has to stop the running service here too. Skipping it meant
+    // `git pigeon restart` reported success on an empty index without
+    // restarting anything, so a service holding stale state kept running.
+    if (restart) await stopService(root);
     const empty = await startService({ root, pollMs, verbose });
     console.log(empty.started
       ? `GitPigeon started the machine-wide background service (PID ${empty.pid}) with no repositories yet.`
