@@ -446,6 +446,11 @@ export class RepositorySynchronizer {
       if (this.subscribedHeads.has(deviceId)) continue;
       this.subscribedHeads.add(deviceId);
       this.unsubscribe.push(this.storage.subscribeKey('public', headKey(this.config.repositoryId, deviceId)));
+      // Mirror every sibling's presence. Presence replication is pull-driven:
+      // without this, only browsers subscribed, and only directly from the
+      // publishing machine — over whatever link happens to be flakiest. A
+      // watcher that mirrors its siblings makes every solid link a source.
+      this.unsubscribe.push(this.storage.subscribeKey('public', presenceKey(this.config.repositoryId, deviceId)));
     }
   }
 
