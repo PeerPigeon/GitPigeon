@@ -111,3 +111,58 @@ test('a watcher offers its build and a peer pulls, verifies and installs it', as
   await settle();
   assert.equal(fetcherNode.direct.length, before);
 });
+
+test('a dropped chunk is re-requested instead of wedging the fetch', async (t) => {
+  const offererRoot = await mkdtemp(path.join(tmpdir(), 'gitpigeon-drop-a-'));
+  const fetcherRoot = await mkdtemp(path.join(tmpdir(), 'gitpigeon-drop-b-'));
+  t.after(() => Promise.all([
+    rm(offererRoot, { recursive: true, force: true }),
+    rm(fetcherRoot, { recursive: true, force: true }),
+  ]));
+  const executable = path.join(offererRoot, 'git-pigeon');
+  await writeFile(executable, `#!/bin/sh\nexit 0\n${randomBytes(400 * 1024).toString('hex')}\n`, { mode: 0o755 });
+
+  const offererNode = new FakeNode();
+  const fetcherNode = new FakeNode();
+  const offerer = startPeerUpdates({
+    node: offererNode, root: offererRoot, currentVersion: '9.9.9',
+    executable, standalone: true, platform: 'darwin', arch: 'arm64',
+  });
+  let installed = null;
+  const fetcher = startPeerUpdates({
+    node: fetcherNode, root: fetcherRoot, currentVersion: '1.0.0',
+    standalone: true, platform: 'darwin', arch: 'arm64',
+    onUpdate: (update) => { installed = update; },
+  });
+  t.after(() => Promise.all([offerer.stop(), fetcher.stop()]));
+  await settle();
+  const offer = offererNode.broadcasts.find((value) => value?.kind === 'offer');
+  fetcherNode.emit('message', { local: false, encrypted: true, fromPeerId: 'offerer', data: JSON.stringify(offer) });
+  await settle();
+
+  // DROP the first request outright — the wedge case: nothing arrives, so the
+  // old code never asked again and the machine-wide flag stayed locked.
+  const dropped = fetcherNode.direct.shift();
+  assert.ok(dropped, 'a first chunk request was sent');
+
+  // The retry timer must re-ask within a few seconds; bridge everything from
+  // then on.
+  const until = Date.now() + 15_000;
+  while (Date.now() < until && !installed) {
+    const request = fetcherNode.direct.shift();
+    if (request) {
+      offererNode.emit('message', { local: false, encrypted: true, fromPeerId: 'fetcher', data: JSON.stringify(request.value) });
+      await settle();
+      continue;
+    }
+    const chunk = offererNode.direct.shift();
+    if (chunk) {
+      fetcherNode.emit('message', { local: false, encrypted: true, fromPeerId: 'offerer', data: JSON.stringify(chunk.value) });
+      await settle();
+      continue;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  assert.ok(installed, 'the fetch recovered from the dropped request');
+  assert.equal(installed.version, '9.9.9');
+});

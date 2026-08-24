@@ -22,9 +22,10 @@ const execFileAsync = promisify(execFile);
  */
 export const PEER_UPDATE_PROTOCOL = 'gitpigeon-peer-update/1';
 const OFFER_INTERVAL_MS = 60_000;
-const CHUNK_BYTES = 96 * 1024;
+const CHUNK_BYTES = 192 * 1024;
 const MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024;
-const FETCH_TIMEOUT_MS = 5 * 60_000;
+const FETCH_STALL_MS = 45_000;
+const FETCH_RETRY_MS = 2_500;
 const VERSION = /^\d+\.\d+\.\d+$/;
 const DIGEST = /^[a-f0-9]{64}$/;
 
@@ -112,8 +113,26 @@ export function startPeerUpdates({
       handle,
       offset: 0,
       startedAt: Date.now(),
+      lastChunkAt: Date.now(),
     };
     logger.info?.(`Fetching GitPigeon ${version} from a peer on the mesh`);
+    // A lost chunk must never wedge the fetch: the next chunk was only ever
+    // requested on receiving the previous one, so one dropped message
+    // stalled the transfer forever — and the machine-wide fetch flag stayed
+    // locked, silently ignoring every later offer. Re-ask on silence, give
+    // up only after a real stall.
+    fetching.retryTimer = setInterval(() => {
+      const job = fetching;
+      if (!job) return;
+      if (Date.now() - job.lastChunkAt > FETCH_STALL_MS) {
+        abandonFetch('stalled: no chunk for 45s').catch(() => {});
+        return;
+      }
+      if (Date.now() - job.lastChunkAt > FETCH_RETRY_MS) {
+        requestChunk().catch(() => {});
+      }
+    }, FETCH_RETRY_MS);
+    fetching.retryTimer.unref?.();
     await requestChunk();
   };
 
@@ -129,6 +148,7 @@ export function startPeerUpdates({
 
   const abandonFetch = async (reason) => {
     if (!fetching) return;
+    if (fetching.retryTimer) clearInterval(fetching.retryTimer);
     logger.info?.(`Peer update abandoned: ${reason}`);
     await fetching.handle.close().catch(() => {});
     await rm(fetching.temporary, { force: true }).catch(() => {});
@@ -138,6 +158,7 @@ export function startPeerUpdates({
 
   const finishFetch = async () => {
     const job = fetching;
+    if (job.retryTimer) clearInterval(job.retryTimer);
     fetching = null;
     activeFetchGlobal = false;
     await job.handle.close();
@@ -214,10 +235,7 @@ export function startPeerUpdates({
       if (!fetching || !message.encrypted || peerId !== fetching.peerId) return;
       if (value.version !== fetching.version || Number(value.offset) !== fetching.offset) return;
       (async () => {
-        if (Date.now() - fetching.startedAt > FETCH_TIMEOUT_MS) {
-          await abandonFetch('timed out');
-          return;
-        }
+        fetching.lastChunkAt = Date.now();
         const data = Buffer.from(String(value.payload ?? ''), 'base64');
         if (fetching.offset + data.length > fetching.size) {
           await abandonFetch('peer sent more than it offered');
@@ -254,6 +272,9 @@ export function startPeerUpdates({
     .catch((error) => logger.debug?.(`Peer update describe: ${error?.message ?? error}`));
 
   return {
+    isFetching() {
+      return fetching !== null;
+    },
     async stop() {
       if (closed) return;
       closed = true;
@@ -270,13 +291,13 @@ export function startPeerUpdates({
  * `git pigeon update` — the same offer/fetch/verify path the running service
  * uses continuously, run for a bounded window on demand.
  */
-export async function pullPeerUpdateOnce({ node, root, currentVersion, standalone, logger = {}, timeoutMs = 30_000 } = {}) {
+export async function pullPeerUpdateOnce({ node, root, currentVersion, standalone, logger = {}, timeoutMs = 60_000 } = {}) {
   return await new Promise((resolve) => {
     let settled = false;
     const finish = (value) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearInterval(timer);
       updater.stop().catch(() => {});
       resolve(value);
     };
@@ -288,7 +309,14 @@ export async function pullPeerUpdateOnce({ node, root, currentVersion, standalon
       logger,
       onUpdate: (update) => finish({ updated: true, ...update }),
     });
-    const timer = setTimeout(() => finish({ updated: false, timedOut: true }), timeoutMs);
+    // The deadline applies to finding an offer, never to a transfer that is
+    // making progress — a large executable takes minutes, and giving up at
+    // the deadline mid-download abandoned working fetches.
+    const deadline = Date.now() + timeoutMs;
+    const timer = setInterval(() => {
+      if (updater.isFetching()) return;
+      if (Date.now() >= deadline) finish({ updated: false, timedOut: true });
+    }, 1_000);
     timer.unref?.();
   });
 }
