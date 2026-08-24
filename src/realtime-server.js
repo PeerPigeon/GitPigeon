@@ -37,10 +37,11 @@ function validFrame(frame, repositoryId) {
 const PRESENCE_INTERVAL_MS = 10_000;
 const PRESENCE_FRESH_MS = 30_000;
 const SEED_RETRY_MS = 2_000;
-const SEED_FALLBACK_MS = 10_000;
+const SEED_FALLBACK_MS = 12_000;
+const SEED_ELECTED_FALLBACK_MS = 6_000;
 
 export class RealtimeWorkspaceServer {
-  constructor({ node, repository, secret, repositoryId, deviceId = null, logger = {}, onFileWritten = null }) {
+  constructor({ node, repository, secret, repositoryId, deviceId = null, logger = {}, onFileWritten = null, seedFallbackMs = SEED_FALLBACK_MS, seedElectedFallbackMs = SEED_ELECTED_FALLBACK_MS, seedRetryMs = SEED_RETRY_MS }) {
     this.node = node;
     this.repository = repository;
     this.deviceId = deviceId ? String(deviceId) : null;
@@ -52,6 +53,9 @@ export class RealtimeWorkspaceServer {
     this.liveWorkspace = new LiveWorkspace(repository);
     this.documents = new Map();
     this.lastWriteError = null;
+    this.seedFallbackMs = seedFallbackMs;
+    this.seedElectedFallbackMs = seedElectedFallbackMs;
+    this.seedRetryMs = seedRetryMs;
     this.assemblies = new Map();
     this.started = false;
     this.unsubscribe = null;
@@ -351,6 +355,7 @@ export class RealtimeWorkspaceServer {
       lastWritten: null,
       writeHistory: [],
       lastActivityAt: Date.now(),
+      pendingSyncs: [],
     };
     // Exactly one watcher seeds a new document: the smallest live device id
     // on this room. Every watcher seeding from its own file copy was the
@@ -376,32 +381,37 @@ export class RealtimeWorkspaceServer {
       // echo must be recognized like any other.
       state.writeHistory.push(createHash('sha256').update(content).digest('hex'));
       state.seeded = true;
+      this.#flushPendingSyncs(state);
     };
-    if (!this.#deferToPeerSeeder()) {
-      await seedFromFile();
-    } else {
-      state.seeded = false;
-      const startedAt = Date.now();
-      const ask = () => {
-        this.#send({ ...frame, kind: 'sync-request', payload: Y.encodeStateVector(doc) }).catch(() => {});
-      };
+    // NOBODY seeds from disk while the mesh already carries the document.
+    // A restarted watcher seeding from its file while a browser still held
+    // the living document unioned the two — same content, different ops —
+    // doubling the file on every restart: 1, 2, 4, 8. Everyone asks first;
+    // browsers answer sync requests too. Only when nobody answers does the
+    // elected watcher (smallest live device) seed from disk, with the
+    // non-elected fallback behind it in case the elected one is gone.
+    state.seeded = false;
+    const startedAt = Date.now();
+    const fallbackAfter = this.#deferToPeerSeeder() ? this.seedFallbackMs : this.seedElectedFallbackMs;
+    const ask = () => {
+      this.#send({ ...frame, kind: 'sync-request', payload: Y.encodeStateVector(doc) }).catch(() => {});
+    };
+    ask();
+    state.seedTimer = setInterval(() => {
+      if (state.seeded) {
+        clearInterval(state.seedTimer);
+        state.seedTimer = null;
+        return;
+      }
+      if (Date.now() - startedAt >= fallbackAfter) {
+        clearInterval(state.seedTimer);
+        state.seedTimer = null;
+        seedFromFile().catch((error) => this.logger.debug?.(`Realtime seed fallback: ${error.message}`));
+        return;
+      }
       ask();
-      state.seedTimer = setInterval(() => {
-        if (state.seeded) {
-          clearInterval(state.seedTimer);
-          state.seedTimer = null;
-          return;
-        }
-        if (Date.now() - startedAt >= SEED_FALLBACK_MS) {
-          clearInterval(state.seedTimer);
-          state.seedTimer = null;
-          seedFromFile().catch((error) => this.logger.debug?.(`Realtime seed fallback: ${error.message}`));
-          return;
-        }
-        ask();
-      }, SEED_RETRY_MS);
-      state.seedTimer.unref?.();
-    }
+    }, Math.min(this.seedRetryMs, fallbackAfter));
+    state.seedTimer.unref?.();
     doc.on('update', (update, origin) => {
       if (origin === 'remote' || origin === 'seed') return;
       this.#send({ ...frame, kind: 'update', payload: update }).catch(() => {});
@@ -410,14 +420,26 @@ export class RealtimeWorkspaceServer {
     return state;
   }
 
+
+  #flushPendingSyncs(state) {
+    const pending = state.pendingSyncs.splice(0);
+    for (const { peerId, frame } of pending) {
+      this.#send({ ...frame, kind: 'sync-response', payload: Y.encodeStateAsUpdate(state.doc, frame.payload) }, peerId).catch(() => {});
+    }
+  }
+
   async #receive(peerId, frame) {
     const state = await this.#document(frame);
     if (!state) return;
     state.lastActivityAt = Date.now();
     if (frame.kind === 'sync-request') {
       // A document still waiting to adopt the seeder's content has nothing
-      // authoritative to answer with.
-      if (!state.seeded) return;
+      // authoritative to answer with yet — but the asker must not be left
+      // hanging: answer as soon as a seed lands.
+      if (!state.seeded) {
+        state.pendingSyncs.push({ peerId, frame });
+        return;
+      }
       await this.#send({ ...frame, kind: 'sync-response', payload: Y.encodeStateAsUpdate(state.doc, frame.payload) }, peerId);
       return;
     }
@@ -433,6 +455,7 @@ export class RealtimeWorkspaceServer {
         clearInterval(state.seedTimer);
         state.seedTimer = null;
       }
+      this.#flushPendingSyncs(state);
     }
     if (!state.seeded) return;
     await this.#write(state);

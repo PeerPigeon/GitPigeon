@@ -11,6 +11,7 @@ import { RealtimeWorkspaceServer } from '../src/realtime-server.js';
 import { FakeNode } from './fake-node.js';
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 80));
+const settleSeed = () => new Promise((resolve) => setTimeout(resolve, 260));
 
 test('watcher seeds from the file and merges edits without stomping', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-realtime-server-'));
@@ -19,7 +20,7 @@ test('watcher seeds from the file and merges edits without stomping', async (t) 
   const node = new FakeNode();
   const repositoryId = 'a'.repeat(64);
   const secret = 'realtime-workspace-secret';
-  const server = new RealtimeWorkspaceServer({ node, repository, repositoryId, secret });
+  const server = new RealtimeWorkspaceServer({ node, repository, repositoryId, secret, seedElectedFallbackMs: 120, seedFallbackMs: 240, seedRetryMs: 40 });
   await server.start();
   t.after(() => server.stop());
   await mkdir(path.join(root, 'src'), { recursive: true });
@@ -49,7 +50,7 @@ test('watcher seeds from the file and merges edits without stomping', async (t) 
     ...base('sync-request'),
     payload: Buffer.from(Y.encodeStateVector(browser)).toString('base64'),
   });
-  await settle();
+  await settleSeed();
   const responses = node.directFrames(REALTIME_CHANNEL).filter((value) => value.kind === 'sync-response');
   assert.equal(responses.length, 1);
   Y.applyUpdate(browser, Buffer.from(responses[0].payload, 'base64'));
@@ -114,8 +115,8 @@ test('only the smallest live device seeds; the other adopts, never unions', asyn
 
   const nodeA = new FakeNode();
   const nodeB = new FakeNode();
-  const serverA = new RealtimeWorkspaceServer({ node: nodeA, repository: repoA, repositoryId, secret: 's', deviceId: 'aaaa-device' });
-  const serverB = new RealtimeWorkspaceServer({ node: nodeB, repository: repoB, repositoryId, secret: 's', deviceId: 'bbbb-device' });
+  const serverA = new RealtimeWorkspaceServer({ node: nodeA, repository: repoA, repositoryId, secret: 's', deviceId: 'aaaa-device', seedElectedFallbackMs: 120, seedFallbackMs: 600, seedRetryMs: 40 });
+  const serverB = new RealtimeWorkspaceServer({ node: nodeB, repository: repoB, repositoryId, secret: 's', deviceId: 'bbbb-device', seedElectedFallbackMs: 120, seedFallbackMs: 600, seedRetryMs: 40 });
   await serverA.start();
   await serverB.start();
   t.after(() => { serverA.stop(); serverB.stop(); });
@@ -149,7 +150,7 @@ test('only the smallest live device seeds; the other adopts, never unions', asyn
   const browser = new Y.Doc();
   nodeA.receive('browser', repositoryId, REALTIME_CHANNEL, open(nodeA, browser));
   nodeB.receive('browser', repositoryId, REALTIME_CHANNEL, open(nodeB, browser));
-  await settle();
+  await settleSeed();
 
   // A (smallest id) answered with its seed; B answered nothing.
   const fromA = nodeA.directFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'sync-response');
@@ -179,7 +180,7 @@ test('an external file edit never deletes concurrent typing', async (t) => {
   const repository = await GitRepository.init(root);
   const node = new FakeNode();
   const repositoryId = 'a'.repeat(64);
-  const server = new RealtimeWorkspaceServer({ node, repository, repositoryId, secret: 's', deviceId: 'solo' });
+  const server = new RealtimeWorkspaceServer({ node, repository, repositoryId, secret: 's', deviceId: 'solo', seedElectedFallbackMs: 120, seedFallbackMs: 240, seedRetryMs: 40 });
   await server.start();
   t.after(() => server.stop());
   await writeFile(path.join(root, 'notes.md'), 'shared base\n');
@@ -193,7 +194,7 @@ test('an external file edit never deletes concurrent typing', async (t) => {
     messageId: randomBytes(16).toString('hex'), kind: 'sync-request', part: 0, total: 1,
     payload: Buffer.from(Y.encodeStateVector(browser)).toString('base64'),
   });
-  await settle();
+  await settleSeed();
   const response = node.directFrames(REALTIME_CHANNEL).find((f) => f.kind === 'sync-response');
   Y.applyUpdate(browser, Buffer.from(response.payload, 'base64'));
 
