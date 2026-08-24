@@ -103,4 +103,15 @@ if (process.platform === "darwin") injection.push("--macho-segment-name", "NODE_
 await run(process.execPath, [postject, ...injection]);
 if (process.platform === "darwin") await run("codesign", ["--sign", "-", output]);
 await rm(work, { recursive: true, force: true });
+// Sidecars for LAN installs: the checksum and version travel WITH the
+// binary, written by the same build — a hand-refreshed pinned checksum went
+// stale twice in one day and failed honest installs.
+{
+  const { createHash } = await import("node:crypto");
+  const { readFile } = await import("node:fs/promises");
+  const packageVersion = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version;
+  const digest = createHash("sha256").update(await readFile(output)).digest("hex");
+  await writeFile(`${output}.sha256`, `${digest}\n`);
+  await writeFile(`${output}.version`, `${packageVersion}\n`);
+}
 console.log(`Built standalone GitPigeon executable: ${output}`);
