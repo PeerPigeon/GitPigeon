@@ -129,7 +129,7 @@ test('watcher terminal opens one bounded PTY and cleans it up on close', async (
   assert.match(spawned[0].options.env.GITPIGEON_DEVICE_ROSTER, /^[A-Za-z0-9_-]+$/);
   assert.equal(node.directFrames(TERMINAL_CHANNEL)[0]?.kind, 'opened');
   // machine [directory/*] gitpigeon $ — same shape on every device.
-  assert.match(spawned[0].terminal.writes[0], /test-device \[%1~\/\*\] gitpigeon \$ /);
+  assert.match(spawned[0].terminal.writes[0], /test-device \[\.\.\/%1~\/\*\] gitpigeon \$ /);
 
   node.receive('browser-peer', repositoryId, TERMINAL_CHANNEL, browserFrame('input', 1, {
     payload: Buffer.from('pwd\r').toString('base64'),

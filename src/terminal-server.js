@@ -186,7 +186,7 @@ function validRoster(value) {
 }
 
 function shellCommand(deviceName) {
-  // "Daniels-MacBook-Pro [test/*] gitpigeon $" — machine, then where you
+  // "Daniels-MacBook-Pro [../test/*] gitpigeon $" — machine, then where you
   // are (live, so cd updates it), then the product mark. The short machine
   // name reads better than the mDNS suffix.
   const shortName = String(deviceName).replace(/\.local$/i, '');
@@ -196,8 +196,8 @@ function shellCommand(deviceName) {
     const powershell = /(?:^|[\\/])(?:pwsh|powershell)(?:\.exe)?$/i.test(shell);
     // Same prompt on every device: machine [directory/*] gitpigeon $ — the
     // directory live in every shell dialect.
-    const psPrompt = `${shortName} [$(Split-Path -Leaf (Get-Location))/*] gitpigeon $ `;
-    const cmdPrompt = `${shortName} [$P/*] gitpigeon $$ `;
+    const psPrompt = `${shortName} [../$(Split-Path -Leaf (Get-Location))/*] gitpigeon $ `;
+    const cmdPrompt = `${shortName} [../$P/*] gitpigeon $$ `;
     return {
       shell,
       args: [],
@@ -209,8 +209,8 @@ function shellCommand(deviceName) {
   const shell = process.env.SHELL && path.isAbsolute(process.env.SHELL) ? process.env.SHELL : '/bin/sh';
   const zsh = /(?:^|\/)zsh$/.test(shell);
   // \W (bash/sh) and %1~ (zsh) track the current directory live.
-  const posixPrompt = `${shortName} [\\W/*] gitpigeon $ `.replaceAll("'", "'\\''");
-  const zshPrompt = `${shortName} [%1~/*] gitpigeon $ `.replaceAll("'", "'\\''");
+  const posixPrompt = `${shortName} [../\\W/*] gitpigeon $ `.replaceAll("'", "'\\''");
+  const zshPrompt = `${shortName} [../%1~/*] gitpigeon $ `.replaceAll("'", "'\\''");
   return {
     shell,
     args: [],
