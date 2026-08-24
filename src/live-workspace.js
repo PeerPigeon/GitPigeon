@@ -237,8 +237,14 @@ export class LiveWorkspace {
   async #writeReplace(filename, data, mode = 0o644) {
     await mkdir(path.dirname(filename), { recursive: true });
     const temporary = `${filename}.${process.pid}-${randomBytes(5).toString('hex')}.tmp`;
-    await writeFile(temporary, Buffer.from(data), { mode });
-    await rename(temporary, filename);
+    try {
+      await writeFile(temporary, Buffer.from(data), { mode });
+      await rename(temporary, filename);
+    } catch (error) {
+      // Never leave a failed write's temp file behind in the repository.
+      await rm(temporary, { force: true }).catch(() => {});
+      throw error;
+    }
   }
 
   #absolute(file) {

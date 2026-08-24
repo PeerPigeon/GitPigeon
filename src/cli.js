@@ -281,6 +281,28 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     }, pollMs);
   };
 
+  const sweepOrphanedTemps = async () => {
+    // Failed writes used to strand `<file>.<pid>-<hex>.tmp` beside real
+    // files — dozens of them on a machine whose disk was misbehaving.
+    const { readdir, rm: remove, stat: statFile } = await import('node:fs/promises');
+    const sweep = async (directory, depth) => {
+      if (depth > 6) return;
+      let entries;
+      try { entries = await readdir(directory, { withFileTypes: true }); } catch { return; }
+      for (const entry of entries) {
+        if (entry.name === '.git' || entry.name === 'node_modules') continue;
+        const full = path.join(directory, entry.name);
+        if (entry.isDirectory()) { await sweep(full, depth + 1); continue; }
+        if (!/\.\d+-[0-9a-f]{10}\.tmp$/.test(entry.name)) continue;
+        try {
+          const details = await statFile(full);
+          if (Date.now() - details.mtimeMs > 10 * 60_000) await remove(full, { force: true });
+        } catch { /* already gone */ }
+      }
+    };
+    await sweep(repository.root, 0);
+  };
+
   const activate = async () => {
     if (started || starting || stopped) return;
     starting = true;
@@ -314,16 +336,21 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     }, 250);
   };
   node.on('peerConnected', onPeerConnected);
+  sweepOrphanedTemps().catch(() => {});
+  const sweepTimer = setInterval(() => { sweepOrphanedTemps().catch(() => {}); }, 15 * 60_000);
+  sweepTimer.unref?.();
   activate().catch((error) => log.error(error));
   log.info(`Watching ${repository.root} as ${config.deviceId.slice(0, 8)}`);
 
   return {
     presenceDiagnostics: () => synchronizer.presenceDiagnostics?.() ?? null,
+    writeError: () => realtimeServer.lastWriteError ?? null,
     terminalRelay: (opened, io) => terminalServer.receiveRelayed(opened, io),
     async close() {
       if (stopped) return;
       stopped = true;
       if (changeTimer) clearTimeout(changeTimer);
+      clearInterval(sweepTimer);
       filesystemWatcher?.close();
       if (peerRefreshTimer) clearTimeout(peerRefreshTimer);
       node.off('peerConnected', onPeerConnected);
@@ -618,6 +645,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
           repo: String(record.prepared?.config?.repositoryId ?? repository).slice(0, 8),
           open: Boolean(record.session),
           ...(record.session?.presenceDiagnostics?.() ? { presence: record.session.presenceDiagnostics() } : {}),
+          ...(record.session?.writeError?.() ? { writeError: record.session.writeError() } : {}),
           ...(repositoryErrors.get(repository)
             ? { error: String(repositoryErrors.get(repository)).slice(0, 120) }
             : {}),

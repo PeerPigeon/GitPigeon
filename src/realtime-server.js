@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import * as Y from 'yjs';
 import {
@@ -51,6 +51,7 @@ export class RealtimeWorkspaceServer {
     this.onFileWritten = onFileWritten;
     this.liveWorkspace = new LiveWorkspace(repository);
     this.documents = new Map();
+    this.lastWriteError = null;
     this.assemblies = new Map();
     this.started = false;
     this.unsubscribe = null;
@@ -421,9 +422,20 @@ export class RealtimeWorkspaceServer {
       } else {
         await mkdir(path.dirname(absolute), { recursive: true });
         const temporary = `${absolute}.${process.pid}-${randomBytes(5).toString('hex')}.tmp`;
-        await writeFile(temporary, data);
-        await rename(temporary, absolute);
+        try {
+          await writeFile(temporary, data);
+          await rename(temporary, absolute);
+        } catch (error) {
+          // A failed write must not litter the repository with orphaned
+          // temp files — and must say WHY it failed, loudly: seventy silent
+          // orphans meant seventy swallowed errors.
+          await rm(temporary, { force: true }).catch(() => {});
+          this.lastWriteError = `${state.path}: ${error.message}`.slice(0, 160);
+          this.logger.info?.(`Repository write failed: ${this.lastWriteError}`);
+          throw error;
+        }
       }
+      this.lastWriteError = null;
       state.lastWritten = data.toString('utf8');
       state.writeHistory.push(createHash('sha256').update(state.lastWritten).digest('hex'));
       if (state.writeHistory.length > 30) state.writeHistory.shift();
