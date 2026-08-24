@@ -244,12 +244,56 @@ async function shellCommand(deviceName) {
   const reset = '\\033[0m';
   const zshPrompt = `%{${dim}%}${shortName}%{${reset}%} [../%1~/*] %{${accent}%}$%{${reset}%} `.replaceAll("'", "'\\''");
   const bashPrompt = `\\[${dim}\\]${shortName}\\[${reset}\\] [../\\W/*] \\[${accent}\\]$\\[${reset}\\] `.replaceAll("'", "'\\''");
-  // The rc tail: define the device helper, set the prompt, then clear the
-  // screen (rc banners are gated out server-side, but they still moved the
-  // cursor) and print the ready marker that opens the output gate.
-  const posixTail = (promptVariable, promptValue) => [
+  // The rc tail: define the device helper, set the prompt, take over
+  // history, then clear the screen (rc banners are gated out server-side,
+  // but they still moved the cursor) and print the ready marker that opens
+  // the output gate.
+  //
+  // Terminal history is MESH ONLY. HISTFILE is unset after the user's rc
+  // runs, so the shell never reads the user's history file (where old
+  // builds' typed setup lines kept resurfacing) and never writes anywhere.
+  // Instead the session's in-memory history is seeded from the fleet-wide
+  // record GitPigeon carries in PeerPigeon storage (GITPIGEON_HISTORY, one
+  // command per line), and every accepted command line is reported back
+  // through an invisible OSC frame the server strips from the output stream
+  // and merges into that record — so a command typed on any device is
+  // recallable on every device.
+  const historySeed = (addCommand) => [
+    'unset HISTFILE',
+    'HISTSIZE=10000',
+    'if [ -n "$GITPIGEON_HISTORY" ]; then',
+    '  while IFS= read -r gitpigeon_seed_line; do',
+    `    [ -n "$gitpigeon_seed_line" ] && ${addCommand} -- "$gitpigeon_seed_line" && GITPIGEON_LAST_CAPTURE=$gitpigeon_seed_line`,
+    '  done <<GITPIGEON_HISTORY_EOF',
+    '$GITPIGEON_HISTORY',
+    'GITPIGEON_HISTORY_EOF',
+    'fi',
+    'unset GITPIGEON_HISTORY gitpigeon_seed_line',
+  ].join('\n');
+  const emitCapture = `printf '\\033]777;gitpigeon-hist;%s\\a' "$(printf %s "$gitpigeon_line" | command base64 | command tr -d '\\n')"`;
+  const posixTail = (promptVariable, promptValue, flavor) => [
     `device() { ${deviceCommand} terminal-device "$@"; }`,
     `export ${promptVariable}=$'${promptValue}'`,
+    historySeed(flavor === 'zsh' ? 'builtin print -s' : 'builtin history -s'),
+    'SAVEHIST=0',
+    ...(flavor === 'zsh' ? [
+      'gitpigeon_capture_history() {',
+      `  local gitpigeon_line=\${1%$'\\n'}`,
+      '  [ -n "$gitpigeon_line" ] || return 0',
+      `  ${emitCapture}`,
+      '  return 0',
+      '}',
+      'zshaddhistory_functions+=(gitpigeon_capture_history)',
+    ] : [
+      'gitpigeon_capture_history() {',
+      '  local gitpigeon_line=$(builtin fc -ln -1 2>/dev/null)',
+      '  gitpigeon_line=${gitpigeon_line#"${gitpigeon_line%%[![:space:]]*}"}',
+      '  { [ -n "$gitpigeon_line" ] && [ "$gitpigeon_line" != "$GITPIGEON_LAST_CAPTURE" ]; } || return 0',
+      '  GITPIGEON_LAST_CAPTURE=$gitpigeon_line',
+      `  ${emitCapture}`,
+      '}',
+      'PROMPT_COMMAND="gitpigeon_capture_history${PROMPT_COMMAND:+; $PROMPT_COMMAND}"',
+    ]),
     `printf '\\033[2J\\033[3J\\033[H\\033]777;gitpigeon-ready\\a'`,
     '',
   ].join('\n');
@@ -272,7 +316,7 @@ async function shellCommand(deviceName) {
       'ZDOTDIR="${GITPIGEON_USER_ZDOTDIR:-$HOME}"',
       '[ -f "$ZDOTDIR/.zshrc" ] && builtin source "$ZDOTDIR/.zshrc"',
       'unset GITPIGEON_USER_ZDOTDIR GITPIGEON_WRAP_ZDOTDIR',
-      posixTail('PROMPT', zshPrompt),
+      posixTail('PROMPT', zshPrompt, 'zsh'),
     ].join('\n'), { mode: 0o600 });
     return {
       shell,
@@ -287,7 +331,7 @@ async function shellCommand(deviceName) {
     const rcfile = path.join(directory, 'gitpigeon.bashrc');
     await writeFile(rcfile, [
       '[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"',
-      posixTail('PS1', bashPrompt),
+      posixTail('PS1', bashPrompt, 'bash'),
     ].join('\n'), { mode: 0o600 });
     return { shell, args: ['--rcfile', rcfile], env: {}, initialize: '' };
   }
@@ -297,12 +341,12 @@ async function shellCommand(deviceName) {
     shell,
     args: [],
     env: {},
-    initialize: `device() { ${deviceCommand} terminal-device "$@"; }; export PS1=$'${bashPrompt}'; clear; printf '\\033]777;gitpigeon-ready\\a'\r`,
+    initialize: `device() { ${deviceCommand} terminal-device "$@"; }; export PS1=$'${bashPrompt}'; unset HISTFILE; clear; printf '\\033]777;gitpigeon-ready\\a'\r`,
   };
 }
 
 export class TerminalServer {
-  constructor({ node, repository, secret, repositoryId, serviceInstanceId, deviceName = hostname(), logger = {}, spawnPty: spawnTerminal = spawnPty }) {
+  constructor({ node, repository, secret, repositoryId, serviceInstanceId, deviceName = hostname(), logger = {}, spawnPty: spawnTerminal = spawnPty, history = null }) {
     this.node = node;
     this.repository = repository;
     this.secret = secret;
@@ -311,6 +355,7 @@ export class TerminalServer {
     this.deviceName = cleanDeviceName(deviceName);
     this.logger = logger;
     this.spawnPty = spawnTerminal;
+    this.history = history;
     this.sessions = new Map();
     this.relayReplies = new Map();
     this.started = false;
@@ -439,6 +484,15 @@ export class TerminalServer {
       // helped nobody.
       let cwd = this.repository.root;
       try { await stat(cwd); } catch { cwd = homedir(); }
+      // Seed the shell's in-memory history from the fleet-wide mesh record:
+      // newest-first selection under a byte budget, delivered oldest-first.
+      let historySeed = '';
+      const seedLines = this.history?.lines?.() ?? [];
+      for (let index = seedLines.length - 1; index >= 0; index -= 1) {
+        const candidate = historySeed ? `${seedLines[index]}\n${historySeed}` : seedLines[index];
+        if (Buffer.byteLength(candidate) > 24 * 1024) break;
+        historySeed = candidate;
+      }
       terminal = await this.spawnPty(command.shell, command.args, {
         name: 'xterm-256color',
         cols,
@@ -450,6 +504,7 @@ export class TerminalServer {
           TERM: 'xterm-256color',
           COLORTERM: 'truecolor',
           GITPIGEON_DEVICE_ROSTER: Buffer.from(JSON.stringify(devices)).toString('base64url'),
+          ...(historySeed ? { GITPIGEON_HISTORY: historySeed } : {}),
           ...command.env,
         },
       });
@@ -473,11 +528,15 @@ export class TerminalServer {
       ready: false,
       preamble: '',
       readyTimer: null,
+      historyCarry: '',
       disposables: [],
       closed: false,
     };
     this.sessions.set(id, session);
-    session.disposables.push(terminal.onData((data) => this.#gateOutput(session, data)));
+    session.disposables.push(terminal.onData((data) => {
+      const visible = this.#captureHistory(session, data);
+      if (visible) this.#gateOutput(session, visible);
+    }));
     // A shell that never prints the marker (cmd, an exotic rc) still gets its
     // output through — late and noisy beats swallowed forever.
     session.readyTimer = setTimeout(() => this.#releaseOutput(session, session.preamble), READY_TIMEOUT_MS);
@@ -492,6 +551,52 @@ export class TerminalServer {
     }));
     await this.#send(peerId, session.sessionId, 'opened', ++session.sentSequence, { deviceName: this.deviceName });
     if (command.initialize) terminal.write(command.initialize);
+  }
+
+  /**
+   * Strip history-capture OSC frames from the pty stream and merge each
+   * reported command line into the mesh record. The frames are invisible
+   * plumbing between the shell hook and this server; browsers never see
+   * them. Frames can split across pty chunks, so an unterminated frame (or
+   * a tail that could still become one) is carried into the next chunk.
+   */
+  #captureHistory(session, data) {
+    const HEADER = '\u001b]777;gitpigeon-hist;';
+    let text = session.historyCarry + data;
+    session.historyCarry = '';
+    let visible = '';
+    let cursor = 0;
+    for (;;) {
+      const start = text.indexOf(HEADER, cursor);
+      if (start === -1) break;
+      const end = text.indexOf('\u0007', start + HEADER.length);
+      if (end === -1) {
+        visible += text.slice(cursor, start);
+        session.historyCarry = text.slice(start);
+        if (session.historyCarry.length > 8_192) {
+          // Not a real frame — release it rather than sitting on output.
+          visible += session.historyCarry;
+          session.historyCarry = '';
+        }
+        return visible;
+      }
+      visible += text.slice(cursor, start);
+      try {
+        const line = Buffer.from(text.slice(start + HEADER.length, end), 'base64').toString('utf8');
+        this.history?.add?.(line);
+      } catch { /* a malformed frame is dropped, never displayed */ }
+      cursor = end + 1;
+    }
+    // Hold a tail that could be the start of a frame split mid-header.
+    const holdFrom = Math.max(cursor, text.length - HEADER.length);
+    const escape = text.lastIndexOf('\u001b');
+    if (escape >= holdFrom && HEADER.startsWith(text.slice(escape))) {
+      visible += text.slice(cursor, escape);
+      session.historyCarry = text.slice(escape);
+    } else {
+      visible += text.slice(cursor);
+    }
+    return visible;
   }
 
   #gateOutput(session, data) {

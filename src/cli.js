@@ -48,6 +48,7 @@ import { installNativeIntegration } from './native-install.js';
 import { ControlServer } from './control-server.js';
 import { RepositorySynchronizer } from './protocol.js';
 import { TerminalServer } from './terminal-server.js';
+import { createTerminalHistory, terminalHistoryKey } from './terminal-history.js';
 import { RealtimeWorkspaceServer } from './realtime-server.js';
 import { WorkspaceFiles } from './workspace.js';
 import { clearInstalledUpdate, startAutomaticUpdates } from './auto-update.js';
@@ -208,7 +209,7 @@ async function prepareRepositorySession(entry) {
   return { repository, config, signature: repositorySessionSignature(config) };
 }
 
-async function openRepositorySession({ repository, config }, pollMs, log, serviceInstanceId, machineIndexId, node, deviceClaim = null) {
+async function openRepositorySession({ repository, config }, pollMs, log, serviceInstanceId, machineIndexId, node, deviceClaim = null, terminalHistory = null) {
   // Late-bound: the realtime server is created below but the synchronizer
   // needs to consult it for path ownership.
   const ownership = { owns: () => false };
@@ -221,6 +222,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     serviceInstanceId,
     deviceName: deviceHostName(),
     logger: log,
+    history: terminalHistory,
   });
   terminalServer.start();
   const realtimeServer = new RealtimeWorkspaceServer({
@@ -494,6 +496,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let installedUpdate;
   let controlServer;
   let pairingService;
+  let terminalHistory = null;
   let restartAfterRotation = false;
 
   const publishServiceRepositoryState = async () => {
@@ -556,7 +559,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     sessions.set(entry.repository, record);
     repositoryErrors.delete(entry.repository);
     await publishServiceRepositoryState();
-    record.opening = openRepositorySession(prepared, pollMs, log, serviceInstanceId, machineIndexId, machineIndex.node, deviceClaim)
+    record.opening = openRepositorySession(prepared, pollMs, log, serviceInstanceId, machineIndexId, machineIndex.node, deviceClaim, terminalHistory)
       .then(async (session) => {
         record.session = session;
         if (record.cancelled) {
@@ -620,6 +623,14 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
         log.info("PeerPigeon index added " + added.length + " shared " + (added.length === 1 ? "repository" : "repositories"));
         await reconcile();
       },
+    });
+    // One fleet-wide terminal history for every session this service opens,
+    // carried in PeerPigeon storage on the index node — mesh only, no file.
+    terminalHistory = createTerminalHistory({
+      node: machineIndex.node,
+      key: terminalHistoryKey(machineIndex.index.indexId),
+      deviceId: deviceHostName(),
+      logger: log,
     });
     await reconcile();
     // Keep offering to pair for as long as this machine runs, so a browser
@@ -726,6 +737,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     controlServer?.stop();
     if (pairingService) await pairingService.close();
     if (lanApprovals) await lanApprovals.close();
+    if (terminalHistory) await terminalHistory.close();
     if (machineIndex) await machineIndex.close();
     if (control) await control.close();
   }

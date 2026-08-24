@@ -201,3 +201,54 @@ test('nothing before the ready marker reaches the browser or the history', async
     .join('');
   assert.equal(output, 'prompt $ typed');
 });
+
+test('history capture frames are stripped from output and merged; the seed rides the env', async (t) => {
+  const node = new FakeNode();
+  const spawned = [];
+  const added = [];
+  const server = new TerminalServer({
+    node,
+    repository: { root: '/tmp/example-repository' },
+    secret,
+    repositoryId,
+    serviceInstanceId,
+    deviceName: 'test-device',
+    history: {
+      lines: () => ['git status', 'npm test'],
+      add: (line) => added.push(line),
+    },
+    spawnPty(shell, args, options) {
+      const terminal = new FakePty();
+      spawned.push({ options, terminal });
+      return terminal;
+    },
+  });
+  server.start();
+  t.after(() => server.stop());
+
+  node.receive('browser-peer', repositoryId, TERMINAL_CHANNEL, browserFrame('open', 0, {
+    cols: 80, rows: 24, devices: [{ name: 'test-device' }],
+  }));
+  await settle();
+  const [{ options, terminal }] = spawned;
+  // The fleet-wide history seeds the shell in-memory list via the spawn env.
+  assert.equal(options.env.GITPIGEON_HISTORY, 'git status\nnpm test');
+  const emit = (data) => { for (const listener of terminal.dataListeners) listener(data); };
+
+  const frame = (line) => `\u001b]777;gitpigeon-hist;${Buffer.from(line).toString('base64')}\u0007`;
+  emit('\u001b]777;gitpigeon-ready\u0007prompt $ ');
+  // A whole frame in one chunk, and one split across three chunks.
+  emit(`before ${frame('ls -la')}after `);
+  const split = frame('echo hi');
+  emit(split.slice(0, 9));
+  emit(split.slice(9, 20));
+  emit(`${split.slice(20)}tail`);
+  await settle();
+
+  assert.deepEqual(added, ['ls -la', 'echo hi']);
+  const output = node.directFrames(TERMINAL_CHANNEL)
+    .filter((f) => f.kind === 'output')
+    .map((f) => Buffer.from(f.payload, 'base64').toString('utf8'))
+    .join('');
+  assert.equal(output, 'prompt $ before after tail');
+});
