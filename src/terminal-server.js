@@ -186,18 +186,19 @@ function validRoster(value) {
 }
 
 function shellCommand(deviceName) {
-  // "Daniels-MacBook-Pro [../test/*] gitpigeon $" — machine, then where you
-  // are (live, so cd updates it), then the product mark. The short machine
-  // name reads better than the mDNS suffix.
+  // "Daniels-MacBook-Pro [../test/*] $" — a dimmed machine name (context),
+  // the live directory in normal weight (the thing you check), and a bold
+  // accent-green $ as the anchor. The brand lives in the UI chrome, not on
+  // every prompt line. 38;2;216;255;88 is the terminal theme's cursor green.
   const shortName = String(deviceName).replace(/\.local$/i, '');
   const deviceCommand = DEVICE_COMMAND.map((value) => quoteShell(value)).join(' ');
   if (process.platform === 'win32') {
     const shell = process.env.COMSPEC || 'powershell.exe';
     const powershell = /(?:^|[\\/])(?:pwsh|powershell)(?:\.exe)?$/i.test(shell);
-    // Same prompt on every device: machine [directory/*] gitpigeon $ — the
-    // directory live in every shell dialect.
-    const psPrompt = `${shortName} [../$(Split-Path -Leaf (Get-Location))/*] gitpigeon $ `;
-    const cmdPrompt = `${shortName} [../$P/*] gitpigeon $$ `;
+    const esc = '$([char]27)';
+    const psPrompt = `${esc}[2m${shortName}${esc}[0m [../$(Split-Path -Leaf (Get-Location))/*] ${esc}[1;38;2;216;255;88m$${esc}[0m `;
+    // cmd has no ANSI in PROMPT reliably; plain text there.
+    const cmdPrompt = `${shortName} [../$P/*] $$ `;
     return {
       shell,
       args: [],
@@ -208,15 +209,19 @@ function shellCommand(deviceName) {
   }
   const shell = process.env.SHELL && path.isAbsolute(process.env.SHELL) ? process.env.SHELL : '/bin/sh';
   const zsh = /(?:^|\/)zsh$/.test(shell);
-  // \W (bash/sh) and %1~ (zsh) track the current directory live.
-  const posixPrompt = `${shortName} [../\\W/*] gitpigeon $ `.replaceAll("'", "'\\''");
-  const zshPrompt = `${shortName} [../%1~/*] gitpigeon $ `.replaceAll("'", "'\\''");
+  // Zero-width escape wrapping (%{...%} / \[...\]) keeps line editing from
+  // miscounting the prompt width. \W and %1~ track the directory live.
+  const dim = '\\033[2m';
+  const accent = '\\033[1;38;2;216;255;88m';
+  const reset = '\\033[0m';
+  const zshPrompt = `%{${dim}%}${shortName}%{${reset}%} [../%1~/*] %{${accent}%}$%{${reset}%} `.replaceAll("'", "'\\''");
+  const bashPrompt = `\\[${dim}\\]${shortName}\\[${reset}\\] [../\\W/*] \\[${accent}\\]$\\[${reset}\\] `.replaceAll("'", "'\\''");
   return {
     shell,
     args: [],
     initialize: zsh
-      ? `device() { ${deviceCommand} terminal-device "$@"; }; export PROMPT='${zshPrompt}'; export PS1='${zshPrompt}'; clear\r`
-      : `device() { ${deviceCommand} terminal-device "$@"; }; export PS1='${posixPrompt}'; export PROMPT='${posixPrompt}'; clear\r`,
+      ? `device() { ${deviceCommand} terminal-device "$@"; }; export PROMPT=$'${zshPrompt}'; clear\r`
+      : `device() { ${deviceCommand} terminal-device "$@"; }; export PS1=$'${bashPrompt}'; clear\r`,
   };
 }
 
