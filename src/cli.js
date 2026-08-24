@@ -301,6 +301,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       }
     };
     await sweep(repository.root, 0);
+    await synchronizer.liveWorkspace?.pruneTrash?.().catch?.(() => {});
   };
 
   const activate = async () => {

@@ -195,6 +195,30 @@ export class RealtimeWorkspaceServer {
     await respond({ ok: true });
   }
 
+  /** Bring a tombstoned file back, on request from any browser. */
+  async #restoreItem(peerId, frame) {
+    const replyTo = typeof frame.replyTo === 'string' && /^[a-f0-9]{64}$/.test(frame.replyTo) ? frame.replyTo : peerId;
+    const respond = async (result) => {
+      try {
+        await sendChannelDirect(this.node, replyTo, this.repositoryId, REALTIME_CHANNEL, {
+          kind: 'restore-result',
+          restoreId: String(frame.restoreId ?? '').slice(0, 64),
+          ...result,
+        });
+      } catch { /* the refreshed list reports the truth */ }
+    };
+    try {
+      const result = await this.liveWorkspace.restoreFromTrash(
+        String(frame.path ?? ''),
+        typeof frame.trashedAt === 'string' ? frame.trashedAt : null,
+      );
+      this.onFileWritten?.(result.restoredTo);
+      await respond({ ok: true, restoredTo: result.restoredTo });
+    } catch (error) {
+      await respond({ ok: false, error: error.message });
+    }
+  }
+
   async filesystemChanged(input) {
     let file;
     try { file = this.liveWorkspace.normalize(input); } catch { return; }
@@ -254,6 +278,10 @@ export class RealtimeWorkspaceServer {
     if (!this.started) return;
     if (frame?.kind === 'move' && frame.repositoryId === this.repositoryId) {
       await this.#moveItem(peerId, frame).catch((error) => this.logger.debug?.(`Move: ${error.message}`));
+      return;
+    }
+    if (frame?.kind === 'restore' && frame.repositoryId === this.repositoryId) {
+      await this.#restoreItem(peerId, frame).catch((error) => this.logger.debug?.(`Restore: ${error.message}`));
       return;
     }
     if (!validFrame(frame, this.repositoryId)) return;

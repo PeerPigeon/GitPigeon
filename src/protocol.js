@@ -58,6 +58,10 @@ function sameStrings(left, right) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+function trashDigestOf(trashFiles) {
+  return digest(`gitpigeon-trash-v1\0${trashFiles.map((file) => `${file.path}\0${file.trashedAt}\0${file.sha256}`).join('\n')}`);
+}
+
 function snapshotDigest(bundleSha256, filesDigest, liveFilesDigest, chunkSize = DEFAULT_CHUNK_SIZE) {
   if (liveFilesDigest === undefined) {
     return digest(`gitpigeon-snapshot-v1\0${bundleSha256 ?? '-'}\0${filesDigest}`);
@@ -307,6 +311,17 @@ export class RepositorySynchronizer {
           chunks: file.deleted ? [] : await this.#cacheChunks(file.data),
         });
       }
+      const trashSnapshot = await this.liveWorkspace.trashSnapshot();
+      const trashFiles = [];
+      for (const file of trashSnapshot) {
+        trashFiles.push({
+          path: file.path,
+          trashedAt: file.trashedAt,
+          size: file.size,
+          sha256: file.sha256,
+          chunks: await this.#cacheChunks(file.data),
+        });
+      }
       const snapshotId = snapshotDigest(bundleSha256, workspace.digest, liveWorkspace.digest, this.chunkSize);
       const manifest = {
         protocol: PROTOCOL,
@@ -325,6 +340,9 @@ export class RepositorySynchronizer {
         files,
         liveWorkspaceDigest: liveWorkspace.digest,
         liveFiles,
+        // The quarantine syncs by default: every machine mirrors every
+        // tombstone, so a deleted file is recoverable anywhere.
+        trashFiles,
       };
       await this.cache.writeManifest(manifest);
       await this.#seedManifest(manifest);
@@ -361,7 +379,10 @@ export class RepositorySynchronizer {
     });
     if (!refsDigest && workspace.files.length === 0 && liveWorkspace.files.length === 0
       && !this.state.heads[this.config.deviceId]) return null;
-    return contentDigest(refsDigest, workspace.digest, liveWorkspace.digest);
+    // Trash participates in the publish trigger (new tombstones ship) but
+    // not in snapshot identity: a deletion already changes the live digest.
+    const trash = await this.liveWorkspace.trashSnapshot();
+    return `${contentDigest(refsDigest, workspace.digest, liveWorkspace.digest)}:${trashDigestOf(trash)}`;
   }
 
   async status() {
@@ -576,6 +597,7 @@ export class RepositorySynchronizer {
         head.deviceId,
       );
       const liveResult = await this.liveWorkspace.apply(liveFiles, liveBaselines, head.deviceId);
+      await this.#mirrorTrashFiles(manifest).catch((error) => this.logger.error(error));
       const liveConflicts = [
         ...prepared.conflicts.map((conflict) => ({ ...conflict, kind: 'live' })),
         ...liveResult.conflicts.map((conflict) => ({ ...conflict, kind: 'live' })),
@@ -657,6 +679,19 @@ export class RepositorySynchronizer {
       files.push({ ...file, data });
     }
     return files;
+  }
+
+  async #mirrorTrashFiles(manifest) {
+    const incoming = Array.isArray(manifest.trashFiles) ? manifest.trashFiles.slice(0, 200) : [];
+    const files = [];
+    for (const file of incoming) {
+      if (typeof file?.path !== 'string' || typeof file.trashedAt !== 'string' || !Array.isArray(file.chunks)) continue;
+      try {
+        const data = await this.#retrieveChunks(file.chunks, file.size, file.sha256, `Tombstoned file ${file.path}`);
+        files.push({ path: file.path, trashedAt: file.trashedAt, data });
+      } catch { /* chunks may arrive later; the next sync mirrors it */ }
+    }
+    if (files.length) await this.liveWorkspace.mirrorTrash(files);
   }
 
   async #retrieveLiveWorkspaceFiles(manifest) {

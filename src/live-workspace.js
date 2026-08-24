@@ -133,6 +133,124 @@ export class LiveWorkspace {
     }
   }
 
+  get trashDirectory() {
+    return path.join(this.repository.gitDir, 'gitpigeon', 'trash');
+  }
+
+  async #trashIndex() {
+    try {
+      const raw = JSON.parse(await readFile(path.join(this.trashDirectory, 'index.json'), 'utf8'));
+      return Array.isArray(raw) ? raw.filter((entry) => entry && typeof entry.path === 'string'
+        && typeof entry.trashedAt === 'string' && typeof entry.storedAs === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async #writeTrashIndex(entries) {
+    await mkdir(this.trashDirectory, { recursive: true });
+    await writeFile(path.join(this.trashDirectory, 'index.json'), `${JSON.stringify(entries, null, 2)}\n`);
+  }
+
+  /**
+   * The sync engine never hard-deletes: a retracted or deleted file moves to
+   * the quarantine, indexed by original path and time. One buggy retraction
+   * already deleted a live file on every machine — quarantine turns that
+   * class of bug into a non-event, and honest deletions into reversible ones.
+   */
+  async quarantine(file) {
+    const normalized = this.normalize(file);
+    const absolute = this.#absolute(normalized);
+    const trashedAt = new Date().toISOString();
+    const storedAs = path.join(trashedAt.replaceAll(':', '-'), ...normalized.split('/'));
+    const target = path.join(this.trashDirectory, storedAs);
+    try {
+      await mkdir(path.dirname(target), { recursive: true });
+      await rename(absolute, target);
+    } catch (error) {
+      if (error?.code === 'ENOENT') return null;
+      throw error;
+    }
+    const entries = await this.#trashIndex();
+    entries.push({ path: normalized, trashedAt, storedAs });
+    await this.#writeTrashIndex(entries.slice(-500));
+    return { path: normalized, trashedAt };
+  }
+
+  /** Everything in quarantine, with content, for publishing. */
+  async trashSnapshot() {
+    const entries = await this.#trashIndex();
+    const files = [];
+    for (const entry of entries.slice(-200)) {
+      try {
+        const data = await readFile(path.join(this.trashDirectory, entry.storedAs));
+        if (data.length > 8 * 1024 * 1024) continue;
+        files.push({
+          path: entry.path,
+          trashedAt: entry.trashedAt,
+          size: data.length,
+          sha256: digest(data),
+          data,
+        });
+      } catch { /* pruned or unreadable */ }
+    }
+    return files;
+  }
+
+  /** Adopt tombstones published by other machines; append-only, by content. */
+  async mirrorTrash(incoming) {
+    const entries = await this.#trashIndex();
+    const known = new Set(entries.map((entry) => `${entry.path}\0${entry.trashedAt}`));
+    let changed = false;
+    for (const file of incoming) {
+      const key = `${file.path}\0${file.trashedAt}`;
+      if (known.has(key) || !file.data) continue;
+      const storedAs = path.join(String(file.trashedAt).replaceAll(':', '-'), ...String(file.path).split('/'));
+      const target = path.join(this.trashDirectory, storedAs);
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, Buffer.from(file.data));
+      entries.push({ path: file.path, trashedAt: file.trashedAt, storedAs });
+      known.add(key);
+      changed = true;
+    }
+    if (changed) await this.#writeTrashIndex(entries.slice(-500));
+    return changed;
+  }
+
+  /** Bring a tombstoned file back into the working tree. */
+  async restoreFromTrash(file, trashedAt = null) {
+    const normalized = this.normalize(file);
+    const entries = await this.#trashIndex();
+    const matches = entries
+      .filter((entry) => entry.path === normalized && (!trashedAt || entry.trashedAt === trashedAt))
+      .sort((left, right) => right.trashedAt.localeCompare(left.trashedAt));
+    const chosen = matches[0];
+    if (!chosen) throw new Error(`Nothing tombstoned at ${normalized}`);
+    let destination = this.#absolute(normalized);
+    try {
+      await lstat(destination);
+      destination = `${destination}.restored-${Date.now()}`;
+    } catch { /* the path is free */ }
+    await mkdir(path.dirname(destination), { recursive: true });
+    await rename(path.join(this.trashDirectory, chosen.storedAs), destination);
+    await this.#writeTrashIndex(entries.filter((entry) => entry !== chosen));
+    return { path: normalized, restoredTo: path.relative(this.repository.root, destination) };
+  }
+
+  /** Quarantine retention: entries older than thirty days are truly gone. */
+  async pruneTrash(maxAgeMs = 30 * 24 * 60 * 60_000) {
+    const entries = await this.#trashIndex();
+    const keep = [];
+    for (const entry of entries) {
+      if (Date.now() - Date.parse(entry.trashedAt) > maxAgeMs) {
+        await rm(path.join(this.trashDirectory, entry.storedAs), { force: true }).catch(() => {});
+      } else {
+        keep.push(entry);
+      }
+    }
+    if (keep.length !== entries.length) await this.#writeTrashIndex(keep);
+  }
+
   async prepare(files, baselines, { restoreAll = false, except = new Set() } = {}) {
     const incoming = new Set(files.map((file) => this.normalize(file.path)));
     // `except` paths are never retraction targets: a path owned by a live
@@ -154,7 +272,7 @@ export class LiveWorkspace {
       const baseData = await this.repository.headFile(file);
       const baseSha256 = baseData === null ? null : digest(baseData);
       if (current !== baseSha256) {
-        if (baseData === null) await rm(this.#absolute(file), { force: true });
+        if (baseData === null) await this.quarantine(file);
         else await this.repository.restoreWorkingTreeFile(file);
         restored.push(file);
       }
@@ -193,7 +311,7 @@ export class LiveWorkspace {
         continue;
       }
       if (current !== next) {
-        if (incoming.deleted) await rm(this.#absolute(file), { force: true });
+        if (incoming.deleted) await this.quarantine(file);
         else await this.#writeReplace(this.#absolute(file), incoming.data, incoming.executable ? 0o755 : 0o644);
         updated.push(file);
       }

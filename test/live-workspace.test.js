@@ -27,9 +27,20 @@ test('a path shielded by a live session is never a retraction target', async (t)
   const details = await stat(path.join(root, 'owned.md'));
   assert.ok(details.isFile(), 'the owned file must survive');
 
-  // Without the shield the same call deletes it — the regression this guards.
+  // Without the shield the same call retracts it — but retraction is now
+  // quarantine, never deletion: the file leaves the working tree and lands
+  // in the trash, restorable.
   await live.prepare([], baselines, {});
   let gone = false;
   try { await stat(path.join(root, 'owned.md')); } catch { gone = true; }
-  assert.equal(gone, true, 'unshielded retraction removes it (the old behavior)');
+  assert.equal(gone, true, 'unshielded retraction removes it from the working tree');
+  const trash = await live.trashSnapshot();
+  assert.equal(trash.length, 1);
+  assert.equal(trash[0].path, 'owned.md');
+  assert.equal(Buffer.from(trash[0].data).toString(), 'being edited right now\n');
+
+  // And it comes back.
+  const restored = await live.restoreFromTrash('owned.md');
+  assert.equal(restored.restoredTo, 'owned.md');
+  assert.ok((await stat(path.join(root, 'owned.md'))).isFile());
 });
