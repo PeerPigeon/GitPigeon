@@ -185,6 +185,16 @@ function validRoster(value) {
   return value.map((entry) => ({ name: cleanDeviceName(entry?.name) }));
 }
 
+// Printed by the initialization line once the prompt is configured and the
+// screen cleared. Everything the shell emits before it — startup noise, the
+// echoed setup command itself — is swallowed server-side: the session's
+// output stream, and therefore its replayable history, begins at the clean
+// prompt. The marker is an OSC sequence no terminal renders, and the echoed
+// source text (backslash escapes, not raw bytes) can never match it.
+const READY_MARKER = '\u001b]777;gitpigeon-ready\u0007';
+const READY_TIMEOUT_MS = 4_000;
+const READY_MAX_BYTES = 65_536;
+
 function shellCommand(deviceName) {
   // "Daniels-MacBook-Pro [../test/*] $" — a dimmed machine name (context),
   // the live directory in normal weight (the thing you check), and a bold
@@ -203,7 +213,7 @@ function shellCommand(deviceName) {
       shell,
       args: [],
       initialize: powershell
-        ? `function global:device { & ${deviceCommand} terminal-device @args }; $function:prompt = { "${psPrompt.replaceAll('"', '`"')}" }; Clear-Host\r`
+        ? `function global:device { & ${deviceCommand} terminal-device @args }; $function:prompt = { "${psPrompt.replaceAll('"', '`"')}" }; Clear-Host; [Console]::Write([char]27+']777;gitpigeon-ready'+[char]7)\r`
         : `doskey device=${DEVICE_COMMAND.map((value) => `"${value.replaceAll('"', '""')}"`).join(' ')} terminal-device $*& prompt ${cmdPrompt.replaceAll('&', '^&')}& cls\r`,
     };
   }
@@ -220,8 +230,8 @@ function shellCommand(deviceName) {
     shell,
     args: [],
     initialize: zsh
-      ? `device() { ${deviceCommand} terminal-device "$@"; }; export PROMPT=$'${zshPrompt}'; clear\r`
-      : `device() { ${deviceCommand} terminal-device "$@"; }; export PS1=$'${bashPrompt}'; clear\r`,
+      ? `device() { ${deviceCommand} terminal-device "$@"; }; export PROMPT=$'${zshPrompt}'; clear; printf '\\033]777;gitpigeon-ready\\a'\r`
+      : `device() { ${deviceCommand} terminal-device "$@"; }; export PS1=$'${bashPrompt}'; clear; printf '\\033]777;gitpigeon-ready\\a'\r`,
   };
 }
 
@@ -392,19 +402,45 @@ export class TerminalServer {
       output: '',
       outputBytes: 0,
       outputTimer: null,
+      ready: false,
+      preamble: '',
+      readyTimer: null,
       disposables: [],
       closed: false,
     };
     this.sessions.set(id, session);
-    session.disposables.push(terminal.onData((data) => this.#queueOutput(session, data)));
+    session.disposables.push(terminal.onData((data) => this.#gateOutput(session, data)));
+    // A shell that never prints the marker (cmd, an exotic rc) still gets its
+    // output through — late and noisy beats swallowed forever.
+    session.readyTimer = setTimeout(() => this.#releaseOutput(session, session.preamble), READY_TIMEOUT_MS);
+    session.readyTimer.unref?.();
     session.disposables.push(terminal.onExit(({ exitCode, signal }) => {
       if (session.closed) return;
+      // A shell that dies before the ready marker should die visibly.
+      this.#releaseOutput(session, session.preamble);
       this.#flushOutput(session);
       this.#send(peerId, session.sessionId, 'exit', ++session.sentSequence, { exitCode, signal }).catch(() => {});
       this.#close(session);
     }));
     await this.#send(peerId, session.sessionId, 'opened', ++session.sentSequence, { deviceName: this.deviceName });
     terminal.write(command.initialize);
+  }
+
+  #gateOutput(session, data) {
+    if (session.ready) return this.#queueOutput(session, data);
+    session.preamble += data;
+    const at = session.preamble.indexOf(READY_MARKER);
+    if (at !== -1) return this.#releaseOutput(session, session.preamble.slice(at + READY_MARKER.length));
+    if (Buffer.byteLength(session.preamble) > READY_MAX_BYTES) this.#releaseOutput(session, session.preamble);
+  }
+
+  #releaseOutput(session, tail) {
+    if (session.ready || session.closed) return;
+    session.ready = true;
+    session.preamble = '';
+    if (session.readyTimer) clearTimeout(session.readyTimer);
+    session.readyTimer = null;
+    if (tail) this.#queueOutput(session, tail);
   }
 
   #queueOutput(session, data) {
@@ -473,6 +509,9 @@ export class TerminalServer {
     this.sessions.delete(session.id);
     if (session.outputTimer) clearTimeout(session.outputTimer);
     session.outputTimer = null;
+    if (session.readyTimer) clearTimeout(session.readyTimer);
+    session.readyTimer = null;
+    session.preamble = '';
     session.output = '';
     session.outputBytes = 0;
     for (const disposable of session.disposables) disposable?.dispose?.();

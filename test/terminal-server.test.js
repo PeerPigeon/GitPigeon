@@ -144,3 +144,50 @@ test('watcher terminal opens one bounded PTY and cleans it up on close', async (
   assert.equal(server.activeSessionCount(), 0);
   assert.equal(spawned[0].terminal.killed, true);
 });
+
+test('nothing before the ready marker reaches the browser or the history', async (t) => {
+  const node = new FakeNode();
+  const spawned = [];
+  const server = new TerminalServer({
+    node,
+    repository: { root: '/tmp/example-repository' },
+    secret,
+    repositoryId,
+    serviceInstanceId,
+    deviceName: 'test-device',
+    spawnPty() {
+      const terminal = new FakePty();
+      spawned.push(terminal);
+      return terminal;
+    },
+  });
+  server.start();
+  t.after(() => server.stop());
+
+  node.receive('browser-peer', repositoryId, TERMINAL_CHANNEL, browserFrame('open', 0, {
+    cols: 80,
+    rows: 24,
+    devices: [{ name: 'test-device' }],
+  }));
+  await settle();
+  const [terminal] = spawned;
+  const emit = (data) => { for (const listener of terminal.dataListeners) listener(data); };
+
+  // Shell startup noise and the echoed setup line — including the marker's
+  // SOURCE TEXT, which is backslash escapes, not the raw bytes.
+  emit('Last login: never\r\n');
+  emit("$ device() { ... }; clear; printf '\\033]777;gitpigeon-ready\\a'\r\n");
+  await settle();
+  assert.equal(node.directFrames(TERMINAL_CHANNEL).filter((f) => f.kind === 'output').length, 0);
+
+  // The raw marker arrives split across chunks; only what follows it flows.
+  emit('\u001b[2J\u001b[3J\u001b[H\u001b]777;gitpigeon-re');
+  emit('ady\u0007prompt $ ');
+  emit('typed');
+  await settle();
+  const output = node.directFrames(TERMINAL_CHANNEL)
+    .filter((f) => f.kind === 'output')
+    .map((f) => Buffer.from(f.payload, 'base64').toString('utf8'))
+    .join('');
+  assert.equal(output, 'prompt $ typed');
+});
