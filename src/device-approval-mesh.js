@@ -68,6 +68,12 @@ export function validateMeshPairingRequest(value, now = Date.now()) {
       ...(Array.isArray(value.diagnostics.sessions) && value.diagnostics.sessions.length <= 50 ? { sessions: value.diagnostics.sessions.map((item) => ({
         repo: String(item?.repo ?? '').slice(0, 8),
         open: Boolean(item?.open),
+        ...(item?.presence && typeof item.presence === 'object' ? { presence: {
+          publishedAgoMs: Number.isSafeInteger(item.presence.publishedAgoMs) ? item.presence.publishedAgoMs : null,
+          version: item.presence.version == null ? null : String(item.presence.version).slice(0, 40),
+          deviceId: String(item.presence.deviceId ?? '').slice(0, 8),
+          ...(item.presence.error ? { error: String(item.presence.error).slice(0, 120) } : {}),
+        } } : {}),
         ...(item?.error ? { error: String(item.error).slice(0, 120) } : {}),
       })) } : {}),
     } } : {}),
@@ -135,6 +141,12 @@ export function createMeshPairingRequest({
       ...(Array.isArray(diagnostics.sessions) && diagnostics.sessions.length <= 50 ? { sessions: diagnostics.sessions.map((item) => ({
         repo: String(item?.repo ?? '').slice(0, 8),
         open: Boolean(item?.open),
+        ...(item?.presence && typeof item.presence === 'object' ? { presence: {
+          publishedAgoMs: Number.isSafeInteger(item.presence.publishedAgoMs) ? item.presence.publishedAgoMs : null,
+          version: item.presence.version == null ? null : String(item.presence.version).slice(0, 40),
+          deviceId: String(item.presence.deviceId ?? '').slice(0, 8),
+          ...(item.presence.error ? { error: String(item.presence.error).slice(0, 120) } : {}),
+        } } : {}),
         ...(item?.error ? { error: String(item.error).slice(0, 120) } : {}),
       })) } : {}),
     } } : {}),

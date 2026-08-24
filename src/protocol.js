@@ -131,6 +131,8 @@ export class RepositorySynchronizer {
       })
       : null;
     this.presenceTimer = null;
+    this.lastPresenceError = null;
+    this.lastPresenceRecord = null;
     this.lastPresenceAt = 0;
     this.lastPresenceIdentity = null;
     this.availableSnapshots = new Set();
@@ -184,7 +186,16 @@ export class RepositorySynchronizer {
       if (publish) await this.publishLocal();
       if (this.presenceHeartbeatMs > 0) {
         this.presenceTimer = setInterval(() => {
-          this.#enqueue(async () => { await this.#publishPresence(); });
+          this.#enqueue(async () => {
+            try {
+              await this.#publishPresence();
+            } catch (error) {
+              // Remember it: a machine whose presence dies silently vanishes
+              // from terminal rosters with a session that swears it is open.
+              this.lastPresenceError = String(error?.message ?? error).slice(0, 120);
+              throw error;
+            }
+          });
         }, this.presenceHeartbeatMs);
       }
       await this.waitForIdle();
@@ -201,6 +212,8 @@ export class RepositorySynchronizer {
   async stop() {
     if (this.presenceTimer) clearInterval(this.presenceTimer);
     this.presenceTimer = null;
+    this.lastPresenceError = null;
+    this.lastPresenceRecord = null;
     await this.waitForIdle();
     for (const unsubscribe of this.unsubscribe.splice(0)) {
       try { unsubscribe?.(); } catch { /* best effort */ }
@@ -362,6 +375,16 @@ export class RepositorySynchronizer {
       liveFiles: (await this.liveWorkspace.snapshot({ privatePaths: await this.workspace.list() }))
         .files.map((file) => file.path),
       lastResult: this.lastResult,
+    };
+  }
+
+  /** What this device's presence publishing is doing, for diagnostics. */
+  presenceDiagnostics() {
+    return {
+      publishedAgoMs: this.lastPresenceAt ? Date.now() - this.lastPresenceAt : null,
+      version: this.lastPresenceRecord === null ? null : String(this.lastPresenceRecord).slice(0, 40),
+      ...(this.lastPresenceError ? { error: this.lastPresenceError } : {}),
+      deviceId: String(this.config.deviceId).slice(0, 8),
     };
   }
 
@@ -775,6 +798,8 @@ export class RepositorySynchronizer {
     );
     this.lastPresenceIdentity = identity;
     this.lastPresenceAt = Date.now();
+    this.lastPresenceError = null;
+    this.lastPresenceRecord = record?.version ?? null;
     return record;
   }
 

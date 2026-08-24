@@ -319,6 +319,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   log.info(`Watching ${repository.root} as ${config.deviceId.slice(0, 8)}`);
 
   return {
+    presenceDiagnostics: () => synchronizer.presenceDiagnostics?.() ?? null,
     async close() {
       if (stopped) return;
       stopped = true;
@@ -604,6 +605,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
         sessions: [...sessions.entries()].map(([repository, record]) => ({
           repo: String(record.prepared?.config?.repositoryId ?? repository).slice(0, 8),
           open: Boolean(record.session),
+          ...(record.session?.presenceDiagnostics?.() ? { presence: record.session.presenceDiagnostics() } : {}),
           ...(repositoryErrors.get(repository)
             ? { error: String(repositoryErrors.get(repository)).slice(0, 120) }
             : {}),
