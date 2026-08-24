@@ -493,13 +493,25 @@ export class TerminalServer {
         if (Buffer.byteLength(candidate) > 24 * 1024) break;
         historySeed = candidate;
       }
+      // The service process inherits the identity of whatever terminal it
+      // was originally launched from — on macOS that meant every watcher
+      // shell carried Apple Terminal's TERM_PROGRAM and TERM_SESSION_ID, so
+      // /etc/zshrc ran Apple's session-restore and loaded that one session's
+      // saved history from ~/.zsh_sessions on every open (bypassing HISTFILE
+      // entirely), then re-saved it on exit. A GitPigeon session is not
+      // inside anyone's terminal app; it must not wear one's identity.
+      const inheritedEnv = { ...process.env };
+      for (const name of [
+        'TERM_PROGRAM', 'TERM_PROGRAM_VERSION', 'TERM_SESSION_ID',
+        'ITERM_SESSION_ID', 'ITERM_PROFILE', 'SHELL_SESSION_ID',
+      ]) delete inheritedEnv[name];
       terminal = await this.spawnPty(command.shell, command.args, {
         name: 'xterm-256color',
         cols,
         rows,
         cwd,
         env: {
-          ...process.env,
+          ...inheritedEnv,
           PATH: pathValue,
           TERM: 'xterm-256color',
           COLORTERM: 'truecolor',

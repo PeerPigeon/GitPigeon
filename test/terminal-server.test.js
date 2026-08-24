@@ -128,6 +128,10 @@ test('watcher terminal opens one bounded PTY and cleans it up on close', async (
   // rather than refusing a shell.
   const { homedir } = await import('node:os');
   assert.equal(spawned[0].options.cwd, homedir());
+  // The session must not impersonate the terminal app the service was
+  // launched from — Apple Terminal's session-restore hijacked history.
+  assert.equal(spawned[0].options.env.TERM_PROGRAM, undefined);
+  assert.equal(spawned[0].options.env.TERM_SESSION_ID, undefined);
   assert.match(spawned[0].options.env.GITPIGEON_DEVICE_ROSTER, /^[A-Za-z0-9_-]+$/);
   assert.equal(node.directFrames(TERMINAL_CHANNEL)[0]?.kind, 'opened');
   // Setup travels through startup files and spawn arguments — the shell
