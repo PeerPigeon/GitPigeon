@@ -596,7 +596,19 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     // Keep offering to pair for as long as this machine runs, so a browser
     // opened at any time is answered.
     pairingService = await startPairingService(root, log, {
-      indexDiagnostics: () => machineIndex.diagnostics(),
+      indexDiagnostics: () => ({
+        ...machineIndex.diagnostics(),
+        // Per-repository session health, so a machine whose repo session died
+        // says so in every peer's log instead of silently vanishing from
+        // terminal rosters.
+        sessions: [...sessions.entries()].map(([repository, record]) => ({
+          repo: String(record.prepared?.config?.repositoryId ?? repository).slice(0, 8),
+          open: Boolean(record.session),
+          ...(repositoryErrors.get(repository)
+            ? { error: String(repositoryErrors.get(repository)).slice(0, 120) }
+            : {}),
+        })),
+      }),
     });
     // So a browser on this machine can recognize the local watcher and open
     // its terminal with the keyboard shortcut.

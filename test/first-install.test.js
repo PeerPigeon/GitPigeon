@@ -43,7 +43,10 @@ test('the watcher keeps offering to pair with no deadline', async () => {
   // The machine reports what its index half is doing on every announcement,
   // so a watcher whose index node cannot reach anyone still says so through
   // the mesh it can reach.
-  assert.match(source, /indexDiagnostics: \(\) => machineIndex\.diagnostics\(\)/);
+  assert.match(source, /indexDiagnostics: \(\) => \(\{\n\s*\.\.\.machineIndex\.diagnostics\(\)/);
+  // Per-repository session health rides the same announcements, so a machine
+  // whose repo session died says so in every peer's log.
+  assert.match(source, /sessions: \[\.\.\.sessions\.entries\(\)\]/);
 });
 
 test('joining an existing index is still possible on purpose', async () => {

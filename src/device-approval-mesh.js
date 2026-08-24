@@ -65,6 +65,11 @@ export function validateMeshPairingRequest(value, now = Date.now()) {
       ...(value.diagnostics.selfSeenVersion ? { selfSeenVersion: String(value.diagnostics.selfSeenVersion).slice(0, 40) } : {}),
       ...(value.diagnostics.selfSeenName ? { selfSeenName: String(value.diagnostics.selfSeenName).slice(0, 60) } : {}),
       ...(value.diagnostics.rosterSeenVersion ? { rosterSeenVersion: String(value.diagnostics.rosterSeenVersion).slice(0, 40) } : {}),
+      ...(Array.isArray(value.diagnostics.sessions) && value.diagnostics.sessions.length <= 50 ? { sessions: value.diagnostics.sessions.map((item) => ({
+        repo: String(item?.repo ?? '').slice(0, 8),
+        open: Boolean(item?.open),
+        ...(item?.error ? { error: String(item.error).slice(0, 120) } : {}),
+      })) } : {}),
     } } : {}),
     platform: String(value.platform || 'unknown').slice(0, 32),
     arch: String(value.arch || 'unknown').slice(0, 32),
@@ -127,6 +132,11 @@ export function createMeshPairingRequest({
       ...(diagnostics.selfSeenVersion ? { selfSeenVersion: String(diagnostics.selfSeenVersion).slice(0, 40) } : {}),
       ...(diagnostics.selfSeenName ? { selfSeenName: String(diagnostics.selfSeenName).slice(0, 60) } : {}),
       ...(diagnostics.rosterSeenVersion ? { rosterSeenVersion: String(diagnostics.rosterSeenVersion).slice(0, 40) } : {}),
+      ...(Array.isArray(diagnostics.sessions) && diagnostics.sessions.length <= 50 ? { sessions: diagnostics.sessions.map((item) => ({
+        repo: String(item?.repo ?? '').slice(0, 8),
+        open: Boolean(item?.open),
+        ...(item?.error ? { error: String(item.error).slice(0, 120) } : {}),
+      })) } : {}),
     } } : {}),
     deviceName: String(deviceName || 'New device').trim().slice(0, 120),
     platform: String(platform).slice(0, 32),
@@ -297,7 +307,7 @@ export async function startDeviceApprovalResponder({
     if (request.requesterKind === 'native' && request.diagnostics) {
       const d = request.diagnostics;
       // Publish age moves every round; bucket it so only real changes log.
-      const line = `${request.deviceName} build=${d.build || '?'} indexPeers=${d.indexPeers ?? '?'} published=${d.publishedAgoMs === null ? 'never' : Math.round(d.publishedAgoMs / 60_000) + 'm ago'}${d.selfPutVersion ? ` selfPut=${d.selfPutVersion}` : ''}${d.selfSeenVersion ? ` selfSeen=${d.selfSeenVersion}` : ''}${d.selfSeenName ? ` selfSeenName="${d.selfSeenName}"` : ''}${d.rosterSeenVersion ? ` roster=${d.rosterSeenVersion}` : ''}${d.indexError ? ` error="${d.indexError}"` : ''}`;
+      const line = `${request.deviceName} build=${d.build || '?'} indexPeers=${d.indexPeers ?? '?'} published=${d.publishedAgoMs === null ? 'never' : Math.round(d.publishedAgoMs / 60_000) + 'm ago'}${d.selfPutVersion ? ` selfPut=${d.selfPutVersion}` : ''}${d.selfSeenVersion ? ` selfSeen=${d.selfSeenVersion}` : ''}${d.selfSeenName ? ` selfSeenName="${d.selfSeenName}"` : ''}${d.rosterSeenVersion ? ` roster=${d.rosterSeenVersion}` : ''}${d.indexError ? ` error="${d.indexError}"` : ''}${Array.isArray(d.sessions) ? ` sessions=${JSON.stringify(d.sessions)}` : ''}`;
       if (statusLines.get(request.requestId) !== line) {
         statusLines.set(request.requestId, line);
         logger.info?.(`[watcher-status] ${line}`);
