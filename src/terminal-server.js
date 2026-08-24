@@ -228,7 +228,10 @@ export class TerminalServer {
     if (this.started) return;
     this.started = true;
     this.unsubscribe = onChannelMessage(this.node, this.repositoryId, TERMINAL_CHANNEL, (frame, { peerId, kind }) => {
-      if (kind !== 'direct') return;
+      // Broadcast frames are as authenticated as direct ones — the room
+      // crypto gates membership either way — and a broadcast arrives when a
+      // stale peer id makes direct dialing miss. Replies go direct to the
+      // envelope's fromPeerId, which is real and current by construction.
       this.#receive(peerId, frame).catch((error) => this.logger.debug?.(`Terminal message: ${error.message}`));
     });
     this.sweepTimer = setInterval(() => this.#sweep(), SWEEP_MS);
