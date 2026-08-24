@@ -231,6 +231,21 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     logger: log,
     onFileWritten: () => schedulePublish(),
   });
+  // Build offers travel every room these watchers share. The index room is
+  // the flakiest link on some networks — watchers whose index connection
+  // stalls still hold rock-solid repository rooms, and an update channel
+  // that only ever rode the weakest mesh went silent exactly when needed.
+  const sessionPeerUpdates = startPeerUpdates({
+    node,
+    root: machineIndexRoot(),
+    currentVersion: GITPIGEON_VERSION,
+    standalone: IS_STANDALONE,
+    logger: log,
+    onUpdate: async () => {
+      await stopWatchService(machineIndexRoot());
+      await startWatchService({ root: machineIndexRoot() });
+    },
+  });
   ownership.owns = (file) => realtimeServer.ownsPath(file);
   let changeTimer;
   let filesystemWatcher;
@@ -311,6 +326,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       node.off('peerConnected', onPeerConnected);
       terminalServer.stop();
       realtimeServer.stop();
+      await sessionPeerUpdates.stop().catch(() => {});
       while (starting || publishing) await sleep(10);
       await synchronizer.stop();
       // The node belongs to the machine index service, not to this session.

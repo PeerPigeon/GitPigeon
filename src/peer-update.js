@@ -46,6 +46,9 @@ async function digestFile(filename) {
   return hash.digest('hex');
 }
 
+// One fetch machine-wide, however many rooms carry offers.
+let activeFetchGlobal = false;
+
 export function startPeerUpdates({
   node,
   root,
@@ -91,7 +94,8 @@ export function startPeerUpdates({
   };
 
   const beginFetch = async (peerId, offer) => {
-    if (fetching) return;
+    if (fetching || activeFetchGlobal) return;
+    activeFetchGlobal = true;
     const version = String(offer.version);
     const directory = path.join(path.resolve(root), 'updates', version);
     const target = path.join(directory, platform === 'win32' ? 'git-pigeon.exe' : 'git-pigeon');
@@ -129,11 +133,13 @@ export function startPeerUpdates({
     await fetching.handle.close().catch(() => {});
     await rm(fetching.temporary, { force: true }).catch(() => {});
     fetching = null;
+    activeFetchGlobal = false;
   };
 
   const finishFetch = async () => {
     const job = fetching;
     fetching = null;
+    activeFetchGlobal = false;
     await job.handle.close();
     const digest = await digestFile(job.temporary);
     if (digest !== job.sha256) {
