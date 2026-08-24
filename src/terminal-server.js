@@ -290,7 +290,15 @@ export class TerminalServer {
     if (!session || frame.sequence <= session.receivedSequence) return;
     session.receivedSequence = frame.sequence;
     session.lastSeenAt = Date.now();
-    if (frame.kind === 'ping') return;
+    if (frame.kind === 'ping') {
+      // Answer, so the browser can tell a live session from one whose server
+      // restarted out from under it — silence and health looked identical.
+      const session = this.sessions.get(id);
+      if (session) {
+        this.#send(peerId, frame.sessionId, 'pong', ++session.sentSequence, {}).catch(() => {});
+      }
+      return;
+    }
     if (frame.kind === 'close') {
       this.#close(session);
       return;
