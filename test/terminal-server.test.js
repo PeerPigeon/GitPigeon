@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -128,15 +130,23 @@ test('watcher terminal opens one bounded PTY and cleans it up on close', async (
   assert.equal(spawned[0].options.cwd, homedir());
   assert.match(spawned[0].options.env.GITPIGEON_DEVICE_ROSTER, /^[A-Za-z0-9_-]+$/);
   assert.equal(node.directFrames(TERMINAL_CHANNEL)[0]?.kind, 'opened');
+  // Setup travels through startup files and spawn arguments — the shell
+  // never receives it as typed input, so nothing is echoed and nothing
+  // lands in the shell's own command history.
+  assert.equal(spawned[0].terminal.writes.length, 0);
+  const zdot = spawned[0].options.env.ZDOTDIR;
+  assert.ok(zdot, 'zsh sessions get a ZDOTDIR wrapper');
+  const rc = await readFile(path.join(zdot, '.zshrc'), 'utf8');
   // machine [directory/*] gitpigeon $ — same shape on every device.
-  assert.match(spawned[0].terminal.writes[0], /test-device.*\[\.\.\/%1~\/\*\].*\$/);
+  assert.match(rc, /test-device.*\[\.\.\/%1~\/\*\].*\$/);
+  assert.match(rc, /gitpigeon-ready/);
 
   node.receive('browser-peer', repositoryId, TERMINAL_CHANNEL, browserFrame('input', 1, {
     payload: Buffer.from('pwd\r').toString('base64'),
   }));
   node.receive('browser-peer', repositoryId, TERMINAL_CHANNEL, browserFrame('resize', 2, { cols: 90, rows: 25 }));
   await settle();
-  assert.equal(spawned[0].terminal.writes.at(-1), 'pwd\r');
+  assert.deepEqual(spawned[0].terminal.writes, ['pwd\r']);
   assert.deepEqual(spawned[0].terminal.resizes, [[90, 25]]);
 
   node.receive('browser-peer', repositoryId, TERMINAL_CHANNEL, browserFrame('close', 3));

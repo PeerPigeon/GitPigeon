@@ -1,5 +1,6 @@
 import { chmod, mkdir, stat, writeFile } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
+import { machineIndexRoot } from './machine-index.js';
 import path from 'node:path';
 import process from 'node:process';
 import { createRequire } from 'node:module';
@@ -195,11 +196,19 @@ const READY_MARKER = '\u001b]777;gitpigeon-ready\u0007';
 const READY_TIMEOUT_MS = 4_000;
 const READY_MAX_BYTES = 65_536;
 
-function shellCommand(deviceName) {
+async function shellCommand(deviceName) {
   // "Daniels-MacBook-Pro [../test/*] $" — a dimmed machine name (context),
   // the live directory in normal weight (the thing you check), and a bold
   // accent-green $ as the anchor. The brand lives in the UI chrome, not on
   // every prompt line. 38;2;216;255;88 is the terminal theme's cursor green.
+  //
+  // None of this is ever TYPED into the shell. The setup used to be written
+  // to the pty as an input line, which the shell echoed into the session and
+  // recorded into its own command history — the "preamble" on every open,
+  // recalled forever by an up-arrow. Setup travels through startup files and
+  // spawn arguments instead: zsh reads it from a ZDOTDIR wrapper, bash from
+  // an --rcfile, PowerShell and cmd take it as a command argument. The shell
+  // never sees it as input, so it can't echo it and can't remember it.
   const shortName = String(deviceName).replace(/\.local$/i, '');
   const deviceCommand = DEVICE_COMMAND.map((value) => quoteShell(value)).join(' ');
   if (process.platform === 'win32') {
@@ -209,16 +218,25 @@ function shellCommand(deviceName) {
     const psPrompt = `${esc}[2m${shortName}${esc}[0m [../$(Split-Path -Leaf (Get-Location))/*] ${esc}[1;38;2;216;255;88m$${esc}[0m `;
     // cmd has no ANSI in PROMPT reliably; plain text there.
     const cmdPrompt = `${shortName} [../$P/*] $$ `;
+    if (powershell) {
+      return {
+        shell,
+        args: ['-NoExit', '-Command',
+          `function global:device { & ${deviceCommand} terminal-device @args }; $function:prompt = { "${psPrompt.replaceAll('"', '`"')}" }; Clear-Host; [Console]::Write([char]27+']777;gitpigeon-ready'+[char]7)`],
+        env: {},
+        initialize: '',
+      };
+    }
     return {
       shell,
-      args: [],
-      initialize: powershell
-        ? `function global:device { & ${deviceCommand} terminal-device @args }; $function:prompt = { "${psPrompt.replaceAll('"', '`"')}" }; Clear-Host; [Console]::Write([char]27+']777;gitpigeon-ready'+[char]7)\r`
-        : `doskey device=${DEVICE_COMMAND.map((value) => `"${value.replaceAll('"', '""')}"`).join(' ')} terminal-device $*& prompt ${cmdPrompt.replaceAll('&', '^&')}& cls\r`,
+      args: ['/K', `doskey device=${DEVICE_COMMAND.map((value) => `"${value.replaceAll('"', '""')}"`).join(' ')} terminal-device $*& prompt ${cmdPrompt.replaceAll('&', '^&')}& cls`],
+      env: {},
+      initialize: '',
     };
   }
   const shell = process.env.SHELL && path.isAbsolute(process.env.SHELL) ? process.env.SHELL : '/bin/sh';
   const zsh = /(?:^|\/)zsh$/.test(shell);
+  const bash = /(?:^|\/)bash$/.test(shell);
   // Zero-width escape wrapping (%{...%} / \[...\]) keeps line editing from
   // miscounting the prompt width. \W and %1~ track the directory live.
   const dim = '\\033[2m';
@@ -226,12 +244,60 @@ function shellCommand(deviceName) {
   const reset = '\\033[0m';
   const zshPrompt = `%{${dim}%}${shortName}%{${reset}%} [../%1~/*] %{${accent}%}$%{${reset}%} `.replaceAll("'", "'\\''");
   const bashPrompt = `\\[${dim}\\]${shortName}\\[${reset}\\] [../\\W/*] \\[${accent}\\]$\\[${reset}\\] `.replaceAll("'", "'\\''");
+  // The rc tail: define the device helper, set the prompt, then clear the
+  // screen (rc banners are gated out server-side, but they still moved the
+  // cursor) and print the ready marker that opens the output gate.
+  const posixTail = (promptVariable, promptValue) => [
+    `device() { ${deviceCommand} terminal-device "$@"; }`,
+    `export ${promptVariable}=$'${promptValue}'`,
+    `printf '\\033[2J\\033[3J\\033[H\\033]777;gitpigeon-ready\\a'`,
+    '',
+  ].join('\n');
+  if (zsh) {
+    // A ZDOTDIR wrapper: each stage sources the user's own file first, then
+    // .zshrc appends the session setup and restores the user's ZDOTDIR.
+    const directory = path.join(machineIndexRoot(), 'shell', 'zdot');
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const bounce = (file) => [
+      'GITPIGEON_WRAP_ZDOTDIR="$ZDOTDIR"',
+      'ZDOTDIR="${GITPIGEON_USER_ZDOTDIR:-$HOME}"',
+      `[ -f "$ZDOTDIR/${file}" ] && builtin source "$ZDOTDIR/${file}"`,
+      'GITPIGEON_USER_ZDOTDIR="$ZDOTDIR"',
+      'ZDOTDIR="$GITPIGEON_WRAP_ZDOTDIR"',
+      '',
+    ].join('\n');
+    await writeFile(path.join(directory, '.zshenv'), bounce('.zshenv'), { mode: 0o600 });
+    await writeFile(path.join(directory, '.zprofile'), bounce('.zprofile'), { mode: 0o600 });
+    await writeFile(path.join(directory, '.zshrc'), [
+      'ZDOTDIR="${GITPIGEON_USER_ZDOTDIR:-$HOME}"',
+      '[ -f "$ZDOTDIR/.zshrc" ] && builtin source "$ZDOTDIR/.zshrc"',
+      'unset GITPIGEON_USER_ZDOTDIR GITPIGEON_WRAP_ZDOTDIR',
+      posixTail('PROMPT', zshPrompt),
+    ].join('\n'), { mode: 0o600 });
+    return {
+      shell,
+      args: [],
+      env: { ZDOTDIR: directory, GITPIGEON_USER_ZDOTDIR: process.env.ZDOTDIR || homedir() },
+      initialize: '',
+    };
+  }
+  if (bash) {
+    const directory = path.join(machineIndexRoot(), 'shell');
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const rcfile = path.join(directory, 'gitpigeon.bashrc');
+    await writeFile(rcfile, [
+      '[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"',
+      posixTail('PS1', bashPrompt),
+    ].join('\n'), { mode: 0o600 });
+    return { shell, args: ['--rcfile', rcfile], env: {}, initialize: '' };
+  }
+  // An unknown shell falls back to typing the setup; the output gate hides
+  // the echo, though the shell's own history may keep the line.
   return {
     shell,
     args: [],
-    initialize: zsh
-      ? `device() { ${deviceCommand} terminal-device "$@"; }; export PROMPT=$'${zshPrompt}'; clear; printf '\\033]777;gitpigeon-ready\\a'\r`
-      : `device() { ${deviceCommand} terminal-device "$@"; }; export PS1=$'${bashPrompt}'; clear; printf '\\033]777;gitpigeon-ready\\a'\r`,
+    env: {},
+    initialize: `device() { ${deviceCommand} terminal-device "$@"; }; export PS1=$'${bashPrompt}'; clear; printf '\\033]777;gitpigeon-ready\\a'\r`,
   };
 }
 
@@ -362,10 +428,11 @@ export class TerminalServer {
     }
     const cols = boundedInteger(frame.cols, 20, 400, 100);
     const rows = boundedInteger(frame.rows, 5, 200, 30);
-    const command = shellCommand(this.deviceName);
     const pathValue = [BIN_DIRECTORY, process.env.PATH].filter(Boolean).join(path.delimiter);
     let terminal;
+    let command;
     try {
+      command = await shellCommand(this.deviceName);
       // The terminal belongs to the device; the repository directory is only
       // the preferred working directory. A watcher can carry a repository it
       // has no local copy of yet, and refusing a shell over a missing folder
@@ -383,6 +450,7 @@ export class TerminalServer {
           TERM: 'xterm-256color',
           COLORTERM: 'truecolor',
           GITPIGEON_DEVICE_ROSTER: Buffer.from(JSON.stringify(devices)).toString('base64url'),
+          ...command.env,
         },
       });
     } catch (error) {
@@ -423,7 +491,7 @@ export class TerminalServer {
       this.#close(session);
     }));
     await this.#send(peerId, session.sessionId, 'opened', ++session.sentSequence, { deviceName: this.deviceName });
-    terminal.write(command.initialize);
+    if (command.initialize) terminal.write(command.initialize);
   }
 
   #gateOutput(session, data) {
