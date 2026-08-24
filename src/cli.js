@@ -52,7 +52,6 @@ import { RealtimeWorkspaceServer } from './realtime-server.js';
 import { WorkspaceFiles } from './workspace.js';
 import { clearInstalledUpdate, startAutomaticUpdates } from './auto-update.js';
 import { pullPeerUpdateOnce, startPeerUpdates } from './peer-update.js';
-import { startLocalIdentityServer } from './local-identity.js';
 import { GITPIGEON_VERSION, IS_STANDALONE } from './version.js';
 
 const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
@@ -461,7 +460,6 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let indexWatcher;
   let reconciling = false;
   let peerUpdates;
-  let localIdentity;
   let automaticUpdates;
   let installedUpdate;
   let controlServer;
@@ -612,14 +610,6 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
         })),
       }),
     });
-    // So a browser on this machine can recognize the local watcher and open
-    // its terminal with the keyboard shortcut.
-    localIdentity = await startLocalIdentityServer({
-      serviceInstanceId,
-      machineIndexId: machineIndex.index.indexId,
-      root,
-      logger: log,
-    });
     // Paired peers can remove a repository or rotate the index secret.
     controlServer = new ControlServer({
       node: machineIndex.node,
@@ -682,7 +672,6 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     await stopped;
   } finally {
     automaticUpdates?.stop();
-    localIdentity?.close();
     await peerUpdates?.stop()?.catch?.(() => {});
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);
