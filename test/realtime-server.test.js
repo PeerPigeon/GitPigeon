@@ -93,3 +93,82 @@ test('watcher seeds from the file and merges edits without stomping', async (t) 
 
   browser.destroy();
 });
+
+test('only the smallest live device seeds; the other adopts, never unions', async (t) => {
+  const rootA = await mkdtemp(path.join(tmpdir(), 'gitpigeon-seed-a-'));
+  const rootB = await mkdtemp(path.join(tmpdir(), 'gitpigeon-seed-b-'));
+  t.after(() => Promise.all([
+    rm(rootA, { recursive: true, force: true }),
+    rm(rootB, { recursive: true, force: true }),
+  ]));
+  const repoA = await GitRepository.init(rootA);
+  const repoB = await GitRepository.init(rootB);
+  const repositoryId = 'a'.repeat(64);
+  // The overlay lags between machines, so at seed time the two copies of the
+  // same file routinely differ. Both watchers seeding unioned the versions —
+  // the indefinitely-duplicating loop.
+  await mkdir(path.join(rootA, 'src'), { recursive: true });
+  await mkdir(path.join(rootB, 'src'), { recursive: true });
+  await writeFile(path.join(rootA, 'src/example.js'), 'authoritative content\n');
+  await writeFile(path.join(rootB, 'src/example.js'), 'stale lagging copy\n');
+
+  const nodeA = new FakeNode();
+  const nodeB = new FakeNode();
+  const serverA = new RealtimeWorkspaceServer({ node: nodeA, repository: repoA, repositoryId, secret: 's', deviceId: 'aaaa-device' });
+  const serverB = new RealtimeWorkspaceServer({ node: nodeB, repository: repoB, repositoryId, secret: 's', deviceId: 'bbbb-device' });
+  await serverA.start();
+  await serverB.start();
+  t.after(() => { serverA.stop(); serverB.stop(); });
+
+  // Presence crosses between them, so B knows a smaller device is alive.
+  const bridgePresence = () => {
+    for (const value of nodeA.broadcastFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'presence')) {
+      nodeB.receive('peer-a', repositoryId, REALTIME_CHANNEL, value);
+    }
+    for (const value of nodeB.broadcastFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'presence')) {
+      nodeA.receive('peer-b', repositoryId, REALTIME_CHANNEL, value);
+    }
+  };
+  bridgePresence();
+  await settle();
+
+  const documentId = createHash('sha256').update([
+    'gitpigeon-realtime-v2', repositoryId, 'refs/heads/main', 'src/example.js',
+  ].join('\0')).digest('hex');
+  const open = (kindNode, doc) => ({
+    documentId,
+    path: 'src/example.js',
+    revision: 'refs/heads/main',
+    baseHash: 'c'.repeat(64),
+    messageId: randomBytes(16).toString('hex'),
+    kind: 'sync-request',
+    part: 0,
+    total: 1,
+    payload: Buffer.from(Y.encodeStateVector(doc)).toString('base64'),
+  });
+  const browser = new Y.Doc();
+  nodeA.receive('browser', repositoryId, REALTIME_CHANNEL, open(nodeA, browser));
+  nodeB.receive('browser', repositoryId, REALTIME_CHANNEL, open(nodeB, browser));
+  await settle();
+
+  // A (smallest id) answered with its seed; B answered nothing.
+  const fromA = nodeA.directFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'sync-response');
+  const fromB = nodeB.directFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'sync-response');
+  assert.equal(fromA.length, 1);
+  assert.equal(fromB.length, 0);
+  Y.applyUpdate(browser, Buffer.from(fromA[0].payload, 'base64'));
+  assert.equal(browser.getText('content').toString(), 'authoritative content\n');
+
+  // B's own sync-request reaches A; the response seeds B with A's content —
+  // adopted, not unioned with its stale copy.
+  for (const value of nodeB.broadcastFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'sync-request')) {
+    nodeA.receive('peer-b', repositoryId, REALTIME_CHANNEL, value);
+  }
+  await settle();
+  for (const { peerId, frame } of nodeA.direct.filter((entry) => entry.peerId === 'peer-b' && entry.frame.channel === REALTIME_CHANNEL)) {
+    void peerId;
+    nodeB.receive('peer-a', repositoryId, REALTIME_CHANNEL, frame);
+  }
+  await settle();
+  assert.equal(await readFile(path.join(rootB, 'src/example.js'), 'utf8'), 'authoritative content\n');
+});

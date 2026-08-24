@@ -34,10 +34,17 @@ function validFrame(frame, repositoryId) {
     && typeof frame.payload === 'string' && frame.payload.length <= Math.ceil(CHUNK_BYTES * 4 / 3) + 8;
 }
 
+const PRESENCE_INTERVAL_MS = 10_000;
+const PRESENCE_FRESH_MS = 30_000;
+const SEED_RETRY_MS = 2_000;
+const SEED_FALLBACK_MS = 10_000;
+
 export class RealtimeWorkspaceServer {
-  constructor({ node, repository, secret, repositoryId, logger = {}, onFileWritten = null }) {
+  constructor({ node, repository, secret, repositoryId, deviceId = null, logger = {}, onFileWritten = null }) {
     this.node = node;
     this.repository = repository;
+    this.deviceId = deviceId ? String(deviceId) : null;
+    this.peerWatchers = new Map();
     this.secret = secret;
     this.repositoryId = repositoryId;
     this.logger = logger;
@@ -55,9 +62,47 @@ export class RealtimeWorkspaceServer {
     this.started = true;
     await this.liveWorkspace.init();
     this.unsubscribe = onChannelMessage(this.node, this.repositoryId, REALTIME_CHANNEL, (frame, { peerId }) => {
+      if (frame?.kind === 'presence') {
+        if (typeof frame.deviceId === 'string' && frame.deviceId && frame.deviceId.length <= 128) {
+          this.peerWatchers.set(frame.deviceId, Date.now());
+        }
+        return;
+      }
       this.#receiveFrame(peerId, frame).catch((error) => this.logger.debug?.(`Realtime workspace: ${error.message}`));
     });
     this.node.on('peerConnected', this.onPeer);
+    this.#announcePresence();
+    this.presenceTimer = setInterval(() => this.#announcePresence(), PRESENCE_INTERVAL_MS);
+    this.presenceTimer.unref?.();
+  }
+
+  #announcePresence() {
+    if (!this.started || !this.deviceId) return;
+    broadcastChannel(this.node, this.repositoryId, REALTIME_CHANNEL, {
+      kind: 'presence',
+      deviceId: this.deviceId,
+    }).catch((error) => this.logger.debug?.(`Realtime presence: ${error?.message ?? error}`));
+  }
+
+  /**
+   * Whether another live watcher outranks this one as the seeder. Every
+   * watcher seeding its document from its own file copy was the duplication
+   * loop's last engine: the copies diverge while the overlay lags, so the
+   * seeds differ, and merging them unions the file's content — doubled on
+   * every watcher restart. Exactly one watcher may seed: the one with the
+   * smallest device id among those alive on this room.
+   */
+  #deferToPeerSeeder() {
+    if (!this.deviceId) return false;
+    const now = Date.now();
+    for (const [deviceId, at] of this.peerWatchers) {
+      if (now - at > PRESENCE_FRESH_MS) {
+        this.peerWatchers.delete(deviceId);
+        continue;
+      }
+      if (deviceId < this.deviceId) return true;
+    }
+    return false;
   }
 
   stop() {
@@ -66,7 +111,12 @@ export class RealtimeWorkspaceServer {
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.node.off('peerConnected', this.onPeer);
-    for (const state of this.documents.values()) state.doc.destroy();
+    if (this.presenceTimer) clearInterval(this.presenceTimer);
+    this.presenceTimer = null;
+    for (const state of this.documents.values()) {
+      if (state.seedTimer) clearInterval(state.seedTimer);
+      state.doc.destroy();
+    }
     this.documents.clear();
     this.assemblies.clear();
   }
@@ -92,7 +142,7 @@ export class RealtimeWorkspaceServer {
     let file;
     try { file = this.liveWorkspace.normalize(input); } catch { return; }
     for (const state of this.documents.values()) {
-      if (state.path !== file || state.writing) continue;
+      if (state.path !== file || state.writing || !state.seeded) continue;
       let content = '';
       try { content = await readFile(path.join(this.repository.root, ...file.split('/')), 'utf8'); }
       catch (error) { if (error?.code !== 'ENOENT') throw error; }
@@ -186,25 +236,58 @@ export class RealtimeWorkspaceServer {
       baseHash: frame.baseHash,
       writing: false,
       hydrated: true,
+      seeded: true,
+      seedTimer: null,
       lastWritten: null,
       lastActivityAt: Date.now(),
     };
-    // The watcher is the seeding authority: a new document starts as the
-    // file's current content, seeded deterministically (the client id derives
-    // from the content) so two watchers seeding the same file converge on
-    // identical operations instead of duplicating it.
-    let content = '';
-    try { content = await readFile(path.join(this.repository.root, ...normalized.split('/')), 'utf8'); }
-    catch (error) { if (error?.code !== 'ENOENT') throw error; }
-    if (content) {
-      const contentHash = createHash('sha256').update(content).digest('hex');
-      const seed = new Y.Doc({ gc: false });
-      seed.clientID = Number.parseInt(contentHash.slice(0, 8), 16) || 1;
-      seed.getText('content').insert(0, content);
-      Y.applyUpdate(doc, Y.encodeStateAsUpdate(seed), 'seed');
-      seed.destroy();
+    // Exactly one watcher seeds a new document: the smallest live device id
+    // on this room. Every watcher seeding from its own file copy was the
+    // duplication loop's last engine — the copies diverge while the overlay
+    // lags, the seeds differ, and merging them unions the content, doubled
+    // again on every restart. Everyone else opens empty, asks the mesh, and
+    // adopts what the seeder answers; if the seeder never answers, seed from
+    // the local file after a deadline rather than staying blank forever.
+    const seedFromFile = async () => {
+      let content = '';
+      try { content = await readFile(path.join(this.repository.root, ...normalized.split('/')), 'utf8'); }
+      catch (error) { if (error?.code !== 'ENOENT') throw error; }
+      if (content && state.text.length === 0) {
+        const contentHash = createHash('sha256').update(content).digest('hex');
+        const seed = new Y.Doc({ gc: false });
+        seed.clientID = Number.parseInt(contentHash.slice(0, 8), 16) || 1;
+        seed.getText('content').insert(0, content);
+        Y.applyUpdate(doc, Y.encodeStateAsUpdate(seed), 'seed');
+        seed.destroy();
+      }
+      state.lastWritten = content;
+      state.seeded = true;
+    };
+    if (!this.#deferToPeerSeeder()) {
+      await seedFromFile();
+    } else {
+      state.seeded = false;
+      const startedAt = Date.now();
+      const ask = () => {
+        this.#send({ ...frame, kind: 'sync-request', payload: Y.encodeStateVector(doc) }).catch(() => {});
+      };
+      ask();
+      state.seedTimer = setInterval(() => {
+        if (state.seeded) {
+          clearInterval(state.seedTimer);
+          state.seedTimer = null;
+          return;
+        }
+        if (Date.now() - startedAt >= SEED_FALLBACK_MS) {
+          clearInterval(state.seedTimer);
+          state.seedTimer = null;
+          seedFromFile().catch((error) => this.logger.debug?.(`Realtime seed fallback: ${error.message}`));
+          return;
+        }
+        ask();
+      }, SEED_RETRY_MS);
+      state.seedTimer.unref?.();
     }
-    state.lastWritten = content;
     doc.on('update', (update, origin) => {
       if (origin === 'remote' || origin === 'seed') return;
       this.#send({ ...frame, kind: 'update', payload: update }).catch(() => {});
@@ -218,6 +301,9 @@ export class RealtimeWorkspaceServer {
     if (!state) return;
     state.lastActivityAt = Date.now();
     if (frame.kind === 'sync-request') {
+      // A document still waiting to adopt the seeder's content has nothing
+      // authoritative to answer with.
+      if (!state.seeded) return;
       await this.#send({ ...frame, kind: 'sync-response', payload: Y.encodeStateAsUpdate(state.doc, frame.payload) }, peerId);
       return;
     }
@@ -226,6 +312,15 @@ export class RealtimeWorkspaceServer {
     // after every keystroke batch: gossip already delivers broadcasts to the
     // room, so all of it was amplification that raced the next keystroke.
     Y.applyUpdate(state.doc, frame.payload, 'remote');
+    if (!state.seeded && state.text.length > 0) {
+      // The elected seeder answered; its content is this document's base.
+      state.seeded = true;
+      if (state.seedTimer) {
+        clearInterval(state.seedTimer);
+        state.seedTimer = null;
+      }
+    }
+    if (!state.seeded) return;
     await this.#write(state);
   }
 

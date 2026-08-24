@@ -227,6 +227,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     repository,
     secret: config.secret,
     repositoryId: config.repositoryId,
+    deviceId: config.deviceId,
     logger: log,
     onFileWritten: () => schedulePublish(),
   });
