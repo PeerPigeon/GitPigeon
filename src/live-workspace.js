@@ -133,11 +133,15 @@ export class LiveWorkspace {
     }
   }
 
-  async prepare(files, baselines, { restoreAll = false } = {}) {
+  async prepare(files, baselines, { restoreAll = false, except = new Set() } = {}) {
     const incoming = new Set(files.map((file) => this.normalize(file.path)));
+    // `except` paths are never retraction targets: a path owned by a live
+    // realtime session is deliberately absent from the incoming set, and
+    // treating that absence as "the remote retracted it" DELETED the very
+    // file the session was editing — on every machine.
     const targets = Object.keys(baselines)
       .map((file) => this.normalize(file))
-      .filter((file) => restoreAll || !incoming.has(file))
+      .filter((file) => (restoreAll || !incoming.has(file)) && !except.has(file))
       .sort();
     const restored = [];
     const conflicts = [];

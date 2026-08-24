@@ -545,16 +545,29 @@ export class RepositorySynchronizer {
       // A path owned by a live realtime session has exactly one writer: the
       // document. Applying the overlay's copy as well re-delivered the same
       // content at a different latency, which read as an external edit and
-      // reverted or duplicated fresh keystrokes indefinitely.
+      // reverted or duplicated fresh keystrokes indefinitely. The owned set
+      // must ALSO shield prepare() below: filtering owned paths out of the
+      // incoming list made their absence read as a remote retraction, and
+      // retraction of a file with no HEAD copy is deletion — the shield fed
+      // the session's own file to the reaper.
+      const ownedPaths = new Set();
       liveFiles = liveFiles.filter((incoming) => {
         let owned = false;
         try { owned = this.ownsLivePath(incoming.path); } catch { owned = false; }
-        if (owned) liveBaselines[this.liveWorkspace.normalize(incoming.path)] = incoming.deleted ? null : incoming.sha256;
+        if (owned) {
+          const normalized = this.liveWorkspace.normalize(incoming.path);
+          ownedPaths.add(normalized);
+          liveBaselines[normalized] = incoming.deleted ? null : incoming.sha256;
+        }
         return !owned;
       });
+      for (const file of Object.keys(liveBaselines)) {
+        try { if (this.ownsLivePath(file)) ownedPaths.add(this.liveWorkspace.normalize(file)); } catch { /* not owned */ }
+      }
       const refsChanged = this.state.importedRefs[head.deviceId] !== head.refsDigest;
       const prepared = await this.liveWorkspace.prepare(liveFiles, liveBaselines, {
         restoreAll: refsChanged,
+        except: ownedPaths,
       });
       if (bundleFile) gitResult = await this.repository.importBundle(bundleFile, head.deviceId);
       const fileResult = await this.workspace.apply(
