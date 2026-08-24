@@ -1398,20 +1398,33 @@ async function commandUpdate(args, verbose) {
   } else {
     // The LAN channel: whichever paired watcher runs a newer build offers it
     // over the encrypted index mesh; this machine pulls, verifies and
-    // installs it — no release required.
-    const machineIndex = await connectMachineIndexService(log, { root });
+    // installs it — no release required. Join as a guest node, not a second
+    // index service: the full service publishes records and takes the state
+    // lock the running watcher already holds, which timed out instead of
+    // updating.
+    const current = await loadMachineIndex({ root, create: false });
+    const { installNativeWebRTC } = await import('./webrtc.js');
+    await installNativeWebRTC();
+    const { PeerPigeonNode } = await import('peerpigeon');
+    const { INDEX_NETWORK_ID } = await import('./machine-index.js');
+    const node = new PeerPigeonNode({
+      crypto: { roomId: `gitpigeon:index:${current.indexId}`, roomSecret: current.secret },
+      networkId: INDEX_NETWORK_ID,
+      sessionId: current.indexId,
+    });
+    await node.start();
     try {
       console.log('Looking for a newer build on the mesh…');
       result = await pullPeerUpdateOnce({
-        node: machineIndex.node,
+        node,
         root,
         currentVersion: GITPIGEON_VERSION,
-        standalone: IS_STANDALONE,
+        standalone: false,
         logger: log,
         timeoutMs: 60_000,
       });
     } finally {
-      await machineIndex.close().catch(() => {});
+      await node.destroy().catch(() => {});
     }
     if (!result.updated) {
       console.log(`No paired watcher is offering anything newer than ${GITPIGEON_VERSION}.`);
