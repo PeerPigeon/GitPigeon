@@ -138,6 +138,62 @@ export class RealtimeWorkspaceServer {
     return false;
   }
 
+  /**
+   * Move a repository item — dragged in a browser, executed here, on every
+   * watcher: each machine renames its own copy, so the move is one operation
+   * fleet-wide instead of a delete-and-recreate ripple through the overlay.
+   */
+  async #moveItem(peerId, frame) {
+    const replyTo = typeof frame.replyTo === 'string' && /^[a-f0-9]{64}$/.test(frame.replyTo) ? frame.replyTo : peerId;
+    const respond = async (result) => {
+      try {
+        await sendChannelDirect(this.node, replyTo, this.repositoryId, REALTIME_CHANNEL, {
+          kind: 'move-result',
+          moveId: String(frame.moveId ?? '').slice(0, 64),
+          ...result,
+        });
+      } catch { /* the list refresh reports the truth regardless */ }
+    };
+    let from;
+    let to;
+    try {
+      from = this.liveWorkspace.normalize(String(frame.fromPath ?? ''));
+      to = this.liveWorkspace.normalize(String(frame.toPath ?? ''));
+    } catch (error) {
+      await respond({ ok: false, error: `Invalid path: ${error.message}` });
+      return;
+    }
+    if (from === to) {
+      await respond({ ok: true, unchanged: true });
+      return;
+    }
+    const absoluteFrom = path.join(this.repository.root, ...from.split('/'));
+    const absoluteTo = path.join(this.repository.root, ...to.split('/'));
+    try {
+      await mkdir(path.dirname(absoluteTo), { recursive: true });
+      await rename(absoluteFrom, absoluteTo);
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        // This machine's copy has not synced yet; the overlay catches it up.
+        await respond({ ok: true, deferred: true });
+        return;
+      }
+      await respond({ ok: false, error: error.message });
+      return;
+    }
+    // Any live document on the old path is orphaned by design: the document
+    // identity is the path. Views reopen on the new one.
+    for (const [documentId, state] of [...this.documents]) {
+      if (state.path === from) {
+        if (state.seedTimer) clearInterval(state.seedTimer);
+        state.doc.destroy();
+        this.documents.delete(documentId);
+      }
+    }
+    this.onFileWritten?.(to);
+    await respond({ ok: true });
+  }
+
   async filesystemChanged(input) {
     let file;
     try { file = this.liveWorkspace.normalize(input); } catch { return; }
@@ -194,7 +250,12 @@ export class RealtimeWorkspaceServer {
   }
 
   async #receiveFrame(peerId, frame) {
-    if (!this.started || !validFrame(frame, this.repositoryId)) return;
+    if (!this.started) return;
+    if (frame?.kind === 'move' && frame.repositoryId === this.repositoryId) {
+      await this.#moveItem(peerId, frame).catch((error) => this.logger.debug?.(`Move: ${error.message}`));
+      return;
+    }
+    if (!validFrame(frame, this.repositoryId)) return;
     let payload;
     try { payload = Buffer.from(frame.payload, 'base64'); } catch { return; }
     const complete = this.#assemble(peerId, frame, payload);
