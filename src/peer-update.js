@@ -258,3 +258,31 @@ export function startPeerUpdates({
     },
   };
 }
+
+/**
+ * Pull a newer build from a mesh peer once, then resolve. Used by
+ * `git pigeon update` — the same offer/fetch/verify path the running service
+ * uses continuously, run for a bounded window on demand.
+ */
+export async function pullPeerUpdateOnce({ node, root, currentVersion, standalone, logger = {}, timeoutMs = 30_000 } = {}) {
+  return await new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      updater.stop().catch(() => {});
+      resolve(value);
+    };
+    const updater = startPeerUpdates({
+      node,
+      root,
+      currentVersion,
+      standalone,
+      logger,
+      onUpdate: (update) => finish({ updated: true, ...update }),
+    });
+    const timer = setTimeout(() => finish({ updated: false, timedOut: true }), timeoutMs);
+    timer.unref?.();
+  });
+}

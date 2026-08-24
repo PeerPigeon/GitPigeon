@@ -51,7 +51,7 @@ import { TerminalServer } from './terminal-server.js';
 import { RealtimeWorkspaceServer } from './realtime-server.js';
 import { WorkspaceFiles } from './workspace.js';
 import { clearInstalledUpdate, startAutomaticUpdates } from './auto-update.js';
-import { startPeerUpdates } from './peer-update.js';
+import { pullPeerUpdateOnce, startPeerUpdates } from './peer-update.js';
 import { GITPIGEON_VERSION, IS_STANDALONE } from './version.js';
 
 const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
@@ -84,6 +84,9 @@ Background service
   git pigeon start [--poll D]           Start the watcher
   git pigeon restart [--poll D]         Restart it
   git pigeon stop                       Stop it
+  git pigeon update [--local]           Update from the latest release, or
+                                        with --local, from a paired watcher
+                                        on the LAN mesh
 
 Checking on things
   git pigeon status [--json]            Show this repository's sync state
@@ -1377,6 +1380,49 @@ async function commandUnwatch(args, cwd) {
   console.log(`Removed ${match.name} from the encrypted PeerPigeon index. The machine-wide service is still running.`);
 }
 
+async function commandUpdate(args, verbose) {
+  const local = takeFlag(args, '--local');
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  const channel = local ? 'local' : 'remote';
+  const log = logger(verbose);
+  const root = machineIndexRoot();
+  let result;
+  if (channel === 'remote') {
+    const { downloadReleaseUpdate } = await import('./auto-update.js');
+    result = await downloadReleaseUpdate({ root, currentVersion: GITPIGEON_VERSION });
+    if (result.unsupported) throw new Error('No release build exists for this platform');
+    if (!result.updated) {
+      console.log(`GitPigeon ${GITPIGEON_VERSION} is already the newest release.`);
+      return;
+    }
+  } else {
+    // The LAN channel: whichever paired watcher runs a newer build offers it
+    // over the encrypted index mesh; this machine pulls, verifies and
+    // installs it — no release required.
+    const machineIndex = await connectMachineIndexService(log, { root });
+    try {
+      console.log('Looking for a newer build on the mesh…');
+      result = await pullPeerUpdateOnce({
+        node: machineIndex.node,
+        root,
+        currentVersion: GITPIGEON_VERSION,
+        standalone: IS_STANDALONE,
+        logger: log,
+        timeoutMs: 60_000,
+      });
+    } finally {
+      await machineIndex.close().catch(() => {});
+    }
+    if (!result.updated) {
+      console.log(`No paired watcher is offering anything newer than ${GITPIGEON_VERSION}.`);
+      return;
+    }
+  }
+  console.log(`Installed GitPigeon ${result.version}; restarting the watcher.`);
+  await stopWatchService(root);
+  await startWatchService({ root, verbose });
+}
+
 export async function commandStop(args, {
   indexRoot,
   findWatcherPids = listGitPigeonWatcherPids,
@@ -1599,6 +1645,7 @@ export async function main(argv = process.argv.slice(2), options = {}) {
     return await commandStart(args, { verbose, restart: command === 'restart' });
   }
   if (command === 'stop') return await commandStop(args);
+  if (command === 'update') return await commandUpdate(args, verbose);
   if (command === 'clone') return await commandClone(args, cwd, verbose);
   if (command === 'protocol') return await commandProtocol(args, verbose);
   if (command === 'terminal-device') return commandTerminalDevice(args);
