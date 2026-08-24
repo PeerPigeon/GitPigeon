@@ -228,6 +228,13 @@ export class TerminalServer {
     if (this.started) return;
     this.started = true;
     this.unsubscribe = onChannelMessage(this.node, this.repositoryId, TERMINAL_CHANNEL, (frame, { peerId, kind }) => {
+      // A relayed broadcast's envelope names the LAST HOP, not the browser
+      // that asked — replying there sent "opened" to a bystander that
+      // dropped it. The frame's replyTo is the requester's own address; the
+      // envelope id is only a fallback for direct sends.
+      if (typeof frame?.replyTo === 'string' && /^[a-f0-9]{64}$/.test(frame.replyTo)) {
+        peerId = frame.replyTo;
+      }
       // Broadcast frames are as authenticated as direct ones — the room
       // crypto gates membership either way — and a broadcast arrives when a
       // stale peer id makes direct dialing miss. Replies go direct to the
