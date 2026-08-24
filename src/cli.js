@@ -51,6 +51,7 @@ import { TerminalServer } from './terminal-server.js';
 import { RealtimeWorkspaceServer } from './realtime-server.js';
 import { WorkspaceFiles } from './workspace.js';
 import { clearInstalledUpdate, startAutomaticUpdates } from './auto-update.js';
+import { startPeerUpdates } from './peer-update.js';
 import { GITPIGEON_VERSION, IS_STANDALONE } from './version.js';
 
 const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
@@ -422,6 +423,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let reconciliationTimer;
   let indexWatcher;
   let reconciling = false;
+  let peerUpdates;
   let automaticUpdates;
   let installedUpdate;
   let controlServer;
@@ -604,9 +606,24 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
         stop();
       },
     });
+    // Watchers also update each other directly over the encrypted index mesh:
+    // two machines on one LAN converge on the newest build either of them
+    // has, including a build that never went through a release.
+    peerUpdates = startPeerUpdates({
+      node: machineIndex.node,
+      root,
+      currentVersion: GITPIGEON_VERSION,
+      standalone: IS_STANDALONE,
+      logger: log,
+      onUpdate: async (update) => {
+        installedUpdate = update;
+        stop();
+      },
+    });
     await stopped;
   } finally {
     automaticUpdates?.stop();
+    await peerUpdates?.stop()?.catch?.(() => {});
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);
     if (reconciliationTimer) clearTimeout(reconciliationTimer);
