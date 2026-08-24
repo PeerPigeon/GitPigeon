@@ -319,6 +319,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
 
   return {
     presenceDiagnostics: () => synchronizer.presenceDiagnostics?.() ?? null,
+    terminalRelay: (opened, io) => terminalServer.receiveRelayed(opened, io),
     async close() {
       if (stopped) return;
       stopped = true;
@@ -344,7 +345,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
  * a minute later, and nothing answered because both commands had already
  * exited. The watcher is the long-lived thing, so it is what listens.
  */
-async function startPairingService(root, log, { indexDiagnostics = null } = {}) {
+async function startPairingService(root, log, { indexDiagnostics = null, onTerminalRelay = null } = {}) {
   const keyPair = await loadPairingKeyPair(root);
   const adopt = async (capability) => {
     if (!capability?.index?.indexId) return;
@@ -374,6 +375,7 @@ async function startPairingService(root, log, { indexDiagnostics = null } = {}) 
       return { offerIndexId: current?.indexId ?? null, offerIndexSecret: current?.secret ?? null };
     })(),
     offerDiagnostics: () => ({ build: GITPIGEON_VERSION, ...(indexDiagnostics?.() ?? {}) }),
+    onTerminalRelay,
     onGrant: adopt,
     // A browser this machine offered itself to can ask it to join the index it
     // settled on, which is how several machines end up together.
@@ -595,6 +597,18 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     // Keep offering to pair for as long as this machine runs, so a browser
     // opened at any time is answered.
     pairingService = await startPairingService(root, log, {
+      // Terminal frames sealed over the pairing mesh route to the session
+      // that owns their repository.
+      onTerminalRelay: (opened, io) => {
+        const frame = opened?.frame;
+        if (!frame?.repositoryId) return;
+        for (const record of sessions.values()) {
+          if (record.prepared?.config?.repositoryId === frame.repositoryId) {
+            record.session?.terminalRelay?.(opened, io);
+            return;
+          }
+        }
+      },
       indexDiagnostics: () => ({
         ...machineIndex.diagnostics(),
         // Per-repository session health, so a machine whose repo session died

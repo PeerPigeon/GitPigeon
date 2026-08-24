@@ -53,6 +53,9 @@ export function validateMeshPairingRequest(value, now = Date.now()) {
     ...(typeof value.epub === 'string' && value.epub.length > 0 && value.epub.length <= 200
       ? { epub: value.epub }
       : {}),
+    ...(typeof value.devicePublicKey === 'string' && value.devicePublicKey.length > 0 && value.devicePublicKey.length <= 200
+      ? { devicePublicKey: value.devicePublicKey }
+      : {}),
     ...(/^[0-9a-f]{64}$/.test(String(value.indexFingerprint ?? ''))
       ? { indexFingerprint: String(value.indexFingerprint) }
       : {}),
@@ -111,6 +114,7 @@ export function createMeshPairingRequest({
   indexId = null,
   indexSecret = null,
   epub = null,
+  devicePublicKey = null,
   diagnostics = null,
   now = Date.now(),
 } = {}) {
@@ -124,6 +128,7 @@ export function createMeshPairingRequest({
     // broadcast, so delivery never depends on a direct channel existing.
     // Broadcasts demonstrably arrive where direct sends demonstrably do not.
     ...(epub ? { epub: String(epub).slice(0, 200) } : {}),
+    ...(devicePublicKey ? { devicePublicKey: String(devicePublicKey).slice(0, 200) } : {}),
     ...(indexId && indexSecret ? { indexFingerprint: indexFingerprint(indexId, indexSecret) } : {}),
     // The machine states what its index half is doing, so a watcher whose
     // index node cannot reach anyone still says so through the mesh it can
@@ -271,6 +276,9 @@ export async function startDeviceApprovalResponder({
   offerIndexSecret = null,
   offerDiagnostics = null,
   onGrant = null,
+  // Sealed terminal relay: frames for this machine arrive here when the
+  // index room cannot carry them — the pairing mesh never depended on it.
+  onTerminalRelay = null,
 } = {}) {
   const node = await createNode(nodeFactory, keyPair);
   const statusLines = new Map();
@@ -297,6 +305,19 @@ export async function startDeviceApprovalResponder({
       if (!onGrant || !message.encrypted || value.requestId !== offerRequestId) return;
       Promise.resolve(onGrant(value.capability))
         .catch((error) => logger.debug?.(`Pairing grant: ${error.message}`));
+      return;
+    }
+    if (value?.protocol === 'gitpigeon-terminal-relay/1' && value.kind === 'sealed' && value.cipher) {
+      if (!onTerminalRelay) return;
+      openSealed(value.cipher, node)
+        .then((opened) => opened && onTerminalRelay(opened, {
+          reply: async (payload) => {
+            if (!opened.replyEpub) return;
+            const cipher = await sealTo(opened.replyEpub, payload);
+            node.broadcast({ protocol: 'gitpigeon-terminal-relay/1', kind: 'sealed', cipher });
+          },
+        }))
+        .catch(() => { /* sealed to someone else */ });
       return;
     }
     if (value?.protocol === MESH_PAIRING_PROTOCOL && value.kind === 'sealed-grant') {
@@ -358,6 +379,7 @@ export async function startDeviceApprovalResponder({
         indexId: offerIndexId,
         indexSecret: offerIndexSecret,
         epub: node.getKeyPair().epub,
+        devicePublicKey: node.getKeyPair().pub,
         diagnostics: offerDiagnostics?.() ?? null,
       }));
     } catch (error) {

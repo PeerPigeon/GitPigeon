@@ -236,6 +236,7 @@ export class TerminalServer {
     this.logger = logger;
     this.spawnPty = spawnTerminal;
     this.sessions = new Map();
+    this.relayReplies = new Map();
     this.started = false;
     this.sweepTimer = null;
     this.unsubscribe = null;
@@ -260,6 +261,20 @@ export class TerminalServer {
     });
     this.sweepTimer = setInterval(() => this.#sweep(), SWEEP_MS);
     this.sweepTimer.unref?.();
+  }
+
+  /**
+   * A terminal frame that arrived sealed over the pairing mesh. It is
+   * processed exactly like a room frame; replies travel back the way the
+   * frame came, sealed to the sender's key.
+   */
+  receiveRelayed(opened, { reply }) {
+    if (!this.started) return;
+    const frame = opened?.frame;
+    if (!frame || frame.repositoryId !== this.repositoryId) return;
+    const pseudoPeer = `relay:${String(opened.replyEpub ?? '').slice(0, 24)}`;
+    this.relayReplies.set(pseudoPeer, reply);
+    this.#receive(pseudoPeer, frame).catch((error) => this.logger.debug?.(`Relayed terminal: ${error.message}`));
   }
 
   stop() {
@@ -423,14 +438,23 @@ export class TerminalServer {
   }
 
   async #send(peerId, sessionId, kind, sequence, fields = {}) {
+    const frame = {
+      serviceInstanceId: this.serviceInstanceId,
+      sessionId,
+      kind,
+      sequence,
+      ...fields,
+    };
+    // A relayed session replies the way its frames arrive: sealed over the
+    // pairing mesh, immune to the room link that failed it in the first
+    // place.
+    const relay = this.relayReplies.get(peerId);
+    if (relay) {
+      await relay({ frame: { ...frame, repositoryId: this.repositoryId } });
+      return;
+    }
     try {
-      await sendChannelDirect(this.node, peerId, this.repositoryId, TERMINAL_CHANNEL, {
-        serviceInstanceId: this.serviceInstanceId,
-        sessionId,
-        kind,
-        sequence,
-        ...fields,
-      });
+      await sendChannelDirect(this.node, peerId, this.repositoryId, TERMINAL_CHANNEL, frame);
     } catch (error) {
       throw new Error(`The terminal peer is no longer reachable. (${error.message})`);
     }
