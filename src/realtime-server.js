@@ -71,6 +71,23 @@ export class RealtimeWorkspaceServer {
     this.assemblies.clear();
   }
 
+  /**
+   * Whether a live realtime session currently owns this file. While it does,
+   * the document is the only writer: the live-workspace overlay replicating
+   * the same file with its own latency re-delivered stale content that read
+   * as an external edit, reverting fresh keystrokes and duplicating them —
+   * the loop where file contents repeated indefinitely.
+   */
+  ownsPath(input) {
+    let file;
+    try { file = this.liveWorkspace.normalize(input); } catch { return false; }
+    const now = Date.now();
+    for (const state of this.documents.values()) {
+      if (state.path === file && now - state.lastActivityAt < 5 * 60_000) return true;
+    }
+    return false;
+  }
+
   async filesystemChanged(input) {
     let file;
     try { file = this.liveWorkspace.normalize(input); } catch { return; }
@@ -170,6 +187,7 @@ export class RealtimeWorkspaceServer {
       writing: false,
       hydrated: true,
       lastWritten: null,
+      lastActivityAt: Date.now(),
     };
     // The watcher is the seeding authority: a new document starts as the
     // file's current content, seeded deterministically (the client id derives
@@ -198,6 +216,7 @@ export class RealtimeWorkspaceServer {
   async #receive(peerId, frame) {
     const state = await this.#document(frame);
     if (!state) return;
+    state.lastActivityAt = Date.now();
     if (frame.kind === 'sync-request') {
       await this.#send({ ...frame, kind: 'sync-response', payload: Y.encodeStateAsUpdate(state.doc, frame.payload) }, peerId);
       return;

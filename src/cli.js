@@ -165,9 +165,10 @@ async function configuredRepository(cwd) {
 // One node, one room. Every repository rides the machine's single index node,
 // which is what browsers already do, instead of opening a PeerPigeon room per
 // repository that no browser ever joins.
-function openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node) {
+function openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node, ownership = { owns: () => false }) {
   if (!node?.storage) throw new Error('The GitPigeon index mesh is not connected');
   const synchronizer = new RepositorySynchronizer({
+    ownsLivePath: (file) => ownership.owns(file),
     repository,
     storage: node.storage,
     config,
@@ -203,7 +204,10 @@ async function prepareRepositorySession(entry) {
 }
 
 async function openRepositorySession({ repository, config }, pollMs, log, serviceInstanceId, machineIndexId, node) {
-  const { synchronizer } = openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node);
+  // Late-bound: the realtime server is created below but the synchronizer
+  // needs to consult it for path ownership.
+  const ownership = { owns: () => false };
+  const { synchronizer } = openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node, ownership);
   const terminalServer = new TerminalServer({
     node,
     repository,
@@ -222,6 +226,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     logger: log,
     onFileWritten: () => schedulePublish(),
   });
+  ownership.owns = (file) => realtimeServer.ownsPath(file);
   let changeTimer;
   let filesystemWatcher;
   let peerRefreshTimer;

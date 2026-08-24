@@ -81,6 +81,9 @@ export class RepositorySynchronizer {
     chunkSize = DEFAULT_CHUNK_SIZE,
     retrieveTimeoutMs = DEFAULT_RETRIEVE_TIMEOUT_MS,
     storageWritePauseMs = 20,
+    // Whether a live realtime session owns a path right now. Owned paths are
+    // written by the realtime document alone; see realtime-server.js.
+    ownsLivePath = () => false,
     presenceHeartbeatMs = REPOSITORY_PRESENCE_HEARTBEAT_MS,
     mutableRecordSettleMs = 0,
     serviceInstanceId = randomBytes(16).toString('hex'),
@@ -95,6 +98,7 @@ export class RepositorySynchronizer {
     this.cache.setEncryptionSecret?.(config.secret);
     this.workspace = workspace;
     this.liveWorkspace = liveWorkspace;
+    this.ownsLivePath = ownsLivePath;
     this.chunkSize = chunkSize;
     this.retrieveTimeoutMs = retrieveTimeoutMs;
     this.storageWritePauseMs = storageWritePauseMs;
@@ -503,8 +507,18 @@ export class RepositorySynchronizer {
         await writeFile(bundleFile, data);
       }
       const privateFiles = await this.#retrieveWorkspaceFiles(manifest);
-      const liveFiles = await this.#retrieveLiveWorkspaceFiles(manifest);
+      let liveFiles = await this.#retrieveLiveWorkspaceFiles(manifest);
       const liveBaselines = this.state.liveBaselines[head.deviceId] ??= {};
+      // A path owned by a live realtime session has exactly one writer: the
+      // document. Applying the overlay's copy as well re-delivered the same
+      // content at a different latency, which read as an external edit and
+      // reverted or duplicated fresh keystrokes indefinitely.
+      liveFiles = liveFiles.filter((incoming) => {
+        let owned = false;
+        try { owned = this.ownsLivePath(incoming.path); } catch { owned = false; }
+        if (owned) liveBaselines[this.liveWorkspace.normalize(incoming.path)] = incoming.deleted ? null : incoming.sha256;
+        return !owned;
+      });
       const refsChanged = this.state.importedRefs[head.deviceId] !== head.refsDigest;
       const prepared = await this.liveWorkspace.prepare(liveFiles, liveBaselines, {
         restoreAll: refsChanged,

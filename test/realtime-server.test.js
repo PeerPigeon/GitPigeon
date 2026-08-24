@@ -86,5 +86,10 @@ test('watcher seeds from the file and merges edits without stomping', async (t) 
   for (const update of outbound) Y.applyUpdate(browser, Buffer.from(update.payload, 'base64'));
   assert.equal(browser.getText('content').toString(), 'edited from the browser\nedited on the watcher\n');
 
+  // While the realtime session is live, the document is the file's only
+  // writer: the live-workspace overlay must not apply its copy of the path.
+  assert.equal(server.ownsPath('src/example.js'), true);
+  assert.equal(server.ownsPath('src/other.js'), false);
+
   browser.destroy();
 });
