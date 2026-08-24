@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 import process from 'node:process';
+import { GITPIGEON_VERSION } from './version.js';
 import { deviceHostName } from './device-name.js';
 import { installNativeStorage } from './native-storage.js';
 import { installNativeWebRTC } from './webrtc.js';
@@ -466,6 +467,9 @@ export function publisherDirectoryValue(
     ...directoryValue(index, entries, now, serviceInstanceId),
     kind: 'publisher-directory',
     publisherId: index.publisherId,
+    // Which build this machine runs, so browsers can show it beside the
+    // machine instead of leaving versions a mystery.
+    build: GITPIGEON_VERSION,
     ...(serviceInstanceId ? { serviceInstanceId } : {}),
     ...(peerId ? { peerId } : {}),
     // Which machine this is. A publisher ID alone names nothing a person
