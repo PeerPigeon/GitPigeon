@@ -148,26 +148,46 @@ export class RealtimeWorkspaceServer {
       catch (error) { if (error?.code !== 'ENOENT') throw error; }
       // The filesystem event for our own write arrives after `writing` has
       // already cleared. Treating it as an external edit pumped the file back
-      // into the document as delete-everything-reinsert-everything, which
-      // stomped concurrent edits and duplicated them — then the write of that
-      // merge triggered the next event, indefinitely.
+      // into the document, indefinitely.
       if (content === state.lastWritten) continue;
       const current = state.text.toString();
       if (content === current) { state.lastWritten = content; continue; }
-      // A genuinely external edit (another editor touched the file). Apply the
-      // smallest replacement, not a whole-file rewrite: concurrent inserts
-      // outside the changed span survive untouched.
+      // The file bounced back to an OLDER version this watcher itself wrote —
+      // an overlay straggler or a slow copy, not a person's edit. Treating
+      // those echoes as edits deleted whatever had been typed since that
+      // version, live, keystroke by keystroke. A watcher never mistakes its
+      // own past for someone else's present.
+      if (state.writeHistory.includes(createHash('sha256').update(content).digest('hex'))) {
+        state.lastWritten = null;
+        await this.#write(state);
+        continue;
+      }
+      // A genuinely external edit. Diff FILE AGAINST FILE — the last content
+      // this server knew the file to hold versus what it holds now — never
+      // against the live document. The document already contains keystrokes
+      // the file has not caught up to, and diffing against it computed
+      // "delete whatever the file lacks": it deleted what the person was
+      // typing, as they typed it. A file-to-file patch touches only the span
+      // the external writer actually changed.
+      const base = state.lastWritten ?? '';
       let prefix = 0;
-      const shortest = Math.min(current.length, content.length);
-      while (prefix < shortest && current[prefix] === content[prefix]) prefix += 1;
+      const shortest = Math.min(base.length, content.length);
+      while (prefix < shortest && base[prefix] === content[prefix]) prefix += 1;
       let suffix = 0;
       while (suffix < shortest - prefix
-        && current[current.length - 1 - suffix] === content[content.length - 1 - suffix]) suffix += 1;
-      state.doc.transact(() => {
-        state.text.delete(prefix, current.length - prefix - suffix);
-        const middle = content.slice(prefix, content.length - suffix);
-        if (middle) state.text.insert(prefix, middle);
-      }, 'filesystem');
+        && base[base.length - 1 - suffix] === content[content.length - 1 - suffix]) suffix += 1;
+      const deleteLength = Math.max(0, Math.min(base.length - prefix - suffix, state.text.length - prefix));
+      const middle = content.slice(prefix, content.length - suffix);
+      if (prefix > state.text.length) {
+        // The document diverged past the patch anchor; append rather than lose
+        // the external change entirely.
+        state.doc.transact(() => { state.text.insert(state.text.length, middle); }, 'filesystem');
+      } else {
+        state.doc.transact(() => {
+          if (deleteLength > 0) state.text.delete(prefix, deleteLength);
+          if (middle) state.text.insert(prefix, middle);
+        }, 'filesystem');
+      }
       state.lastWritten = null;
       await this.#write(state);
     }
@@ -239,6 +259,7 @@ export class RealtimeWorkspaceServer {
       seeded: true,
       seedTimer: null,
       lastWritten: null,
+      writeHistory: [],
       lastActivityAt: Date.now(),
     };
     // Exactly one watcher seeds a new document: the smallest live device id
@@ -261,6 +282,9 @@ export class RealtimeWorkspaceServer {
         seed.destroy();
       }
       state.lastWritten = content;
+      // The content this document was born from is a known file state: its
+      // echo must be recognized like any other.
+      state.writeHistory.push(createHash('sha256').update(content).digest('hex'));
       state.seeded = true;
     };
     if (!this.#deferToPeerSeeder()) {
@@ -340,6 +364,8 @@ export class RealtimeWorkspaceServer {
         await rename(temporary, absolute);
       }
       state.lastWritten = data.toString('utf8');
+      state.writeHistory.push(createHash('sha256').update(state.lastWritten).digest('hex'));
+      if (state.writeHistory.length > 30) state.writeHistory.shift();
       this.onFileWritten?.(state.path);
     } finally {
       state.writing = false;
