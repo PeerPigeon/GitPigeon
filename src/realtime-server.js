@@ -75,15 +75,34 @@ export class RealtimeWorkspaceServer {
     let file;
     try { file = this.liveWorkspace.normalize(input); } catch { return; }
     for (const state of this.documents.values()) {
-      if (state.path !== file || state.writing || !state.hydrated) continue;
+      if (state.path !== file || state.writing) continue;
       let content = '';
       try { content = await readFile(path.join(this.repository.root, ...file.split('/')), 'utf8'); }
       catch (error) { if (error?.code !== 'ENOENT') throw error; }
-      if (content === state.text.toString()) continue;
+      // The filesystem event for our own write arrives after `writing` has
+      // already cleared. Treating it as an external edit pumped the file back
+      // into the document as delete-everything-reinsert-everything, which
+      // stomped concurrent edits and duplicated them — then the write of that
+      // merge triggered the next event, indefinitely.
+      if (content === state.lastWritten) continue;
+      const current = state.text.toString();
+      if (content === current) { state.lastWritten = content; continue; }
+      // A genuinely external edit (another editor touched the file). Apply the
+      // smallest replacement, not a whole-file rewrite: concurrent inserts
+      // outside the changed span survive untouched.
+      let prefix = 0;
+      const shortest = Math.min(current.length, content.length);
+      while (prefix < shortest && current[prefix] === content[prefix]) prefix += 1;
+      let suffix = 0;
+      while (suffix < shortest - prefix
+        && current[current.length - 1 - suffix] === content[content.length - 1 - suffix]) suffix += 1;
       state.doc.transact(() => {
-        state.text.delete(0, state.text.length);
-        if (content) state.text.insert(0, content);
+        state.text.delete(prefix, current.length - prefix - suffix);
+        const middle = content.slice(prefix, content.length - suffix);
+        if (middle) state.text.insert(prefix, middle);
       }, 'filesystem');
+      state.lastWritten = null;
+      await this.#write(state);
     }
   }
 
@@ -127,16 +146,20 @@ export class RealtimeWorkspaceServer {
 
   async #document(frame) {
     const normalized = this.liveWorkspace.normalize(frame.path);
+    // One document per file per revision. The base hash used to be part of
+    // the identity: every write to disk changed the file's hash, the next
+    // browser opened a different document, and this server ended up hosting
+    // two live docs fighting over one file — each pumping whole-file rewrites
+    // into the other, stomping edits and duplicating content on every lap.
     const expectedDocumentId = createHash('sha256').update([
-      'gitpigeon-realtime-v1',
+      'gitpigeon-realtime-v2',
       this.repositoryId,
       frame.revision,
       normalized,
-      frame.baseHash,
     ].join('\0')).digest('hex');
     if (expectedDocumentId !== frame.documentId) return null;
     const existing = this.documents.get(frame.documentId);
-    if (existing) return existing.path === normalized && existing.baseHash === frame.baseHash ? existing : null;
+    if (existing) return existing.path === normalized ? existing : null;
     const doc = new Y.Doc();
     const state = {
       doc,
@@ -145,10 +168,27 @@ export class RealtimeWorkspaceServer {
       revision: frame.revision,
       baseHash: frame.baseHash,
       writing: false,
-      hydrated: false,
+      hydrated: true,
+      lastWritten: null,
     };
+    // The watcher is the seeding authority: a new document starts as the
+    // file's current content, seeded deterministically (the client id derives
+    // from the content) so two watchers seeding the same file converge on
+    // identical operations instead of duplicating it.
+    let content = '';
+    try { content = await readFile(path.join(this.repository.root, ...normalized.split('/')), 'utf8'); }
+    catch (error) { if (error?.code !== 'ENOENT') throw error; }
+    if (content) {
+      const contentHash = createHash('sha256').update(content).digest('hex');
+      const seed = new Y.Doc({ gc: false });
+      seed.clientID = Number.parseInt(contentHash.slice(0, 8), 16) || 1;
+      seed.getText('content').insert(0, content);
+      Y.applyUpdate(doc, Y.encodeStateAsUpdate(seed), 'seed');
+      seed.destroy();
+    }
+    state.lastWritten = content;
     doc.on('update', (update, origin) => {
-      if (origin === 'remote') return;
+      if (origin === 'remote' || origin === 'seed') return;
       this.#send({ ...frame, kind: 'update', payload: update }).catch(() => {});
     });
     this.documents.set(frame.documentId, state);
@@ -160,20 +200,14 @@ export class RealtimeWorkspaceServer {
     if (!state) return;
     if (frame.kind === 'sync-request') {
       await this.#send({ ...frame, kind: 'sync-response', payload: Y.encodeStateAsUpdate(state.doc, frame.payload) }, peerId);
-      if (state.text.length === 0) {
-        await this.#send({ ...frame, kind: 'sync-request', payload: Y.encodeStateVector(state.doc) }, peerId);
-      }
       return;
     }
+    // Apply and persist — nothing more. This used to also re-broadcast the
+    // update to everyone and fire a full-state response back at the sender
+    // after every keystroke batch: gossip already delivers broadcasts to the
+    // room, so all of it was amplification that raced the next keystroke.
     Y.applyUpdate(state.doc, frame.payload, 'remote');
-    if (frame.kind !== 'sync-response' && !state.hydrated) {
-      await this.#send({ ...frame, kind: 'sync-request', payload: Y.encodeStateVector(state.doc) }, peerId);
-      return;
-    }
-    state.hydrated = true;
     await this.#write(state);
-    await this.#send({ ...frame, kind: 'sync-response', payload: Y.encodeStateAsUpdate(state.doc) }, peerId);
-    await this.#send({ ...frame, kind: 'update', payload: frame.payload });
   }
 
   async #write(state) {
@@ -191,6 +225,7 @@ export class RealtimeWorkspaceServer {
         await writeFile(temporary, data);
         await rename(temporary, absolute);
       }
+      state.lastWritten = data.toString('utf8');
       this.onFileWritten?.(state.path);
     } finally {
       state.writing = false;
