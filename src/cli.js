@@ -52,6 +52,7 @@ import { RealtimeWorkspaceServer } from './realtime-server.js';
 import { WorkspaceFiles } from './workspace.js';
 import { clearInstalledUpdate, startAutomaticUpdates } from './auto-update.js';
 import { pullPeerUpdateOnce, startPeerUpdates } from './peer-update.js';
+import { startLocalIdentityServer } from './local-identity.js';
 import { GITPIGEON_VERSION, IS_STANDALONE } from './version.js';
 
 const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
@@ -169,10 +170,11 @@ async function configuredRepository(cwd) {
 // One node, one room. Every repository rides the machine's single index node,
 // which is what browsers already do, instead of opening a PeerPigeon room per
 // repository that no browser ever joins.
-function openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node, ownership = { owns: () => false }) {
+function openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node, ownership = { owns: () => false }, deviceClaim = null) {
   if (!node?.storage) throw new Error('The GitPigeon index mesh is not connected');
   const synchronizer = new RepositorySynchronizer({
     ownsLivePath: (file) => ownership.owns(file),
+    deviceClaim,
     repository,
     storage: node.storage,
     config,
@@ -207,11 +209,11 @@ async function prepareRepositorySession(entry) {
   return { repository, config, signature: repositorySessionSignature(config) };
 }
 
-async function openRepositorySession({ repository, config }, pollMs, log, serviceInstanceId, machineIndexId, node) {
+async function openRepositorySession({ repository, config }, pollMs, log, serviceInstanceId, machineIndexId, node, deviceClaim = null) {
   // Late-bound: the realtime server is created below but the synchronizer
   // needs to consult it for path ownership.
   const ownership = { owns: () => false };
-  const { synchronizer } = openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node, ownership);
+  const { synchronizer } = openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node, ownership, deviceClaim);
   const terminalServer = new TerminalServer({
     node,
     repository,
@@ -423,6 +425,20 @@ async function startPairingService(root, log, { indexDiagnostics = null } = {}) 
 async function runWatchService({ root, token, pollMs, verbose = false }) {
   const log = logger(verbose);
   const serviceInstanceId = randomBytes(16).toString('hex');
+  // The machine's persistent unsea keypair is the device signature: presence
+  // records bind this service instance to the device key, verifiably.
+  const deviceClaim = await (async () => {
+    try {
+      const keyPair = await loadPairingKeyPair(root);
+      const { signMessage } = await import('unsea');
+      return {
+        devicePublicKey: keyPair.pub,
+        deviceSignature: await signMessage(`gitpigeon-device-claim/1\0${serviceInstanceId}`, keyPair.priv),
+      };
+    } catch {
+      return null;
+    }
+  })();
   const machineIndexId = (await loadMachineIndex({ root })).publisherId;
   let resolveStop;
   const stopped = new Promise((resolve) => { resolveStop = resolve; });
@@ -444,6 +460,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let indexWatcher;
   let reconciling = false;
   let peerUpdates;
+  let localIdentity;
   let automaticUpdates;
   let installedUpdate;
   let controlServer;
@@ -510,7 +527,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     sessions.set(entry.repository, record);
     repositoryErrors.delete(entry.repository);
     await publishServiceRepositoryState();
-    record.opening = openRepositorySession(prepared, pollMs, log, serviceInstanceId, machineIndexId, machineIndex.node)
+    record.opening = openRepositorySession(prepared, pollMs, log, serviceInstanceId, machineIndexId, machineIndex.node, deviceClaim)
       .then(async (session) => {
         record.session = session;
         if (record.cancelled) {
@@ -581,6 +598,14 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     pairingService = await startPairingService(root, log, {
       indexDiagnostics: () => machineIndex.diagnostics(),
     });
+    // So a browser on this machine can recognize the local watcher and open
+    // its terminal with the keyboard shortcut.
+    localIdentity = await startLocalIdentityServer({
+      serviceInstanceId,
+      machineIndexId: machineIndex.index.indexId,
+      root,
+      logger: log,
+    });
     // Paired peers can remove a repository or rotate the index secret.
     controlServer = new ControlServer({
       node: machineIndex.node,
@@ -643,6 +668,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     await stopped;
   } finally {
     automaticUpdates?.stop();
+    localIdentity?.close();
     await peerUpdates?.stop()?.catch?.(() => {});
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);

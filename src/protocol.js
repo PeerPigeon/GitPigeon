@@ -84,6 +84,10 @@ export class RepositorySynchronizer {
     // Whether a live realtime session owns a path right now. Owned paths are
     // written by the realtime document alone; see realtime-server.js.
     ownsLivePath = () => false,
+    // {devicePublicKey, deviceSignature}: the machine's unsea identity bound
+    // to this service instance, published with presence so any peer can
+    // verify which physical device a watcher is.
+    deviceClaim = null,
     presenceHeartbeatMs = REPOSITORY_PRESENCE_HEARTBEAT_MS,
     mutableRecordSettleMs = 0,
     serviceInstanceId = randomBytes(16).toString('hex'),
@@ -99,6 +103,7 @@ export class RepositorySynchronizer {
     this.workspace = workspace;
     this.liveWorkspace = liveWorkspace;
     this.ownsLivePath = ownsLivePath;
+    this.deviceClaim = deviceClaim;
     this.chunkSize = chunkSize;
     this.retrieveTimeoutMs = retrieveTimeoutMs;
     this.storageWritePauseMs = storageWritePauseMs;
@@ -753,6 +758,10 @@ export class RepositorySynchronizer {
       ...(peerId ? { peerId } : {}),
       ...(this.machineIndexId ? { machineIndexId: this.machineIndexId } : {}),
       ...(this.deviceName ? { deviceName: this.deviceName } : {}),
+      ...(this.deviceClaim ? {
+        devicePublicKey: this.deviceClaim.devicePublicKey,
+        deviceSignature: this.deviceClaim.deviceSignature,
+      } : {}),
       updatedAt: new Date().toISOString(),
     };
     // One durable record per device. Whether that device is reachable right now
