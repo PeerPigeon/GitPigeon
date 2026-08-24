@@ -186,6 +186,10 @@ function validRoster(value) {
 }
 
 function shellCommand(deviceName) {
+  // "Daniels-MacBook-Pro (test/*) gitpigeon $" — machine, then where you
+  // are (live, so cd updates it), then the product mark. The short machine
+  // name reads better than the mDNS suffix.
+  const shortName = String(deviceName).replace(/\.local$/i, '');
   const prompt = `gitpigeon ${deviceName}:$ `;
   const deviceCommand = DEVICE_COMMAND.map((value) => quoteShell(value)).join(' ');
   if (process.platform === 'win32') {
@@ -200,11 +204,16 @@ function shellCommand(deviceName) {
     };
   }
   const shell = process.env.SHELL && path.isAbsolute(process.env.SHELL) ? process.env.SHELL : '/bin/sh';
-  const escaped = prompt.replaceAll("'", "'\\''");
+  const zsh = /(?:^|\/)zsh$/.test(shell);
+  // \W (bash/sh) and %1~ (zsh) track the current directory live.
+  const posixPrompt = `${shortName} (\\W/*) gitpigeon $ `.replaceAll("'", "'\\''");
+  const zshPrompt = `${shortName} (%1~/*) gitpigeon $ `.replaceAll("'", "'\\''");
   return {
     shell,
     args: [],
-    initialize: `device() { ${deviceCommand} terminal-device "$@"; }; export PS1='${escaped}'; export PROMPT='${escaped}'; clear\r`,
+    initialize: zsh
+      ? `device() { ${deviceCommand} terminal-device "$@"; }; export PROMPT='${zshPrompt}'; export PS1='${zshPrompt}'; clear\r`
+      : `device() { ${deviceCommand} terminal-device "$@"; }; export PS1='${posixPrompt}'; export PROMPT='${posixPrompt}'; clear\r`,
   };
 }
 
