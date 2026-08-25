@@ -115,8 +115,14 @@ export class ControlServer {
         this.logger.info?.(`Locked ${path.basename(entry.repository)}; its share link is now stale`);
       }
       await registerMachinePigeon(repository, config, { root: this.root });
-      await this.onShareToggled(entry.repository);
-      await this.onChanged();
+      // Answer NOW. The session reload behind a toggle takes seconds (room
+      // teardown and rejoin) and the browser only needs the new state, not
+      // the reload — awaiting it made every click feel broken.
+      setTimeout(() => {
+        Promise.resolve(this.onShareToggled(entry.repository))
+          .then(() => this.onChanged())
+          .catch((error) => this.logger.debug?.(`Share toggle reload: ${error.message}`));
+      }, 0).unref?.();
       return {
         shared: Boolean(config.share),
         ...(config.share ? { shareKey: config.share.key, ownerPublicKey: config.share.ownerPublicKey } : {}),
