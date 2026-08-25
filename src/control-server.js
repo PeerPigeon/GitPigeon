@@ -3,6 +3,7 @@ import { CONTROL_CHANNEL, onChannelMessage, sendChannelDirect } from './channel.
 import {
   loadMachineIndex,
   listMachinePigeons,
+  registerMachinePigeon,
   rotateMachineIndexSecret,
   unregisterMachinePigeon,
 } from './machine-index.js';
@@ -17,13 +18,14 @@ export const CONTROL_PROTOCOL = 'gitpigeon/control/1';
 const REPOSITORY_ID = /^[a-zA-Z0-9_-]{8,128}$/;
 
 export class ControlServer {
-  constructor({ node, indexId, root, logger = {}, onChanged = async () => {}, onRotated = () => {} }) {
+  constructor({ node, indexId, root, logger = {}, onChanged = async () => {}, onRotated = () => {}, onShareToggled = async () => {} }) {
     this.node = node;
     this.indexId = indexId;
     this.root = root;
     this.logger = logger;
     this.onChanged = onChanged;
     this.onRotated = onRotated;
+    this.onShareToggled = onShareToggled;
     this.unsubscribe = null;
   }
 
@@ -76,6 +78,49 @@ export class ControlServer {
         try { this.onRotated(); } catch (error) { this.logger.error?.(error); }
       }, 250).unref?.();
       return { indexId: rotated.indexId };
+    }
+    if (frame.kind === 'set-repository-sharing') {
+      // Unlock: mint a share (key + this machine's key as trust anchor) so
+      // the repository gets a public read-tier link. Lock: stop publishing.
+      // A key already given out cannot be untold — existing link holders
+      // keep what they replicated — but a locked repository publishes no
+      // new heads, and a later unlock mints a FRESH key, so old links go
+      // stale rather than following the repository forever.
+      const repositoryId = String(frame.targetRepositoryId ?? '');
+      const shared = Boolean(frame.shared);
+      if (!REPOSITORY_ID.test(repositoryId)) throw new Error('Invalid repository ID');
+      const entries = await listMachinePigeons({ root: this.root, activeOnly: false });
+      const entry = entries.find((candidate) => candidate.repositoryId === repositoryId);
+      if (!entry) throw new Error('That repository is not registered on this machine');
+      const { GitRepository } = await import('./git.js');
+      const { loadConfig, saveConfig } = await import('./config.js');
+      const repository = await GitRepository.discover(entry.repository);
+      let config = await loadConfig(repository.gitDir);
+      if (shared && config.share?.role === 'mirror') {
+        throw new Error("This is a mirror of someone else's shared repository");
+      }
+      if (shared && !config.share) {
+        const { createShareKey } = await import('./share.js');
+        const { loadPairingKeyPair } = await import('./pairing-identity.js');
+        const keyPair = await loadPairingKeyPair(this.root);
+        config = await saveConfig(repository.gitDir, {
+          ...config,
+          share: { key: createShareKey(), ownerPublicKey: keyPair.pub, role: 'owner' },
+        });
+        this.logger.info?.(`Shared ${path.basename(entry.repository)} publicly`);
+      } else if (!shared && config.share) {
+        const { share, ...rest } = config;
+        void share;
+        config = await saveConfig(repository.gitDir, rest);
+        this.logger.info?.(`Locked ${path.basename(entry.repository)}; its share link is now stale`);
+      }
+      await registerMachinePigeon(repository, config, { root: this.root });
+      await this.onShareToggled(entry.repository);
+      await this.onChanged();
+      return {
+        shared: Boolean(config.share),
+        ...(config.share ? { shareKey: config.share.key, ownerPublicKey: config.share.ownerPublicKey } : {}),
+      };
     }
     throw new Error(`Unsupported control command: ${String(frame.kind ?? 'none')}`);
   }

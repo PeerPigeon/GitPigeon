@@ -705,6 +705,16 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       root,
       logger: log,
       onChanged: () => reconcile(),
+      // A share toggle changes the repo config without changing the session
+      // signature, so reconcile alone would keep the old session (and its
+      // share room state) running. Close it; reconcile reopens it fresh.
+      onShareToggled: async (repositoryPath) => {
+        const record = sessions.get(repositoryPath);
+        if (record) {
+          sessions.delete(repositoryPath);
+          await stopSession(record);
+        }
+      },
       onRotated: () => {
         // The node was built with the previous secret, so it can no longer
         // reach anything paired with the new one. Restart rather than keep

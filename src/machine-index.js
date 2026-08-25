@@ -103,10 +103,19 @@ function validEntry(value) {
   if (pid !== null && (!Number.isSafeInteger(pid) || pid < 1)) return null;
   if (signalingServer && !/^wss?:\/\//i.test(signalingServer)) return null;
   const registeredAt = Date.parse(String(value.registeredAt ?? ''));
+  let share;
+  if (value.share && typeof value.share === 'object') {
+    const key = String(value.share.key ?? '');
+    const ownerPublicKey = String(value.share.ownerPublicKey ?? '');
+    if (SECRET.test(key) && ownerPublicKey.length >= 16 && ownerPublicKey.length <= 512) {
+      share = { key, ownerPublicKey };
+    }
+  }
   return {
     repository, repositoryId, secret, deviceId, name, pid,
     ...(Number.isFinite(registeredAt) ? { registeredAt: new Date(registeredAt).toISOString() } : {}),
     ...(signalingServer ? { signalingServer } : {}),
+    ...(share ? { share } : {}),
   };
 }
 
@@ -253,6 +262,7 @@ export async function registerMachinePigeon(repository, config, {
       pid,
       registeredAt: fresh || !previous?.registeredAt ? new Date().toISOString() : previous.registeredAt,
       signalingServer: config.signalingServer,
+      ...(config.share?.role === 'owner' ? { share: { key: config.share.key, ownerPublicKey: config.share.ownerPublicKey } } : {}),
     });
     if (!entry) throw new Error('Could not register this repository with the encrypted GitPigeon index');
     if (!fresh) {
@@ -399,6 +409,7 @@ export function directoryValue(index, entries, now = Date.now(), serviceInstance
         ...(entry.snapshot ? { snapshot: entry.snapshot } : {}),
         ...(entry.empty ? { empty: true } : {}),
         ...(entry.registeredAt ? { registeredAt: entry.registeredAt } : {}),
+        ...(entry.share ? { share: entry.share } : {}),
       });
     } else {
       current.watcherCount += active;
