@@ -19,6 +19,8 @@ import {
 } from './daemon.js';
 import { GitRepository } from './git.js';
 import { createInvite, parseInvite } from './invite.js';
+import { createShareKey, createShareUrl, parseShareUrl } from './share.js';
+import { startShareService } from './share-service.js';
 import { createDashboardEnrollment, serveDashboardEnrollment } from './dashboard-pairing.js';
 import { isPairLink, parsePairLink } from './pair-link.js';
 import {
@@ -74,6 +76,9 @@ Repositories
   git pigeon unwatch [REPO]             Stop syncing one
   git pigeon list                       Show what this machine syncs
   git pigeon invite                     Print an invite for one repository
+  git pigeon share                      Print a public read-only share link
+                                        (holders mirror it; approved devices
+                                        edit; forks can propose changes)
   git pigeon sync [--wait D] [--force]  Sync once and exit
 
 Private files
@@ -200,6 +205,7 @@ function repositorySessionSignature(config) {
     secret: config.secret,
     deviceId: config.deviceId,
     signalingServer: config.signalingServer ?? null,
+    share: config.share ? { key: config.share.key, role: config.share.role } : null,
   });
 }
 
@@ -250,6 +256,22 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     },
   });
   ownership.owns = (file) => realtimeServer.ownsPath(file);
+  // A shared repository also serves its public room: as owner it publishes
+  // signed heads; as mirror it verifies and carries them.
+  let shareService = null;
+  if (config.share) {
+    (async () => {
+      const shareKeyPair = config.share.role === 'owner' ? await loadPairingKeyPair(machineIndexRoot()) : null;
+      shareService = await startShareService({
+        repository,
+        repositoryId: config.repositoryId,
+        share: config.share,
+        keyPair: shareKeyPair,
+        signalingServer: config.signalingServer,
+        logger: log,
+      });
+    })().catch((error) => log.error(new Error(`Share service for ${config.repositoryId.slice(0, 8)}: ${error.message}`)));
+  }
   let changeTimer;
   let filesystemWatcher;
   let peerRefreshTimer;
@@ -267,6 +289,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       if (nextDigest !== previousDigest) {
         previousDigest = nextDigest;
         await synchronizer.publishLocal();
+        shareService?.changed();
       }
     } catch (error) {
       log.error(error);
@@ -360,6 +383,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       terminalServer.stop();
       realtimeServer.stop();
       await sessionPeerUpdates.stop().catch(() => {});
+      await shareService?.close()?.catch?.(() => {});
       while (starting || publishing) await sleep(10);
       await synchronizer.stop();
       // The node belongs to the machine index service, not to this session.
@@ -793,7 +817,15 @@ async function commandInit(args, cwd, verbose) {
   if (inviteValue && (repositoryId || secret || signalingServer)) {
     throw new Error('An invite cannot be combined with --repo-id, --secret, or --signal');
   }
-  const invite = inviteValue ? parseInvite(inviteValue) : null;
+  let invite = null;
+  let sharedJoin = null;
+  if (inviteValue) {
+    try {
+      sharedJoin = parseShareUrl(inviteValue);
+    } catch {
+      invite = parseInvite(inviteValue);
+    }
+  }
   const repository = await discoverOrInitialize(cwd, directory);
   let config = null;
   try {
@@ -808,8 +840,19 @@ async function commandInit(args, cwd, verbose) {
   }
   const created = !config;
   if (!config) {
-    config = createIdentity(invite ?? { repositoryId, secret, signalingServer });
-    await saveConfig(repository.gitDir, config);
+    if (sharedJoin) {
+      // Joining a SHARE URL: same repository identity, own local secret. The
+      // share key admits this machine as a mirror — it carries the
+      // repository and keeps it available, but only rostered keys publish.
+      config = createIdentity({ repositoryId: sharedJoin.repositoryId, signalingServer: sharedJoin.signalingServer });
+      config = await saveConfig(repository.gitDir, {
+        ...config,
+        share: { key: sharedJoin.shareKey, ownerPublicKey: sharedJoin.ownerPublicKey, role: 'mirror' },
+      });
+    } else {
+      config = createIdentity(invite ?? { repositoryId, secret, signalingServer });
+      await saveConfig(repository.gitDir, config);
+    }
   }
   const workspace = new WorkspaceFiles(repository);
   await workspace.init();
@@ -824,7 +867,10 @@ async function commandInit(args, cwd, verbose) {
   const watcher = await startIndexedWatchService({ verbose });
   await waitForWatchServiceRepository(indexRoot, repository.root);
 
-  if (created && !invite) {
+  if (created && sharedJoin) {
+    console.log(`GitPigeon is mirroring the shared repository at ${repository.root}.`);
+    console.log('The clone appears as soon as the mesh delivers the first verified head.');
+  } else if (created && !invite) {
     console.log('GitPigeon initialized and watching in the background.');
     console.log('Share this invite only with trusted collaborators:\n');
     console.log(createInvite(config));
@@ -1250,6 +1296,39 @@ async function commandPair(args, verbose) {
   } finally {
     link.cancel();
     await responder.close();
+  }
+}
+
+async function commandShare(args, cwd, verbose) {
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  const { repository, config } = await configuredRepository(cwd);
+  if (config.share?.role === 'mirror') {
+    throw new Error("This is a mirror of someone else's shared repository.");
+  }
+  const root = machineIndexRoot();
+  const keyPair = await loadPairingKeyPair(root);
+  let share = config.share ?? null;
+  const created = !share;
+  if (!share) {
+    share = { key: createShareKey(), ownerPublicKey: keyPair.pub, role: 'owner' };
+    await saveConfig(repository.gitDir, { ...config, share });
+  }
+  const parameters = {
+    repositoryId: config.repositoryId,
+    shareKey: share.key,
+    ownerPublicKey: share.ownerPublicKey,
+    signalingServer: config.signalingServer,
+  };
+  console.log(created
+    ? 'This repository is now shared. Anyone with this link can read and mirror it;'
+    : 'This repository is already shared. Anyone with this link can read and mirror it;');
+  console.log('only your approved devices can change it.\n');
+  console.log(createShareUrl(parameters));
+  console.log(`\nLocal dev variant:\n${createShareUrl({ ...parameters, origin: 'https://localhost:3000' })}`);
+  if (created) {
+    // The running session predates the share; reopen it with the share room.
+    const restarted = await stopWatchService(root);
+    if (restarted) await startWatchService({ root, verbose });
   }
 }
 
@@ -1749,6 +1828,7 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   if (command === 'list') return await commandList(args);
   if (command === 'pair') return await commandPair(args, verbose);
   if (command === 'invite') return await commandInvite(args, cwd);
+  if (command === 'share') return await commandShare(args, cwd, verbose);
   if (command === 'track') return await commandTrack(args, cwd);
   if (command === 'untrack') return await commandUntrack(args, cwd);
   if (command === 'tracked') return await commandTracked(args, cwd);

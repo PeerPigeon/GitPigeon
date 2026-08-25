@@ -26,12 +26,27 @@ export function validateConfig(input) {
   if (signalingServer && !/^wss?:\/\//i.test(signalingServer)) {
     throw new Error('Signaling server must use ws:// or wss://');
   }
+  let share;
+  if (input.share) {
+    const role = String(input.share.role ?? '');
+    if (role !== 'owner' && role !== 'mirror') throw new Error('Share role must be owner or mirror');
+    share = {
+      key: validateSecret(input.share.key),
+      ownerPublicKey: String(input.share.ownerPublicKey ?? '').trim(),
+      role,
+      createdAt: String(input.share.createdAt ?? new Date().toISOString()),
+    };
+    if (share.ownerPublicKey.length < 16 || share.ownerPublicKey.length > 512) {
+      throw new Error('Invalid share owner public key');
+    }
+  }
   return {
     version: CONFIG_VERSION,
     repositoryId: validateRepositoryId(input.repositoryId),
     secret: validateSecret(input.secret),
     deviceId,
     ...(signalingServer ? { signalingServer } : {}),
+    ...(share ? { share } : {}),
     createdAt: String(input.createdAt ?? new Date().toISOString()),
   };
 }
