@@ -7,17 +7,163 @@ import {
   chunkBundle,
   shareBundleChunkKey,
   shareHeadKey,
+  shareProposalChunkKey,
+  shareProposalKey,
   shareRoomId,
   shareRosterKey,
   shareStoragePrefix,
   signHead,
+  signProposal,
   signRoster,
   verifyHead,
+  verifyProposal,
   verifyRoster,
 } from './share.js';
 
 const OWNER_POLL_MS = 15_000;
 const MIRROR_POLL_MS = 10_000;
+
+async function storageValue(node, key) {
+  try {
+    const record = await node.storage?.get?.('public', key);
+    if (record?.value !== undefined && record?.value !== null) return record.value;
+  } catch { /* fall through to the mesh */ }
+  try {
+    const value = await node.storage?.retrieve?.('public', key, { timeoutMs: 4_000 });
+    return value?.value ?? value ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A guest node for one-shot share-room commands (propose, list, accept).
+ * Full room member for replication purposes, no session or lock taken.
+ */
+export async function connectShareGuest({ repositoryId, share, signalingServer = null }) {
+  const { installNativeWebRTC } = await import('./webrtc.js');
+  await installNativeWebRTC();
+  const { PeerPigeonNode } = await import('peerpigeon');
+  const node = new PeerPigeonNode({
+    crypto: { roomId: shareRoomId(repositoryId), roomSecret: share.key },
+    networkId: SHARE_NETWORK_ID,
+    sessionId: repositoryId,
+    ...(signalingServer ? { signalingServer } : {}),
+    storage: {
+      userId: `share-guest-${Date.now() % 1_000_000}`,
+      sessionId: `${SHARE_NETWORK_ID}:${repositoryId}`,
+      syncSecret: share.key,
+      dbName: `gitpigeon-share-guest-${repositoryId}`,
+      syncFilter: (_space, key) => String(key).startsWith(shareStoragePrefix(repositoryId)),
+    },
+  });
+  await node.start();
+  return node;
+}
+
+/**
+ * Submit the current branch's commits beyond the shared head as a signed
+ * proposal: the fork-and-PR path. Any link holder may propose; only an
+ * owner device acting on it changes the repository.
+ */
+export async function submitProposal({ repository, repositoryId, share, node, keyPair, title = '', author = '' }) {
+  const roster = await verifyRoster(await storageValue(node, shareRosterKey(repositoryId)), share.ownerPublicKey);
+  if (!roster) throw new Error('The shared roster has not replicated yet — try again in a moment.');
+  const head = await verifyHead(await storageValue(node, shareHeadKey(repositoryId)), roster);
+  if (!head) throw new Error('No verified shared head is available yet.');
+  const branch = (await repository.git(['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
+  if (!branch || branch === 'HEAD') throw new Error('Check out a branch before proposing.');
+  const refName = `refs/heads/${branch}`;
+  const baseOid = head.refs[refName] ?? Object.entries(head.refs).find(([name]) => name === 'refs/heads/main')?.[1] ?? '';
+  const localOid = (await repository.git(['rev-parse', refName])).stdout.trim();
+  if (baseOid === localOid) throw new Error('Nothing to propose: this branch matches the shared head.');
+  const directory = await mkdtemp(path.join(tmpdir(), 'gitpigeon-proposal-'));
+  const filename = path.join(directory, 'proposal.bundle');
+  try {
+    const bundleArgs = ['bundle', 'create', filename, refName];
+    if (baseOid) {
+      const known = await repository.git(['cat-file', '-e', `${baseOid}^{commit}`]).then(() => true, () => false);
+      if (known) bundleArgs.push('--not', baseOid);
+    }
+    await repository.git(bundleArgs);
+    await repository.git(['bundle', 'verify', filename]);
+    const { readFile } = await import('node:fs/promises');
+    const buffer = await readFile(filename);
+    const { sha256, bytes, chunks } = chunkBundle(buffer);
+    const proposal = await signProposal({
+      repositoryId,
+      title,
+      author,
+      baseOid,
+      refName,
+      bundleSha256: sha256,
+      bundleBytes: bytes,
+      chunkCount: chunks.length,
+      keyPair,
+    });
+    for (let index = 0; index < chunks.length; index += 1) {
+      await node.storage?.put?.('public', shareProposalChunkKey(repositoryId, proposal.proposalId, index), { data: chunks[index] });
+    }
+    await node.storage?.put?.('public', shareProposalKey(repositoryId, proposal.proposalId), proposal);
+    return proposal;
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+/** Every verified proposal currently replicated into this node. */
+export async function listProposals({ node, repositoryId }) {
+  const prefix = `${shareStoragePrefix(repositoryId)}proposal/`;
+  const records = await node.storage?.list?.('public') ?? [];
+  const proposals = [];
+  for (const record of records) {
+    if (!String(record?.key ?? '').startsWith(prefix)) continue;
+    const verified = await verifyProposal(record.value);
+    if (verified && verified.repositoryId === repositoryId) proposals.push(verified);
+  }
+  return proposals.sort((a, b) => a.submittedAt.localeCompare(b.submittedAt));
+}
+
+/**
+ * Fetch a proposal's bundle, verify it against the signed record, and land
+ * it as remote-tracking refs (refs/remotes/pigeon/proposal_<id>/…) for the
+ * owner to review and merge with ordinary git.
+ */
+export async function fetchProposal({ repository, repositoryId, node, proposalId }) {
+  const proposal = await verifyProposal(await storageValue(node, shareProposalKey(repositoryId, proposalId)));
+  if (!proposal) throw new Error(`No verified proposal ${proposalId} has replicated to this node.`);
+  const chunks = [];
+  for (let index = 0; index < proposal.chunkCount; index += 1) {
+    const record = await storageValue(node, shareProposalChunkKey(repositoryId, proposalId, index));
+    if (typeof record?.data !== 'string') throw new Error('The proposal bundle has not fully replicated yet.');
+    chunks.push(record.data);
+  }
+  const buffer = assembleBundle(chunks, proposal.bundleSha256, proposal.bundleBytes);
+  if (!buffer) throw new Error('The proposal bundle failed its digest — refusing it.');
+  const directory = await mkdtemp(path.join(tmpdir(), 'gitpigeon-proposal-'));
+  const filename = path.join(directory, 'proposal.bundle');
+  try {
+    await writeFile(filename, buffer);
+    await repository.git(['bundle', 'verify', filename]);
+    // Review refs only — NEVER the local branches. importBundle exists for
+    // trusted device sync and fast-forwards; a proposal is untrusted until
+    // a person merges it themselves.
+    const namespace = `refs/remotes/pigeon/proposal_${proposal.proposalId.slice(0, 8)}`;
+    const heads = (await repository.git(['bundle', 'list-heads', filename])).stdout
+      .split('\n').filter(Boolean)
+      .map((line) => line.split(' '))
+      .filter(([, name]) => name?.startsWith('refs/heads/'));
+    if (!heads.length) throw new Error('The proposal bundle carries no branches.');
+    const refspecs = heads.map(([, name]) => `+${name}:${namespace}/${name.slice('refs/heads/'.length)}`);
+    await repository.git(['fetch', '--no-tags', '--no-write-fetch-head', filename, ...refspecs]);
+    return {
+      proposal,
+      reviewRefs: heads.map(([, name]) => `${namespace}/${name.slice('refs/heads/'.length)}`),
+    };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
 /**
  * The share room service. One per shared repository, alongside the private

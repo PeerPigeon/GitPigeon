@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { GitRepository } from '../src/git.js';
-import { startShareService } from '../src/share-service.js';
+import { fetchProposal, listProposals, startShareService, submitProposal } from '../src/share-service.js';
 import { createShareKey, shareHeadKey, signHead } from '../src/share.js';
 
 const repositoryId = 'f0e1d2c3b4a59687';
@@ -25,6 +25,9 @@ function fakeShareNode(records) {
         records.set(key, value);
       },
       async retrieve() { return null; },
+      async list() {
+        return [...records.entries()].map(([key, value]) => ({ space: 'public', key, value }));
+      },
       subscribeKey() { return () => {}; },
       subscribe(callback) {
         subscribers.add(callback);
@@ -109,4 +112,65 @@ test('an owner publishes a signed head and a mirror materializes the clone', asy
   mirrorNode.emit(shareHeadKey(repositoryId));
   await new Promise((resolve) => setTimeout(resolve, 400));
   assert.ok(mirrorService.status.appliedSequence < 99, 'the forged head was rejected');
+});
+
+test('a mirror proposes commits; the owner lists and lands them for review', async (t) => {
+  const rootA = await mkdtemp(path.join(tmpdir(), 'gitpigeon-pr-owner-'));
+  const rootB = await mkdtemp(path.join(tmpdir(), 'gitpigeon-pr-fork-'));
+  t.after(() => Promise.all([
+    rm(rootA, { recursive: true, force: true }),
+    rm(rootB, { recursive: true, force: true }),
+  ]));
+  const repoA = await GitRepository.init(rootA);
+  await repoA.git(['config', 'user.email', 'owner@example.test']);
+  await repoA.git(['config', 'user.name', 'Owner']);
+  await writeFile(path.join(rootA, 'app.js'), 'console.log(1)\n');
+  await repoA.git(['add', 'app.js']);
+  await repoA.git(['commit', '-m', 'base']);
+
+  const { generateRandomPair } = await import('unsea');
+  const owner = await generateRandomPair();
+  const visitor = await generateRandomPair();
+  const records = new Map();
+  const ownerNode = fakeShareNode(records);
+  const forkNode = fakeShareNode(records);
+  const share = { key: createShareKey(), ownerPublicKey: owner.pub };
+
+  const ownerService = await startShareService({
+    repository: repoA, repositoryId, share: { ...share, role: 'owner' }, keyPair: owner, node: ownerNode,
+  });
+  t.after(() => ownerService.close());
+  assert.ok(await until(() => records.has(shareHeadKey(repositoryId))));
+
+  const repoB = await GitRepository.init(rootB);
+  const mirrorService = await startShareService({
+    repository: repoB, repositoryId, share: { ...share, role: 'mirror' }, node: forkNode,
+  });
+  await until(() => mirrorService.status.appliedSequence >= 1);
+  await mirrorService.close();
+
+  // The visitor commits on their mirror and proposes it.
+  await repoB.git(['config', 'user.email', 'visitor@example.test']);
+  await repoB.git(['config', 'user.name', 'Visitor']);
+  await writeFile(path.join(rootB, 'app.js'), 'console.log(2)\n');
+  await repoB.git(['add', 'app.js']);
+  await repoB.git(['commit', '-m', 'improve the number']);
+  const proposal = await submitProposal({
+    repository: repoB, repositoryId, share, node: forkNode, keyPair: visitor,
+    title: 'Improve the number', author: 'Visitor',
+  });
+  assert.equal(proposal.title, 'Improve the number');
+
+  // The owner sees it and lands it as review refs — never a direct edit.
+  const listed = await listProposals({ node: ownerNode, repositoryId });
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].proposalId, proposal.proposalId);
+  const { reviewRefs } = await fetchProposal({ repository: repoA, repositoryId, node: ownerNode, proposalId: proposal.proposalId });
+  assert.equal(reviewRefs.length, 1);
+  assert.ok(reviewRefs[0].startsWith('refs/remotes/pigeon/proposal_'));
+  const shown = await repoA.git(['show', `${reviewRefs[0]}:app.js`]);
+  assert.equal(shown.stdout, 'console.log(2)\n');
+  // Review is not merge: the owner's branch is untouched until they merge.
+  const ownerMain = await repoA.git(['show', 'refs/heads/main:app.js']);
+  assert.equal(ownerMain.stdout, 'console.log(1)\n');
 });

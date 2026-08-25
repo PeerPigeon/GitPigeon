@@ -20,7 +20,7 @@ import {
 import { GitRepository } from './git.js';
 import { createInvite, parseInvite } from './invite.js';
 import { createShareKey, createShareUrl, parseShareUrl } from './share.js';
-import { startShareService } from './share-service.js';
+import { connectShareGuest, fetchProposal, listProposals, startShareService, submitProposal } from './share-service.js';
 import { createDashboardEnrollment, serveDashboardEnrollment } from './dashboard-pairing.js';
 import { isPairLink, parsePairLink } from './pair-link.js';
 import {
@@ -79,6 +79,10 @@ Repositories
   git pigeon share                      Print a public read-only share link
                                         (holders mirror it; approved devices
                                         edit; forks can propose changes)
+  git pigeon propose [--title T]        Offer this branch's commits to the
+                                        shared repository's owner
+  git pigeon proposals                  List proposals awaiting review
+  git pigeon accept ID                  Fetch a proposal as review refs
   git pigeon sync [--wait D] [--force]  Sync once and exit
 
 Private files
@@ -1332,6 +1336,103 @@ async function commandShare(args, cwd, verbose) {
   }
 }
 
+async function shareGuest(config) {
+  if (!config.share) {
+    throw new Error('This repository is not shared. Owners run `git pigeon share`; visitors init from a share link.');
+  }
+  const node = await connectShareGuest({
+    repositoryId: config.repositoryId,
+    share: config.share,
+    signalingServer: config.signalingServer,
+  });
+  const deadline = Date.now() + 30_000;
+  while (node.getConnectedPeers().length === 0 && Date.now() < deadline) await sleep(300);
+  if (node.getConnectedPeers().length === 0) {
+    await node.destroy().catch(() => {});
+    throw new Error('No share-room peer is reachable right now.');
+  }
+  return node;
+}
+
+async function commandPropose(args, cwd) {
+  const title = takeOption(args, '--title') ?? '';
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  const { repository, config } = await configuredRepository(cwd);
+  const keyPair = await loadPairingKeyPair(machineIndexRoot());
+  const node = await shareGuest(config);
+  try {
+    const proposal = await submitProposal({
+      repository,
+      repositoryId: config.repositoryId,
+      share: config.share,
+      node,
+      keyPair,
+      title,
+      author: deviceHostName(),
+    });
+    // Let the records replicate off this transient guest before it leaves.
+    await sleep(2_000);
+    console.log(`Proposed ${proposal.proposalId}${proposal.title ? ` — "${proposal.title}"` : ''}`);
+    console.log('An approved device reviews it with `git pigeon proposals` and merges when ready.');
+  } finally {
+    await node.destroy().catch(() => {});
+  }
+}
+
+async function commandProposals(args, cwd) {
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  const { config } = await configuredRepository(cwd);
+  const node = await shareGuest(config);
+  try {
+    // A fresh guest needs a moment for the room's records to replicate in.
+    let proposals = [];
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      proposals = await listProposals({ node, repositoryId: config.repositoryId });
+      if (proposals.length || Date.now() > deadline) break;
+      await sleep(500);
+    }
+    if (!proposals.length) {
+      console.log('No proposals have replicated to this device.');
+      return;
+    }
+    for (const proposal of proposals) {
+      console.log(`${proposal.proposalId}  ${proposal.submittedAt}  ${proposal.author || 'unknown'}  ${proposal.title || '(untitled)'}`);
+    }
+    console.log('\nReview one with `git pigeon accept <id>`.');
+  } finally {
+    await node.destroy().catch(() => {});
+  }
+}
+
+async function commandAccept(args, cwd) {
+  const wanted = String(args.shift() ?? '').trim();
+  if (!wanted) throw new Error('accept requires a proposal id (see `git pigeon proposals`)');
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  const { repository, config } = await configuredRepository(cwd);
+  const node = await shareGuest(config);
+  try {
+    const proposals = await listProposals({ node, repositoryId: config.repositoryId });
+    const matches = proposals.filter((proposal) => proposal.proposalId.startsWith(wanted));
+    if (matches.length > 1) throw new Error(`Proposal id ${wanted} is ambiguous.`);
+    const proposalId = matches[0]?.proposalId ?? wanted;
+    const { proposal, reviewRefs } = await fetchProposal({
+      repository,
+      repositoryId: config.repositoryId,
+      node,
+      proposalId,
+    });
+    console.log(`Fetched "${proposal.title || proposal.proposalId}" for review:`);
+    for (const ref of reviewRefs) console.log(`  ${ref}`);
+    console.log('\nReview and merge with ordinary git, for example:');
+    console.log(`  git diff HEAD...${reviewRefs[0]}`);
+    console.log(`  git merge ${reviewRefs[0]}`);
+    console.log('Once merged and committed, the watcher publishes the new shared head.');
+  } finally {
+    await node.destroy().catch(() => {});
+  }
+}
+
 async function commandInvite(args, cwd) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const { config } = await configuredRepository(cwd);
@@ -1829,6 +1930,9 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   if (command === 'pair') return await commandPair(args, verbose);
   if (command === 'invite') return await commandInvite(args, cwd);
   if (command === 'share') return await commandShare(args, cwd, verbose);
+  if (command === 'propose') return await commandPropose(args, cwd);
+  if (command === 'proposals') return await commandProposals(args, cwd);
+  if (command === 'accept') return await commandAccept(args, cwd);
   if (command === 'track') return await commandTrack(args, cwd);
   if (command === 'untrack') return await commandUntrack(args, cwd);
   if (command === 'tracked') return await commandTracked(args, cwd);
