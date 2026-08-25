@@ -296,6 +296,7 @@ export async function startShareService({
         sequence: (currentHead?.sequence ?? 0) + 1,
         keyPair,
         files,
+        name: path.basename(repository.root),
       });
       await node.storage?.put?.('public', shareHeadKey(repositoryId), head);
       lastPublishedRefsDigest = refsDigest;

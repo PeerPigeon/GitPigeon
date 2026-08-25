@@ -172,10 +172,11 @@ export async function verifyRoster(record, ownerPublicKey) {
  * (chunk-addressed) that carries them. Signed by a rostered device;
  * sequence is monotonic so mirrors reject rollbacks.
  */
-export async function signHead({ repositoryId, refs, bundleSha256, bundleBytes, chunkCount, sequence, keyPair, files = [] }) {
+export async function signHead({ repositoryId, refs, bundleSha256, bundleBytes, chunkCount, sequence, keyPair, files = [], name = '' }) {
   const { signMessage } = await import('unsea');
   const record = {
     repositoryId: validateRepositoryId(repositoryId),
+    name: String(name).trim().slice(0, 200),
     refs: Object.fromEntries(Object.entries(refs ?? {}).map(([name, oid]) => [String(name), String(oid)]).sort(([a], [b]) => a.localeCompare(b))),
     bundleSha256: String(bundleSha256),
     bundleBytes: Number(bundleBytes),
@@ -206,6 +207,7 @@ export async function verifyHead(record, roster) {
   const { signature, ...rest } = record;
   const value = {
     repositoryId: String(rest.repositoryId ?? ''),
+    name: String(rest.name ?? ''),
     refs: rest.refs && typeof rest.refs === 'object' ? rest.refs : {},
     bundleSha256: String(rest.bundleSha256 ?? ''),
     bundleBytes: Number(rest.bundleBytes),

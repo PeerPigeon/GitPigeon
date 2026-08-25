@@ -1865,6 +1865,24 @@ async function commandProtocol(args, verbose) {
   const value = args.shift();
   if (!value) throw new Error('The GitPigeon protocol handler requires an encrypted clone URL');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  // A share link IS the capability — no sealed grant, no device key. The
+  // browser's Clone button hands it straight to the app; this machine
+  // becomes a full local clone and a mirror.
+  let sharedJoin = null;
+  try {
+    sharedJoin = parseShareUrl(value);
+  } catch { /* not a share link; fall through to the sealed clone flow */ }
+  if (sharedJoin) {
+    const base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), 'GitPigeon'));
+    await mkdir(base, { recursive: true });
+    const target = await availableCloneTarget(
+      base,
+      safeRepositoryDirectoryName(`shared-${sharedJoin.repositoryId.slice(0, 8)}`, sharedJoin.repositoryId),
+    );
+    await commandInit([value, target], process.cwd(), verbose);
+    console.log(`Mirroring the shared repository at ${target}.`);
+    return;
+  }
   const identity = await loadOrCreateNativeDeviceIdentity();
   const envelope = parseNativeCloneUrl(value);
   const grant = openDeviceGrant(identity, envelope, { purpose: 'clone' });
