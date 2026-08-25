@@ -48,6 +48,10 @@ export function shareBundleChunkKey(repositoryId, bundleSha256, index) {
   return `${shareStoragePrefix(repositoryId)}bundle/${bundleSha256}/${index}`;
 }
 
+export function shareBlobChunkKey(repositoryId, blobSha256, index) {
+  return `${shareStoragePrefix(repositoryId)}blob/${blobSha256}/${index}`;
+}
+
 export function shareProposalKey(repositoryId, proposalId) {
   return `${shareStoragePrefix(repositoryId)}proposal/${proposalId}`;
 }
@@ -168,7 +172,7 @@ export async function verifyRoster(record, ownerPublicKey) {
  * (chunk-addressed) that carries them. Signed by a rostered device;
  * sequence is monotonic so mirrors reject rollbacks.
  */
-export async function signHead({ repositoryId, refs, bundleSha256, bundleBytes, chunkCount, sequence, keyPair }) {
+export async function signHead({ repositoryId, refs, bundleSha256, bundleBytes, chunkCount, sequence, keyPair, files = [] }) {
   const { signMessage } = await import('unsea');
   const record = {
     repositoryId: validateRepositoryId(repositoryId),
@@ -177,6 +181,14 @@ export async function signHead({ repositoryId, refs, bundleSha256, bundleBytes, 
     bundleBytes: Number(bundleBytes),
     chunkCount: Number(chunkCount),
     sequence: Number(sequence),
+    // The browsable snapshot: committed files by content address, so a
+    // browser can read the repository without unpacking a git bundle.
+    files: (Array.isArray(files) ? files : []).map((file) => ({
+      path: String(file.path),
+      size: Number(file.size),
+      sha256: String(file.sha256),
+      chunkCount: Number(file.chunkCount),
+    })).sort((a, b) => a.path.localeCompare(b.path)),
     publishedAt: new Date().toISOString(),
     signedBy: validPublicKey(keyPair.pub),
   };
@@ -199,6 +211,12 @@ export async function verifyHead(record, roster) {
     bundleBytes: Number(rest.bundleBytes),
     chunkCount: Number(rest.chunkCount),
     sequence: Number(rest.sequence),
+    files: Array.isArray(rest.files) ? rest.files.map((file) => ({
+      path: String(file?.path ?? ''),
+      size: Number(file?.size),
+      sha256: String(file?.sha256 ?? ''),
+      chunkCount: Number(file?.chunkCount),
+    })) : [],
     publishedAt: String(rest.publishedAt ?? ''),
     signedBy: String(rest.signedBy ?? ''),
   };

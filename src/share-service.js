@@ -5,6 +5,7 @@ import {
   SHARE_NETWORK_ID,
   assembleBundle,
   chunkBundle,
+  shareBlobChunkKey,
   shareBundleChunkKey,
   shareHeadKey,
   shareProposalChunkKey,
@@ -261,6 +262,31 @@ export async function startShareService({
         await node.storage?.put?.('public', shareBundleChunkKey(repositoryId, sha256, index), { data: chunks[index] });
         subscribe(shareBundleChunkKey(repositoryId, sha256, index));
       }
+      // The browsable snapshot: each committed file, content-addressed, so a
+      // browser reads the repository without unpacking the git bundle.
+      // Content addressing makes republished heads cheap — unchanged blobs
+      // are already in the room.
+      const files = [];
+      let snapshotBytes = 0;
+      const tree = (await repository.git(['ls-tree', '-r', '-z', 'HEAD'])).stdout.split('\0').filter(Boolean);
+      for (const line of tree) {
+        const [meta, filePath] = line.split('\t');
+        const [, type, oid] = (meta ?? '').split(' ');
+        if (type !== 'blob' || !filePath) continue;
+        const size = Number((await repository.git(['cat-file', '-s', oid])).stdout.trim());
+        if (!Number.isSafeInteger(size) || size > 1024 * 1024 || snapshotBytes + size > 32 * 1024 * 1024) continue;
+        const content = (await repository.git(['cat-file', 'blob', oid], { encoding: null })).stdout;
+        const blob = chunkBundle(content);
+        const firstChunkKey = shareBlobChunkKey(repositoryId, blob.sha256, 0);
+        subscribe(firstChunkKey);
+        if (!(await storageGet(firstChunkKey))) {
+          for (let index = 0; index < blob.chunks.length; index += 1) {
+            await node.storage?.put?.('public', shareBlobChunkKey(repositoryId, blob.sha256, index), { data: blob.chunks[index] });
+          }
+        }
+        files.push({ path: filePath, size: blob.bytes, sha256: blob.sha256, chunkCount: blob.chunks.length });
+        snapshotBytes += size;
+      }
       const head = await signHead({
         repositoryId,
         refs: Object.fromEntries(bundle.refs.map(({ name, oid }) => [name, oid])),
@@ -269,6 +295,7 @@ export async function startShareService({
         chunkCount: chunks.length,
         sequence: (currentHead?.sequence ?? 0) + 1,
         keyPair,
+        files,
       });
       await node.storage?.put?.('public', shareHeadKey(repositoryId), head);
       lastPublishedRefsDigest = refsDigest;
