@@ -1,6 +1,7 @@
 import { chmod, mkdir, stat, writeFile } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { machineIndexRoot } from './machine-index.js';
+import { terminalHistorySpoolPath } from './terminal-history.js';
 import path from 'node:path';
 import process from 'node:process';
 import { createRequire } from 'node:module';
@@ -258,25 +259,23 @@ async function shellCommand(deviceName) {
   // through an invisible OSC frame the server strips from the output stream
   // and merges into that record — so a command typed on any device is
   // recallable on every device.
-  const historySeed = (addCommand) => [
-    'unset HISTFILE',
-    'HISTSIZE=10000',
-    'if [ -n "$GITPIGEON_HISTORY" ]; then',
-    '  while IFS= read -r gitpigeon_seed_line; do',
-    `    [ -n "$gitpigeon_seed_line" ] && ${addCommand} -- "$gitpigeon_seed_line" && GITPIGEON_LAST_CAPTURE=$gitpigeon_seed_line`,
-    '  done <<GITPIGEON_HISTORY_EOF',
-    '$GITPIGEON_HISTORY',
-    'GITPIGEON_HISTORY_EOF',
-    'fi',
-    'unset GITPIGEON_HISTORY gitpigeon_seed_line',
-  ].join('\n');
+  // Live fleet-wide history: HISTFILE points at GitPigeon's spool — a local
+  // projection of the mesh record that the watcher appends to as commands
+  // arrive from other devices. zsh SHARE_HISTORY imports new spool lines on
+  // every history access, so a command typed on another machine is one
+  // up-arrow away in an already-open shell here. Local commands reach the
+  // mesh through the capture hook and reach this spool through the shell's
+  // own HISTFILE writes.
+  const spoolPath = terminalHistorySpoolPath(machineIndexRoot());
   const emitCapture = `printf '\\033]777;gitpigeon-hist;%s\\a' "$(printf %s "$gitpigeon_line" | command base64 | command tr -d '\\n')"`;
   const posixTail = (promptVariable, promptValue, flavor) => [
     `device() { ${deviceCommand} terminal-device "$@"; }`,
     `export ${promptVariable}=$'${promptValue}'`,
-    historySeed(flavor === 'zsh' ? 'builtin print -s' : 'builtin history -s'),
-    'SAVEHIST=0',
+    `export HISTFILE=${quoteShell(spoolPath)}`,
+    'export HISTSIZE=10000',
     ...(flavor === 'zsh' ? [
+      'SAVEHIST=10000',
+      'setopt SHARE_HISTORY 2>/dev/null',
       'gitpigeon_capture_history() {',
       `  local gitpigeon_line=\${1%$'\\n'}`,
       '  [ -n "$gitpigeon_line" ] || return 0',
@@ -285,6 +284,9 @@ async function shellCommand(deviceName) {
       '}',
       'zshaddhistory_functions+=(gitpigeon_capture_history)',
     ] : [
+      'export HISTFILESIZE=10000',
+      'GITPIGEON_LAST_CAPTURE=$(builtin fc -ln -1 2>/dev/null)',
+      'GITPIGEON_LAST_CAPTURE=${GITPIGEON_LAST_CAPTURE#"${GITPIGEON_LAST_CAPTURE%%[![:space:]]*}"}',
       'gitpigeon_capture_history() {',
       '  local gitpigeon_line=$(builtin fc -ln -1 2>/dev/null)',
       '  gitpigeon_line=${gitpigeon_line#"${gitpigeon_line%%[![:space:]]*}"}',
@@ -292,7 +294,7 @@ async function shellCommand(deviceName) {
       '  GITPIGEON_LAST_CAPTURE=$gitpigeon_line',
       `  ${emitCapture}`,
       '}',
-      'PROMPT_COMMAND="gitpigeon_capture_history${PROMPT_COMMAND:+; $PROMPT_COMMAND}"',
+      'PROMPT_COMMAND="gitpigeon_capture_history; builtin history -a; builtin history -n${PROMPT_COMMAND:+; $PROMPT_COMMAND}"',
     ]),
     `printf '\\033[2J\\033[3J\\033[H\\033]777;gitpigeon-ready\\a'`,
     '',
@@ -341,7 +343,7 @@ async function shellCommand(deviceName) {
     shell,
     args: [],
     env: {},
-    initialize: `device() { ${deviceCommand} terminal-device "$@"; }; export PS1=$'${bashPrompt}'; unset HISTFILE; clear; printf '\\033]777;gitpigeon-ready\\a'\r`,
+    initialize: `device() { ${deviceCommand} terminal-device "$@"; }; export PS1=$'${bashPrompt}'; export HISTFILE=${quoteShell(spoolPath)}; clear; printf '\\033]777;gitpigeon-ready\\a'\r`,
   };
 }
 
@@ -484,15 +486,6 @@ export class TerminalServer {
       // helped nobody.
       let cwd = this.repository.root;
       try { await stat(cwd); } catch { cwd = homedir(); }
-      // Seed the shell's in-memory history from the fleet-wide mesh record:
-      // newest-first selection under a byte budget, delivered oldest-first.
-      let historySeed = '';
-      const seedLines = this.history?.lines?.() ?? [];
-      for (let index = seedLines.length - 1; index >= 0; index -= 1) {
-        const candidate = historySeed ? `${seedLines[index]}\n${historySeed}` : seedLines[index];
-        if (Buffer.byteLength(candidate) > 24 * 1024) break;
-        historySeed = candidate;
-      }
       // The service process inherits the identity of whatever terminal it
       // was originally launched from — on macOS that meant every watcher
       // shell carried Apple Terminal's TERM_PROGRAM and TERM_SESSION_ID, so
@@ -516,7 +509,6 @@ export class TerminalServer {
           TERM: 'xterm-256color',
           COLORTERM: 'truecolor',
           GITPIGEON_DEVICE_ROSTER: Buffer.from(JSON.stringify(devices)).toString('base64url'),
-          ...(historySeed ? { GITPIGEON_HISTORY: historySeed } : {}),
           ...command.env,
         },
       });

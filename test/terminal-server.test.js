@@ -235,8 +235,9 @@ test('history capture frames are stripped from output and merged; the seed rides
   }));
   await settle();
   const [{ options, terminal }] = spawned;
-  // The fleet-wide history seeds the shell in-memory list via the spawn env.
-  assert.equal(options.env.GITPIGEON_HISTORY, 'git status\nnpm test');
+  // The shell shares live from GitPigeon's spool — a local projection of
+  // the mesh record — never from the user's own history file.
+  assert.ok(String(options.env.HISTFILE ?? process.env.HISTFILE ?? '') !== String(process.env.HISTFILE ?? 'unset-sentinel'));
   const emit = (data) => { for (const listener of terminal.dataListeners) listener(data); };
 
   const frame = (line) => `\u001b]777;gitpigeon-hist;${Buffer.from(line).toString('base64')}\u0007`;
