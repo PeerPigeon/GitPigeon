@@ -20,7 +20,7 @@ import {
 import { GitRepository } from './git.js';
 import { createInvite, parseInvite } from './invite.js';
 import { createShareKey, createShareUrl, parseShareUrl } from './share.js';
-import { connectShareGuest, fetchProposal, listProposals, startShareService, submitProposal } from './share-service.js';
+import { connectShareGuest, fetchProposal, listProposals, submitProposal } from './share-service.js';
 import { createDashboardEnrollment, serveDashboardEnrollment } from './dashboard-pairing.js';
 import { isPairLink, parsePairLink } from './pair-link.js';
 import {
@@ -179,7 +179,32 @@ async function configuredRepository(cwd) {
 // One node, one room. Every repository rides the machine's single index node,
 // which is what browsers already do, instead of opening a PeerPigeon room per
 // repository that no browser ever joins.
-function openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node, ownership = { owns: () => false }, deviceClaim = null) {
+/**
+ * Committed-only stand-ins for the workspace layers. A SHARED repository
+ * runs the exact same synchronizer as a private one — same manifests, same
+ * chunks, same channels — on the share room, gated by these: no private
+ * files, no live workspace, no trash ever enter a shared publication, and
+ * incoming ones have nothing to apply to.
+ */
+class CommittedOnlyWorkspace {
+  async init() {}
+  async list() { return []; }
+  normalize(value) { return String(value); }
+  async snapshot() { return { files: [], digest: 'committed-only' }; }
+  async apply() { return { written: [], removed: [] }; }
+}
+
+class CommittedOnlyLiveWorkspace {
+  async init() {}
+  normalize(value) { return String(value); }
+  async snapshot() { return { files: [], digest: 'committed-only' }; }
+  async trashSnapshot() { return []; }
+  async mirrorTrash() { return []; }
+  async prepare() { return { written: [], removed: [] }; }
+  async apply() { return { written: [], removed: [] }; }
+}
+
+function openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node, ownership = { owns: () => false }, deviceClaim = null, { committedOnly = false, cacheDir = null } = {}) {
   if (!node?.storage) throw new Error('The GitPigeon index mesh is not connected');
   const synchronizer = new RepositorySynchronizer({
     ownsLivePath: (file) => ownership.owns(file),
@@ -195,6 +220,11 @@ function openNetwork(repository, config, log, serviceInstanceId, machineIndexId,
     // messages, so it takes the node facade rather than the raw mesh.
     streamTransport: node,
     storageWritePauseMs: 0,
+    ...(cacheDir ? { cache: new RepositoryCache(cacheDir) } : {}),
+    ...(committedOnly ? {
+      workspace: new CommittedOnlyWorkspace(),
+      liveWorkspace: new CommittedOnlyLiveWorkspace(),
+    } : {}),
   });
   return { synchronizer };
 }
@@ -266,21 +296,35 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     },
   });
   ownership.owns = (file) => realtimeServer.ownsPath(file);
-  // A shared repository also serves its public room: as owner it publishes
-  // signed heads; as mirror it verifies and carries them.
-  let shareService = null;
+  // A shared repository serves its public room with the SAME machinery as
+  // the private one: the standard synchronizer on a second node whose
+  // secret is the share key, gated committed-only — no private files, no
+  // live workspace, no trash. One code path; shared is a gate, not a fork.
+  let shareSync = null;
+  let shareNode = null;
   if (config.share) {
     (async () => {
-      const shareKeyPair = config.share.role === 'owner' ? await loadPairingKeyPair(machineIndexRoot()) : null;
-      shareService = await startShareService({
-        repository,
+      shareNode = await connectShareGuest({
         repositoryId: config.repositoryId,
-        share: config.share,
-        keyPair: shareKeyPair,
+        share: { key: config.share.key },
         signalingServer: config.signalingServer,
-        logger: log,
+        userId: `share-${config.share.role}-${config.deviceId.slice(0, 12)}`,
       });
-    })().catch((error) => log.error(new Error(`Share service for ${config.repositoryId.slice(0, 8)}: ${error.message}`)));
+      const shareNet = openNetwork(
+        repository,
+        { ...config, secret: config.share.key },
+        log,
+        serviceInstanceId,
+        machineIndexId,
+        shareNode,
+        ownership,
+        deviceClaim,
+        { committedOnly: true, cacheDir: path.join(repository.gitDir, 'gitpigeon', 'share-cache') },
+      );
+      shareSync = shareNet.synchronizer;
+      await shareSync.start();
+      log.info(`Share room live for ${config.repositoryId.slice(0, 8)} (${config.share.role})`);
+    })().catch((error) => log.error(new Error(`Share room for ${config.repositoryId.slice(0, 8)}: ${error.message}`)));
   }
   let changeTimer;
   let filesystemWatcher;
@@ -299,7 +343,8 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       if (nextDigest !== previousDigest) {
         previousDigest = nextDigest;
         await synchronizer.publishLocal();
-        shareService?.changed();
+        // Committed changes flow to the share room through the same call.
+        await shareSync?.publishLocal()?.catch?.(() => {});
       }
     } catch (error) {
       log.error(error);
@@ -393,7 +438,8 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       terminalServer.stop();
       realtimeServer.stop();
       await sessionPeerUpdates.stop().catch(() => {});
-      await shareService?.close()?.catch?.(() => {});
+      await shareSync?.stop()?.catch?.(() => {});
+      await shareNode?.destroy()?.catch?.(() => {});
       while (starting || publishing) await sleep(10);
       await synchronizer.stop();
       // The node belongs to the machine index service, not to this session.

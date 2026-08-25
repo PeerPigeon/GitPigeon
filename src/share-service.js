@@ -41,7 +41,7 @@ async function storageValue(node, key) {
  * A guest node for one-shot share-room commands (propose, list, accept).
  * Full room member for replication purposes, no session or lock taken.
  */
-export async function connectShareGuest({ repositoryId, share, signalingServer = null }) {
+export async function connectShareGuest({ repositoryId, share, signalingServer = null, userId = `share-guest-${Date.now() % 1_000_000}` }) {
   const { installNativeWebRTC } = await import('./webrtc.js');
   await installNativeWebRTC();
   const { PeerPigeonNode } = await import('peerpigeon');
@@ -51,11 +51,15 @@ export async function connectShareGuest({ repositoryId, share, signalingServer =
     sessionId: repositoryId,
     ...(signalingServer ? { signalingServer } : {}),
     storage: {
-      userId: `share-guest-${Date.now() % 1_000_000}`,
+      userId,
       sessionId: `${SHARE_NETWORK_ID}:${repositoryId}`,
       syncSecret: share.key,
       dbName: `gitpigeon-share-guest-${repositoryId}`,
-      syncFilter: (_space, key) => String(key).startsWith(shareStoragePrefix(repositoryId)),
+      // The share room carries the STANDARD repository protocol (manifests,
+      // chunks, presence — the same records as the private room, minus
+      // private/live/trash) plus the share-scoped proposal records.
+      syncFilter: (_space, key) => String(key).startsWith(`gitpigeon/v1/${repositoryId}`)
+        || String(key).startsWith(shareStoragePrefix(repositoryId)),
     },
   });
   await node.start();
@@ -212,6 +216,9 @@ export async function startShareService({
   let timer = null;
   let working = Promise.resolve();
   let lastPublishedRefsDigest = null;
+  let lastHeadRecord = null;
+  let lastRosterRecord = null;
+  let lastBundleSha = null;
   let lastAppliedSequence = 0;
   const status = { role, peers: () => node.getConnectedPeers().length, lastError: null, publishedSequence: 0, appliedSequence: 0 };
 
@@ -237,30 +244,67 @@ export async function startShareService({
   subscribe(shareHeadKey(repositoryId));
 
   const ensureRoster = async () => {
-    const existing = await verifyRoster(await storageGet(shareRosterKey(repositoryId)), share.ownerPublicKey);
-    if (existing?.signers?.includes(keyPair.pub)) return existing;
+    const raw = await storageGet(shareRosterKey(repositoryId));
+    const existing = await verifyRoster(raw, share.ownerPublicKey);
+    if (existing?.signers?.includes(keyPair.pub)) {
+      // Memory-backed storage: after a restart the record may only live in
+      // remote replicas. Re-seed the raw signed record locally so this node
+      // serves it even when every replica leaves.
+      try {
+        const local = await node.storage?.get?.('public', shareRosterKey(repositoryId));
+        if (!local?.value && raw) await node.storage?.put?.('public', shareRosterKey(repositoryId), raw);
+      } catch { /* the next pass retries */ }
+      lastRosterRecord = raw;
+      return existing;
+    }
     const version = (existing?.version ?? 0) + 1;
     const signers = [...new Set([...(existing?.signers ?? []), keyPair.pub])];
     const roster = await signRoster({ repositoryId, signers, version, ownerKeyPair: keyPair });
     await node.storage?.put?.('public', shareRosterKey(repositoryId), roster);
+    lastRosterRecord = roster;
     return roster;
+  };
+
+  // LOCAL presence only — never the mesh. The skip decisions below exist to
+  // avoid re-uploading data this node already serves; a copy that lives only
+  // in some browser tab across the mesh serves nobody once that tab closes.
+  // Watcher storage is memory-backed, so after a restart local misses are
+  // the norm and everything content-addressed gets re-seeded.
+  const storedLocally = async (key) => {
+    try {
+      const record = await node.storage?.get?.('public', key);
+      return record?.value !== undefined && record?.value !== null;
+    } catch {
+      return false;
+    }
   };
 
   const publishOnce = async () => {
     const refsDigest = await repository.refsDigest();
-    if (!refsDigest || refsDigest === lastPublishedRefsDigest) return;
-    const currentHead = await verifyHead(await storageGet(shareHeadKey(repositoryId)), await verifyRoster(await storageGet(shareRosterKey(repositoryId)), share.ownerPublicKey));
+    if (!refsDigest) return;
+    // Heartbeat: mesh records EXPIRE — retrievable minutes after publishing,
+    // gone later, exactly like the index directory (which republishes on a
+    // heartbeat for this reason). While nothing changed and this node still
+    // holds its chunks, re-putting the two small signed records every pass
+    // keeps the share alive; when local copies are missing (memory-backed
+    // storage after a restart, or local expiry), fall through and re-seed
+    // everything.
+    if (refsDigest === lastPublishedRefsDigest && lastHeadRecord && lastBundleSha
+      && await storedLocally(shareBundleChunkKey(repositoryId, lastBundleSha, 0))) {
+      await node.storage?.put?.('public', shareHeadKey(repositoryId), lastHeadRecord);
+      if (lastRosterRecord) await node.storage?.put?.('public', shareRosterKey(repositoryId), lastRosterRecord);
+      return;
+    }
+    const rawHead = await storageGet(shareHeadKey(repositoryId));
+    const currentHead = await verifyHead(rawHead, await verifyRoster(await storageGet(shareRosterKey(repositoryId)), share.ownerPublicKey));
     const bundle = await repository.createBundle();
     if (!bundle) return;
     try {
       const { sha256, bytes, chunks } = chunkBundle(bundle.data);
-      if (currentHead?.bundleSha256 === sha256) {
-        lastPublishedRefsDigest = refsDigest;
-        return;
-      }
       for (let index = 0; index < chunks.length; index += 1) {
-        await node.storage?.put?.('public', shareBundleChunkKey(repositoryId, sha256, index), { data: chunks[index] });
-        subscribe(shareBundleChunkKey(repositoryId, sha256, index));
+        const key = shareBundleChunkKey(repositoryId, sha256, index);
+        if (!(await storedLocally(key))) await node.storage?.put?.('public', key, { data: chunks[index] });
+        subscribe(key);
       }
       // The browsable snapshot: each committed file, content-addressed, so a
       // browser reads the repository without unpacking the git bundle.
@@ -279,13 +323,25 @@ export async function startShareService({
         const blob = chunkBundle(content);
         const firstChunkKey = shareBlobChunkKey(repositoryId, blob.sha256, 0);
         subscribe(firstChunkKey);
-        if (!(await storageGet(firstChunkKey))) {
+        if (!(await storedLocally(firstChunkKey))) {
           for (let index = 0; index < blob.chunks.length; index += 1) {
             await node.storage?.put?.('public', shareBlobChunkKey(repositoryId, blob.sha256, index), { data: blob.chunks[index] });
           }
         }
         files.push({ path: filePath, size: blob.bytes, sha256: blob.sha256, chunkCount: blob.chunks.length });
         snapshotBytes += size;
+      }
+      // Same content as the current head: the chunks above are re-seeded
+      // (that is the point after a restart), but no new head is minted.
+      if (currentHead?.bundleSha256 === sha256) {
+        // The RAW record keeps its signature; the verified value does not.
+        if (rawHead) await node.storage?.put?.('public', shareHeadKey(repositoryId), rawHead);
+        lastHeadRecord = rawHead;
+        lastBundleSha = sha256;
+        lastPublishedRefsDigest = refsDigest;
+        status.publishedSequence = currentHead.sequence;
+        logger.info?.(`Re-seeded shared ${repositoryId.slice(0, 8)} head #${currentHead.sequence} records`);
+        return;
       }
       const head = await signHead({
         repositoryId,
@@ -299,6 +355,8 @@ export async function startShareService({
         name: path.basename(repository.root),
       });
       await node.storage?.put?.('public', shareHeadKey(repositoryId), head);
+      lastHeadRecord = head;
+      lastBundleSha = sha256;
       lastPublishedRefsDigest = refsDigest;
       status.publishedSequence = head.sequence;
       logger.info?.(`Shared ${repositoryId.slice(0, 8)} head #${head.sequence} (${bundle.refs.length} refs, ${bytes} bytes)`);
@@ -348,6 +406,41 @@ export async function startShareService({
     }
   };
 
+  // Direct chunk serving: storage replication moves the SMALL signed records
+  // reliably, but bulk content rides request/response over PeerPigeon's
+  // encrypted direct messages — the exact transport the paired snapshot path
+  // uses, because it is the one that works from browsers. Any room member
+  // holding a chunk answers, owner or mirror alike.
+  const serveChunks = (message) => {
+    if (closed || message?.local || !message?.fromPeerId) return;
+    let value = message.data;
+    if (typeof value === 'string') {
+      try { value = JSON.parse(value); } catch { return; }
+    }
+    if (value?.protocol !== 'gitpigeon-share-chunk/1' || value.kind !== 'request') return;
+    const kindOf = value.chunkKind === 'bundle' ? 'bundle' : 'blob';
+    const sha256 = String(value.sha256 ?? '');
+    const index = Number(value.index);
+    if (!/^[a-f0-9]{64}$/.test(sha256) || !Number.isSafeInteger(index) || index < 0) return;
+    const key = kindOf === 'bundle'
+      ? shareBundleChunkKey(repositoryId, sha256, index)
+      : shareBlobChunkKey(repositoryId, sha256, index);
+    (async () => {
+      const record = await node.storage?.get?.('public', key);
+      const data = record?.value?.data;
+      if (typeof data !== 'string') return;
+      await node.sendEncryptedDirect(message.fromPeerId, JSON.stringify({
+        protocol: 'gitpigeon-share-chunk/1',
+        kind: 'chunk',
+        requestId: String(value.requestId ?? '').slice(0, 64),
+        sha256,
+        index,
+        data,
+      }));
+    })().catch((error) => logger.debug?.(`Share chunk serve: ${error.message}`));
+  };
+  node.on?.('message', serveChunks);
+
   const tick = () => {
     if (closed) return;
     working = working.then(async () => {
@@ -381,6 +474,7 @@ export async function startShareService({
     async close() {
       closed = true;
       if (timer) clearInterval(timer);
+      node.off?.('message', serveChunks);
       changeSubscription?.();
       for (const unsubscribe of subscriptions) unsubscribe?.();
       await working;
