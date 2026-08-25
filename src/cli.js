@@ -409,7 +409,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
  * a minute later, and nothing answered because both commands had already
  * exited. The watcher is the long-lived thing, so it is what listens.
  */
-async function startPairingService(root, log, { indexDiagnostics = null, onTerminalRelay = null } = {}) {
+async function startPairingService(root, log, { indexDiagnostics = null, onTerminalRelay = null, onShareClone = null } = {}) {
   const keyPair = await loadPairingKeyPair(root);
   const adopt = async (capability) => {
     if (!capability?.index?.indexId) return;
@@ -440,6 +440,7 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
     })(),
     offerDiagnostics: () => ({ build: GITPIGEON_VERSION, ...(indexDiagnostics?.() ?? {}) }),
     onTerminalRelay,
+    onShareClone,
     onGrant: adopt,
     // A browser this machine offered itself to can ask it to join the index it
     // settled on, which is how several machines end up together.
@@ -670,6 +671,42 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     // Keep offering to pair for as long as this machine runs, so a browser
     // opened at any time is answered.
     pairingService = await startPairingService(root, log, {
+      // Clone-from-share over the LAN mesh: a browser holding a share link
+      // asks this machine to mirror the repository. No installer, no deep
+      // link, no pairing — the repository simply becomes a first-class
+      // citizen of this machine's mesh: cloned, registered, synced, served.
+      onShareClone: async (opened, { reply }) => {
+        try {
+          const requestId = String(opened?.requestId ?? '');
+          const parsed = parseShareUrl(String(opened?.shareUrl ?? ''));
+          const entries = await listMachinePigeons({ root, activeOnly: false });
+          const existing = entries.find((entry) => entry.repositoryId === parsed.repositoryId);
+          if (existing) {
+            await reply({ requestId, ok: true, already: true, target: existing.repository, deviceName: deviceHostName() });
+            return;
+          }
+          const base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), 'GitPigeon'));
+          await mkdir(base, { recursive: true });
+          const target = await availableCloneTarget(
+            base,
+            safeRepositoryDirectoryName(`shared-${parsed.repositoryId.slice(0, 8)}`, parsed.repositoryId),
+          );
+          const repository = await GitRepository.init(target);
+          let config = createIdentity({ repositoryId: parsed.repositoryId, signalingServer: parsed.signalingServer });
+          config = await saveConfig(repository.gitDir, {
+            ...config,
+            share: { key: parsed.shareKey, ownerPublicKey: parsed.ownerPublicKey, role: 'mirror' },
+          });
+          await new WorkspaceFiles(repository).init();
+          await registerMachinePigeon(repository, config, { root, pid: null, fresh: true });
+          await reconcile();
+          log.info(`Cloned shared ${parsed.repositoryId.slice(0, 8)} to ${target}; it is now part of this mesh`);
+          await reply({ requestId, ok: true, target, deviceName: deviceHostName() });
+        } catch (error) {
+          log.debug?.(`Share clone failed: ${error.message}`);
+          await reply({ requestId: String(opened?.requestId ?? ''), ok: false, message: String(error.message).slice(0, 200) }).catch(() => {});
+        }
+      },
       // Terminal frames sealed over the pairing mesh route to the session
       // that owns their repository.
       onTerminalRelay: (opened, io) => {

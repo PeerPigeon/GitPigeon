@@ -281,6 +281,10 @@ export async function startDeviceApprovalResponder({
   // Sealed terminal relay: frames for this machine arrive here when the
   // index room cannot carry them — the pairing mesh never depended on it.
   onTerminalRelay = null,
+  // Sealed share-clone requests: a browser holding a share link asks this
+  // machine to mirror the repository, making it a first-class citizen of
+  // this machine's mesh. The link itself is the capability.
+  onShareClone = null,
 } = {}) {
   const node = await createNode(nodeFactory, keyPair);
   const statusLines = new Map();
@@ -317,6 +321,19 @@ export async function startDeviceApprovalResponder({
             if (!opened.replyEpub) return;
             const cipher = await sealTo(opened.replyEpub, payload);
             node.broadcast({ protocol: 'gitpigeon-terminal-relay/1', kind: 'sealed', cipher });
+          },
+        }))
+        .catch(() => { /* sealed to someone else */ });
+      return;
+    }
+    if (value?.protocol === 'gitpigeon-share-clone/1' && value.kind === 'sealed' && value.cipher) {
+      if (!onShareClone) return;
+      openSealed(value.cipher, node)
+        .then((opened) => opened && onShareClone(opened, {
+          reply: async (payload) => {
+            if (!opened.replyEpub) return;
+            const cipher = await sealTo(opened.replyEpub, payload);
+            node.broadcast({ protocol: 'gitpigeon-share-clone/1', kind: 'sealed', cipher });
           },
         }))
         .catch(() => { /* sealed to someone else */ });
