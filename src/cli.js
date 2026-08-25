@@ -52,7 +52,8 @@ import { RepositorySynchronizer } from './protocol.js';
 import { TerminalServer } from './terminal-server.js';
 import { createTerminalHistory, terminalHistoryKey } from './terminal-history.js';
 import { RealtimeWorkspaceServer } from './realtime-server.js';
-import { WorkspaceFiles } from './workspace.js';
+import { WorkspaceFiles, workspaceDigest } from './workspace.js';
+import { liveWorkspaceDigest } from './live-workspace.js';
 import { clearInstalledUpdate, startAutomaticUpdates } from './auto-update.js';
 import { pullPeerUpdateOnce, startPeerUpdates } from './peer-update.js';
 import { GITPIGEON_VERSION, IS_STANDALONE } from './version.js';
@@ -190,14 +191,17 @@ class CommittedOnlyWorkspace {
   async init() {}
   async list() { return []; }
   normalize(value) { return String(value); }
-  async snapshot() { return { files: [], digest: 'committed-only' }; }
+  // The digest must be the real digest of the empty file set: receivers —
+  // the browser's validateManifest and this synchronizer's own manifest
+  // acceptance — recompute it from the (empty) list and reject a mismatch.
+  async snapshot() { return { files: [], digest: workspaceDigest([]) }; }
   async apply() { return { written: [], removed: [] }; }
 }
 
 class CommittedOnlyLiveWorkspace {
   async init() {}
   normalize(value) { return String(value); }
-  async snapshot() { return { files: [], digest: 'committed-only' }; }
+  async snapshot() { return { files: [], digest: liveWorkspaceDigest([]) }; }
   async trashSnapshot() { return []; }
   async mirrorTrash() { return []; }
   async prepare() { return { written: [], removed: [] }; }
