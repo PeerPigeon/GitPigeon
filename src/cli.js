@@ -204,12 +204,18 @@ async function startIndexedWatchService(options = {}) {
 }
 
 function repositorySessionSignature(config) {
+  // Registration entries and loaded configs are both fed through here, and
+  // reconcile compares the two — so ONLY fields present in both belong in
+  // the signature. Including config.share (absent from registrations) made
+  // every comparison a mismatch and reconcile closed and reopened the
+  // session forever: the browser sat on CONNECTING while the watcher
+  // churned. Share changes reload through the explicit service restart in
+  // \`git pigeon share\` instead.
   return JSON.stringify({
     repositoryId: config.repositoryId,
     secret: config.secret,
     deviceId: config.deviceId,
     signalingServer: config.signalingServer ?? null,
-    share: config.share ? { key: config.share.key, role: config.share.role } : null,
   });
 }
 
