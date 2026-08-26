@@ -367,6 +367,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       );
       shareSync = shareNet.synchronizer;
       await shareSync.start();
+      shareMirror?.seedCurrent?.().catch((error) => log.debug?.(`Mirror seed: ${error.message}`));
       log.info(`Share room live for ${config.repositoryId.slice(0, 8)} (${config.share.role})`);
     })().catch((error) => log.error(new Error(`Share room for ${config.repositoryId.slice(0, 8)}: ${error.message}`)));
   }
