@@ -22,7 +22,13 @@ const execFileAsync = promisify(execFile);
  */
 export const PEER_UPDATE_PROTOCOL = 'gitpigeon-peer-update/1';
 const OFFER_INTERVAL_MS = 60_000;
-const CHUNK_BYTES = 192 * 1024;
+// Measured on the real mesh: encrypted direct messages deliver up to 32 KiB,
+// silently vanish from 48 KiB, and overflow the crypto layer's stack from
+// 128 KiB. 192 KiB slices meant every serve attempt died and every fetch
+// stalled out at 45s. 16 KiB matches DEFAULT_CHUNK_SIZE and its documented
+// headroom for PeerPigeon's encryption and gossip envelopes. The server
+// picks the slice size, so older pullers are fixed by this end alone.
+const CHUNK_BYTES = 16 * 1024;
 const MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024;
 const FETCH_STALL_MS = 45_000;
 const FETCH_RETRY_MS = 2_500;
