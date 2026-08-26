@@ -128,6 +128,58 @@ export class ControlServer {
         ...(config.share ? { shareKey: config.share.key, ownerPublicKey: config.share.ownerPublicKey } : {}),
       };
     }
+    if (frame.kind === 'set-share-mirror') {
+      // Configure (or remove) the always-on S3-compatible mirror from the
+      // browser. Credentials arrive over the paired index room's encrypted
+      // channel and land only in the repository's 0600 config — the index
+      // record and the share link carry the PUBLIC base URL alone.
+      const repositoryId = String(frame.targetRepositoryId ?? '');
+      if (!REPOSITORY_ID.test(repositoryId)) throw new Error('Invalid repository ID');
+      const entries = await listMachinePigeons({ root: this.root, activeOnly: false });
+      const entry = entries.find((candidate) => candidate.repositoryId === repositoryId);
+      if (!entry) throw new Error('That repository is not registered on this machine');
+      const { GitRepository } = await import('./git.js');
+      const { loadConfig, saveConfig } = await import('./config.js');
+      const repository = await GitRepository.discover(entry.repository);
+      const config = await loadConfig(repository.gitDir);
+      if (!config.share) throw new Error('Unlock (share) the repository before configuring its mirror');
+      let mirror = null;
+      if (frame.mirror) {
+        const { validateMirrorUrl } = await import('./share.js');
+        const endpointUrl = new URL(validateMirrorUrl(String(frame.mirror.url ?? '')));
+        const [bucket, ...prefixParts] = endpointUrl.pathname.replace(/^\/+/, '').split('/').filter(Boolean);
+        if (!bucket) throw new Error('The mirror URL must include the bucket: https://<endpoint>/<bucket>[/<prefix>]');
+        const accessKeyId = String(frame.mirror.accessKeyId ?? '').slice(0, 256);
+        const secretAccessKey = String(frame.mirror.secretAccessKey ?? '').slice(0, 256);
+        if (!accessKeyId || !secretAccessKey) throw new Error('The mirror needs an access key id and secret');
+        mirror = {
+          endpoint: endpointUrl.origin,
+          bucket,
+          prefix: prefixParts.join('/'),
+          region: String(frame.mirror.region ?? '').slice(0, 64) || 'auto',
+          accessKeyId,
+          secretAccessKey,
+          publicBaseUrl: frame.mirror.publicUrl
+            ? validateMirrorUrl(String(frame.mirror.publicUrl))
+            : validateMirrorUrl(String(frame.mirror.url)),
+        };
+      }
+      const share = { ...config.share };
+      if (mirror) share.mirror = mirror;
+      else delete share.mirror;
+      const updated = await saveConfig(repository.gitDir, { ...config, share });
+      await registerMachinePigeon(repository, updated, { root: this.root });
+      this.logger.info?.(mirror
+        ? `Mirror for ${path.basename(entry.repository)} set to ${mirror.publicBaseUrl}`
+        : `Mirror removed from ${path.basename(entry.repository)}`);
+      // Same contract as the share toggle: answer now, reload behind.
+      setTimeout(() => {
+        Promise.resolve(this.onShareToggled(entry.repository))
+          .then(() => this.onChanged())
+          .catch((error) => this.logger.debug?.(`Mirror reload: ${error.message}`));
+      }, 0).unref?.();
+      return { mirror: mirror ? mirror.publicBaseUrl : null };
+    }
     throw new Error(`Unsupported control command: ${String(frame.kind ?? 'none')}`);
   }
 

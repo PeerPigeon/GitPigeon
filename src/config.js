@@ -39,6 +39,27 @@ export function validateConfig(input) {
     if (share.ownerPublicKey.length < 16 || share.ownerPublicKey.length > 512) {
       throw new Error('Invalid share owner public key');
     }
+    // The always-on mirror rides inside the share (rotating or locking the
+    // share retires its mirror with it). This normalizer rebuilds share from
+    // scratch, so every field it does not carry forward dies on the next
+    // load — the mirror silently evaporated on restart until it was listed.
+    if (input.share.mirror && typeof input.share.mirror === 'object') {
+      const mirror = input.share.mirror;
+      const endpoint = String(mirror.endpoint ?? '');
+      const bucket = String(mirror.bucket ?? '');
+      const publicBaseUrl = String(mirror.publicBaseUrl ?? '');
+      if (/^https?:\/\//.test(endpoint) && bucket && /^https?:\/\//.test(publicBaseUrl)) {
+        share.mirror = {
+          endpoint,
+          bucket,
+          prefix: String(mirror.prefix ?? ''),
+          region: String(mirror.region ?? 'auto'),
+          accessKeyId: String(mirror.accessKeyId ?? ''),
+          secretAccessKey: String(mirror.secretAccessKey ?? ''),
+          publicBaseUrl,
+        };
+      }
+    }
   }
   return {
     version: CONFIG_VERSION,

@@ -20,7 +20,7 @@ import {
 } from './daemon.js';
 import { GitRepository } from './git.js';
 import { createInvite, parseInvite } from './invite.js';
-import { createShareKey, createShareUrl, parseShareUrl } from './share.js';
+import { createShareKey, createShareUrl, parseShareUrl, validateMirrorUrl } from './share.js';
 import { connectShareGuest, fetchProposal, listProposals, submitProposal } from './share-service.js';
 import { createDashboardEnrollment, serveDashboardEnrollment } from './dashboard-pairing.js';
 import { isPairLink, parsePairLink } from './pair-link.js';
@@ -310,6 +310,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   // live workspace, no trash. One code path; shared is a gate, not a fork.
   let shareSync = null;
   let shareNode = null;
+  let shareMirror = null;
   if (config.share) {
     (async () => {
       // The share cache is encrypted under the share key, so a rotated key
@@ -335,6 +336,24 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
         signalingServer: config.signalingServer,
         userId: `share-${config.share.role}-${config.deviceId.slice(0, 12)}`,
       });
+      // The always-on mirror follows the share node's storage: every record
+      // this owner publishes to the share room is room-encrypted by the
+      // node's own crypto and uploaded to the configured bucket. Started
+      // BEFORE the synchronizer so the initial publish is captured too.
+      if (config.share.mirror) {
+        try {
+          const { S3MirrorClient, startShareMirror } = await import('./mirror.js');
+          shareMirror = startShareMirror({
+            node: shareNode,
+            repositoryId: config.repositoryId,
+            client: new S3MirrorClient(config.share.mirror),
+            logger: log,
+          });
+          log.info(`Share mirror live for ${config.repositoryId.slice(0, 8)} at ${config.share.mirror.publicBaseUrl}`);
+        } catch (error) {
+          log.error(new Error(`Share mirror for ${config.repositoryId.slice(0, 8)}: ${error.message}`));
+        }
+      }
       const shareNet = openNetwork(
         repository,
         { ...config, secret: config.share.key },
@@ -463,6 +482,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       terminalServer.stop();
       realtimeServer.stop();
       await sessionPeerUpdates.stop().catch(() => {});
+      shareMirror?.stop();
       await shareSync?.stop()?.catch?.(() => {});
       await shareNode?.destroy()?.catch?.(() => {});
       while (starting || publishing) await sleep(10);
@@ -1436,6 +1456,8 @@ async function commandPair(args, verbose) {
 }
 
 async function commandShare(args, cwd, verbose) {
+  const mirrorOption = takeOption(args, '--mirror');
+  const mirrorPublic = takeOption(args, '--mirror-public');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const { repository, config } = await configuredRepository(cwd);
   if (config.share?.role === 'mirror') {
@@ -1447,6 +1469,37 @@ async function commandShare(args, cwd, verbose) {
   const created = !share;
   if (!share) {
     share = { key: createShareKey(), ownerPublicKey: keyPair.pub, role: 'owner' };
+  }
+  let mirrorChanged = false;
+  if (mirrorOption === 'off') {
+    mirrorChanged = Boolean(share.mirror);
+    delete share.mirror;
+  } else if (mirrorOption) {
+    // --mirror https://<endpoint>/<bucket>[/<prefix>] — credentials come
+    // from the standard AWS environment, never from the command line where
+    // they would land in shell history.
+    const url = new URL(validateMirrorUrl(mirrorOption));
+    const [bucket, ...prefixParts] = url.pathname.replace(/^\/+/, '').split('/').filter(Boolean);
+    if (!bucket) throw new Error('The mirror URL must include the bucket: https://<endpoint>/<bucket>[/<prefix>]');
+    const accessKeyId = process.env.AWS_ACCESS_KEY_ID ?? '';
+    const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY ?? '';
+    if (!accessKeyId || !secretAccessKey) {
+      throw new Error('Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in the environment for the mirror bucket');
+    }
+    share.mirror = {
+      endpoint: url.origin,
+      bucket,
+      prefix: prefixParts.join('/'),
+      region: process.env.AWS_REGION ?? 'auto',
+      accessKeyId,
+      secretAccessKey,
+      publicBaseUrl: mirrorPublic
+        ? validateMirrorUrl(mirrorPublic)
+        : validateMirrorUrl(mirrorOption),
+    };
+    mirrorChanged = true;
+  }
+  if (created || mirrorChanged) {
     await saveConfig(repository.gitDir, { ...config, share });
   }
   const parameters = {
@@ -1454,6 +1507,7 @@ async function commandShare(args, cwd, verbose) {
     shareKey: share.key,
     ownerPublicKey: share.ownerPublicKey,
     signalingServer: config.signalingServer,
+    mirror: share.mirror?.publicBaseUrl,
   };
   console.log(created
     ? 'This repository is now shared. Anyone with this link can read and mirror it;'
@@ -1461,8 +1515,9 @@ async function commandShare(args, cwd, verbose) {
   console.log('only your approved devices can change it.\n');
   console.log(createShareUrl(parameters));
   console.log(`\nLocal dev variant:\n${createShareUrl({ ...parameters, origin: 'https://localhost:3000' })}`);
-  if (created) {
-    // The running session predates the share; reopen it with the share room.
+  if (share.mirror) console.log(`\nAlways-on mirror: ${share.mirror.publicBaseUrl} (bucket ${share.mirror.bucket})`);
+  if (created || mirrorChanged) {
+    // The running session predates the share (or its mirror); reopen it.
     const restarted = await stopWatchService(root);
     if (restarted) await startWatchService({ root, verbose });
   }

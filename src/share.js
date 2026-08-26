@@ -74,12 +74,16 @@ function validPublicKey(value) {
  * owner's public key in the FRAGMENT, which browsers never send to any
  * server — the page host cannot read the repository, only the link holder.
  */
-export function createShareUrl({ repositoryId, shareKey, ownerPublicKey, signalingServer, origin = 'https://gitpigeon.dev' }) {
+export function createShareUrl({ repositoryId, shareKey, ownerPublicKey, signalingServer, mirror, origin = 'https://gitpigeon.dev' }) {
   const id = validateRepositoryId(repositoryId);
   const fragment = new URLSearchParams();
   fragment.set('s', validateSecret(shareKey));
   fragment.set('o', validPublicKey(ownerPublicKey));
   if (signalingServer) fragment.set('signal', String(signalingServer));
+  // The always-on mirror rides the link: readers that find no mesh peer
+  // fetch room-ciphertext records from this base URL and decrypt them with
+  // the share key they already hold.
+  if (mirror) fragment.set('m', validateMirrorUrl(mirror));
   const url = new URL(`${origin.replace(/\/$/, '')}/r/${encodeURIComponent(id)}`);
   url.hash = fragment.toString();
   return url.toString();
@@ -109,7 +113,23 @@ export function parseShareUrl(value) {
   if (signalingServer && !/^wss?:\/\//i.test(signalingServer)) {
     throw new Error('Share signaling server must use ws:// or wss://');
   }
-  return { repositoryId, shareKey, ownerPublicKey, signalingServer };
+  const mirror = fragment.get('m') ? validateMirrorUrl(fragment.get('m')) : undefined;
+  return { repositoryId, shareKey, ownerPublicKey, signalingServer, mirror };
+}
+
+export function validateMirrorUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value));
+  } catch {
+    throw new Error('Mirror URL must be a valid URL');
+  }
+  const local = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) {
+    throw new Error('Mirror URL must use https');
+  }
+  if (url.search || url.hash) throw new Error('Mirror URL must not carry a query or fragment');
+  return url.toString().replace(/\/$/, '');
 }
 
 function sortedDeep(value) {

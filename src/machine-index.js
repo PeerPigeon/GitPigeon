@@ -109,6 +109,12 @@ function validEntry(value) {
     const ownerPublicKey = String(value.share.ownerPublicKey ?? '');
     if (SECRET.test(key) && ownerPublicKey.length >= 16 && ownerPublicKey.length <= 512) {
       share = { key, ownerPublicKey };
+      // Only the PUBLIC base URL of the always-on mirror travels in the
+      // index record — bucket credentials never leave the repository config.
+      const mirror = String(value.share.mirror ?? '');
+      if (/^https:\/\//.test(mirror) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//.test(mirror)) {
+        share.mirror = mirror.slice(0, 2_048);
+      }
     }
   }
   return {
@@ -262,7 +268,11 @@ export async function registerMachinePigeon(repository, config, {
       pid,
       registeredAt: fresh || !previous?.registeredAt ? new Date().toISOString() : previous.registeredAt,
       signalingServer: config.signalingServer,
-      ...(config.share?.role === 'owner' ? { share: { key: config.share.key, ownerPublicKey: config.share.ownerPublicKey } } : {}),
+      ...(config.share?.role === 'owner' ? { share: {
+        key: config.share.key,
+        ownerPublicKey: config.share.ownerPublicKey,
+        ...(config.share.mirror?.publicBaseUrl ? { mirror: config.share.mirror.publicBaseUrl } : {}),
+      } } : {}),
     });
     if (!entry) throw new Error('Could not register this repository with the encrypted GitPigeon index');
     if (!fresh) {
