@@ -8,6 +8,7 @@ import {
   isGitPigeonWatcherCommand,
   listGitPigeonWatcherPids,
   preferredServiceEntrypoint,
+  spawnDetachedServiceRestart,
   startWatchService,
   stopWatchService,
   watcherPidsFromProcessRows,
@@ -15,6 +16,28 @@ import {
   watchServiceHasRepository,
   watchServiceStatus,
 } from '../src/daemon.js';
+
+test('a service restart is delegated to a detached helper, never orchestrated in-process', () => {
+  const calls = [];
+  const pid = spawnDetachedServiceRestart('/tmp/gitpigeon-test-root', {
+    spawnProcess: (executable, args, options) => {
+      calls.push({ executable, args, options });
+      return { pid: 4242, unref: () => { calls.push({ unref: true }); } };
+    },
+  });
+  assert.equal(pid, 4242);
+  assert.equal(calls.length, 2);
+  const [{ executable, args, options }] = calls;
+  // The helper runs THIS build's CLI restart in a fresh process: detached
+  // from the caller, silent, and pointed at the caller's state root so the
+  // dying service's fate cannot strand the machine without a watcher.
+  assert.equal(executable, process.execPath);
+  assert.equal(args.at(-1), 'restart');
+  assert.equal(options.detached, true);
+  assert.equal(options.stdio, 'ignore');
+  assert.equal(options.env.GITPIGEON_STATE_DIR, '/tmp/gitpigeon-test-root');
+  assert.deepEqual(calls[1], { unref: true });
+});
 
 test('packaged services prefer the verified automatic-update executable', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-service-update-test-'));

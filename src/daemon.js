@@ -274,6 +274,33 @@ export async function startWatchService({
   });
 }
 
+/**
+ * Replace the running service from OUTSIDE it. A service that orchestrates
+ * its own stop+start (the index-adopt path did) races its own teardown: the
+ * process can exit or crash on a mid-teardown error after stopping itself and
+ * before its successor is secured, leaving the machine with no watcher at
+ * all. A detached `restart` helper survives the caller unconditionally —
+ * whatever the dying service does, the helper's start pass terminates
+ * leftovers and spawns a fresh service.
+ */
+export function spawnDetachedServiceRestart(root, { spawnProcess = spawn } = {}) {
+  if (!root) throw new Error('GitPigeon service state root is required');
+  const child = spawnProcess(
+    STANDALONE ? ENTRYPOINT : process.execPath,
+    [...(STANDALONE ? [] : [ENTRYPOINT]), 'restart'],
+    {
+      cwd: root,
+      detached: true,
+      windowsHide: true,
+      shell: false,
+      stdio: 'ignore',
+      env: { ...process.env, GITPIGEON_STATE_DIR: root },
+    },
+  );
+  child.unref?.();
+  return child.pid ?? null;
+}
+
 export async function stopWatchService(root) {
   const service = servicePaths(root);
   const state = await readWatchServiceState(root);

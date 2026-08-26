@@ -11,6 +11,7 @@ import { createIdentity, loadConfig, saveConfig } from './config.js';
 import {
   createWatchServiceControl,
   listGitPigeonWatcherPids,
+  spawnDetachedServiceRestart,
   startWatchService,
   stopWatchService,
   waitForWatchServiceRepository,
@@ -295,8 +296,9 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     standalone: IS_STANDALONE,
     logger: log,
     onUpdate: async () => {
-      await stopWatchService(machineIndexRoot());
-      await startWatchService({ root: machineIndexRoot() });
+      // Same hazard as the index-adopt restart: never orchestrate our own
+      // replacement from inside the process being replaced.
+      spawnDetachedServiceRestart(machineIndexRoot());
     },
   });
   ownership.owns = (file) => realtimeServer.ownsPath(file);
@@ -479,18 +481,26 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
 async function startPairingService(root, log, { indexDiagnostics = null, onTerminalRelay = null, onShareClone = null } = {}) {
   const keyPair = await loadPairingKeyPair(root);
   const adopt = async (capability) => {
-    if (!capability?.index?.indexId) return;
-    const current = await loadMachineIndex({ root });
-    // Same index AND same secret is the only nothing-to-do case. Comparing
-    // the id alone made a machine left behind by a secret rotation drop the
-    // very capability that would have re-admitted it: the id survives
-    // rotation, so it said "already there" while staying locked out.
-    if (current.indexId === capability.index.indexId
-      && current.secret === capability.index.secret) return;
-    await adoptMachineIndexCapability(capability.index, { root });
-    log.info?.(`Joined GitPigeon index ${String(capability.index.indexId).slice(0, 10)}; restarting`);
-    await stopWatchService(root);
-    await startWatchService({ root });
+    try {
+      if (!capability?.index?.indexId) return;
+      const current = await loadMachineIndex({ root });
+      // Same index AND same secret is the only nothing-to-do case. Comparing
+      // the id alone made a machine left behind by a secret rotation drop the
+      // very capability that would have re-admitted it: the id survives
+      // rotation, so it said "already there" while staying locked out.
+      if (current.indexId === capability.index.indexId
+        && current.secret === capability.index.secret) return;
+      await adoptMachineIndexCapability(capability.index, { root });
+      log.info?.(`Joined GitPigeon index ${String(capability.index.indexId).slice(0, 10)}; restarting`);
+      // The restart is NOT this process's job. Stopping ourselves and then
+      // spawning our successor from inside the dying process raced our own
+      // teardown — a storage error in that window aborted the chain after the
+      // stop and before the start, leaving the machine with no watcher at
+      // all. The detached helper survives whatever this process does next.
+      spawnDetachedServiceRestart(root);
+    } catch (error) {
+      log.error?.(new Error(`Could not adopt the offered index: ${error.message}`));
+    }
   };
   const responder = await startDeviceApprovalResponder({
     logger: log,
