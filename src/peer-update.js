@@ -55,6 +55,12 @@ async function digestFile(filename) {
 
 // One fetch machine-wide, however many rooms carry offers.
 let activeFetchGlobal = false;
+// One responder per node, however many sessions share it. The machine index
+// service and every repository session ride the SAME node; attaching a
+// responder per caller meant every fetch request was answered once per
+// responder — the puller received each offset in duplicate, its offset
+// advanced twice per write, and the assembled executable failed its digest.
+const respondingNodes = new WeakSet();
 
 export function startPeerUpdates({
   node,
@@ -67,6 +73,10 @@ export function startPeerUpdates({
   platform = process.platform,
   arch = process.arch,
 } = {}) {
+  if (node && respondingNodes.has(node)) {
+    return { stop: async () => {} };
+  }
+  if (node) respondingNodes.add(node);
   let closed = false;
   let offering = null;
   let fetching = null;
@@ -240,25 +250,34 @@ export function startPeerUpdates({
     if (value.kind === 'chunk') {
       if (!fetching || !message.encrypted || peerId !== fetching.peerId) return;
       if (value.version !== fetching.version || Number(value.offset) !== fetching.offset) return;
+      // Claim this offset before the first await: a duplicate chunk for the
+      // same offset arriving while the write is in flight passed the check
+      // above too, and both handlers advancing the offset skipped a slice —
+      // the assembled executable then failed its digest. The synchronous
+      // claim makes the duplicate fail the offset check instead.
+      const job = fetching;
+      const data = Buffer.from(String(value.payload ?? ''), 'base64');
+      const offset = job.offset;
+      if (offset + data.length > job.size) {
+        abandonFetch('peer sent more than it offered').catch(() => {});
+        return;
+      }
+      job.offset += data.length;
+      job.lastChunkAt = Date.now();
       (async () => {
-        fetching.lastChunkAt = Date.now();
-        const data = Buffer.from(String(value.payload ?? ''), 'base64');
-        if (fetching.offset + data.length > fetching.size) {
-          await abandonFetch('peer sent more than it offered');
-          return;
-        }
         if (data.length > 0) {
-          await fetching.handle.write(data, 0, data.length, fetching.offset);
-          fetching.offset += data.length;
+          await job.handle.write(data, 0, data.length, offset);
         }
-        if (fetching.offset >= fetching.size || data.length === 0) {
+        // The fetch may have been abandoned while the write was in flight.
+        if (fetching !== job) return;
+        if (job.offset >= job.size || data.length === 0) {
           await finishFetch();
           return;
         }
         await requestChunk();
       })().catch(async (error) => {
         logger.info?.(`Peer update failed: ${error.message}`);
-        await abandonFetch(error.message).catch(() => {});
+        if (fetching === job) await abandonFetch(error.message).catch(() => {});
       });
     }
   };
@@ -284,6 +303,7 @@ export function startPeerUpdates({
     async stop() {
       if (closed) return;
       closed = true;
+      if (node) respondingNodes.delete(node);
       clearInterval(timer);
       node.off('message', receive);
       node.off('peerConnected', onPeer);

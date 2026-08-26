@@ -166,3 +166,44 @@ test('a dropped chunk is re-requested instead of wedging the fetch', async (t) =
   assert.ok(installed, 'the fetch recovered from the dropped request');
   assert.equal(installed.version, '9.9.9');
 });
+
+test('one node gets one responder, however many sessions share it', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-peer-shared-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const executable = path.join(root, 'git-pigeon');
+  await writeFile(executable, `#!/bin/sh\nexit 0\n${randomBytes(64 * 1024).toString('hex')}\n`, { mode: 0o755 });
+
+  // The machine index service and every repository session ride the SAME
+  // node. A responder per caller answered every fetch once per responder,
+  // and the duplicated chunks corrupted the puller's assembly.
+  const node = new FakeNode();
+  const first = startPeerUpdates({ node, root, currentVersion: '9.9.9', executable, standalone: true });
+  const second = startPeerUpdates({ node, root, currentVersion: '9.9.9', executable, standalone: true });
+  t.after(() => Promise.all([first.stop(), second.stop()]));
+  await settle();
+
+  node.direct.length = 0;
+  node.emit('message', {
+    local: false,
+    encrypted: true,
+    fromPeerId: 'peer-1',
+    data: JSON.stringify({ protocol: PEER_UPDATE_PROTOCOL, kind: 'fetch', version: '9.9.9', offset: 0 }),
+  });
+  await settle();
+  assert.equal(node.direct.filter(({ value }) => value.kind === 'chunk').length, 1);
+
+  // Stopping the responder releases the node for a fresh one.
+  await first.stop();
+  const third = startPeerUpdates({ node, root, currentVersion: '9.9.9', executable, standalone: true });
+  t.after(() => third.stop());
+  await settle();
+  node.direct.length = 0;
+  node.emit('message', {
+    local: false,
+    encrypted: true,
+    fromPeerId: 'peer-1',
+    data: JSON.stringify({ protocol: PEER_UPDATE_PROTOCOL, kind: 'fetch', version: '9.9.9', offset: 0 }),
+  });
+  await settle();
+  assert.equal(node.direct.filter(({ value }) => value.kind === 'chunk').length, 1);
+});
