@@ -103,6 +103,8 @@ Background service
 Checking on things
   git pigeon status [--json]            Show this repository's sync state
   git pigeon doctor                     Check this machine's setup
+  git pigeon version                    Print the installed version
+                                        (also --version, -V)
 
 Durations accept ms, s, or m (for example: 500ms, 10s, 2m).
 Because the executable is named git-pigeon, both \`git pigeon\` and
@@ -2069,6 +2071,10 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   const command = args.shift();
   if (!command || command === 'help' || command === '--help' || command === '-h') {
     console.log(HELP);
+    return;
+  }
+  if (command === 'version' || command === '--version' || command === '-V') {
+    console.log(GITPIGEON_VERSION);
     return;
   }
   if (command === 'init') return await commandInit(args, cwd, verbose);

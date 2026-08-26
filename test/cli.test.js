@@ -201,3 +201,20 @@ test('a service from an older build is not treated as already running', async ()
   assert.match(source, /const stale = current\.running && current\.buildVersion !== GITPIGEON_VERSION/);
   assert.match(source, /if \(current\.running && current\.compatible && !stale\) return/);
 });
+
+test('the version command prints the running build and nothing else', async () => {
+  const { main } = await import('../src/cli.js');
+  const { GITPIGEON_VERSION } = await import('../src/version.js');
+  const lines = [];
+  const original = console.log;
+  console.log = (value) => lines.push(String(value));
+  try {
+    for (const spelling of ['version', '--version', '-V']) {
+      lines.length = 0;
+      await main([spelling]);
+      assert.deepEqual(lines, [GITPIGEON_VERSION]);
+    }
+  } finally {
+    console.log = original;
+  }
+});
