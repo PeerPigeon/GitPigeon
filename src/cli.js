@@ -1,6 +1,6 @@
 import { watch as watchFilesystem } from "node:fs";
-import { randomBytes } from 'node:crypto';
-import { mkdir, readdir } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdir, readdir, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -308,6 +308,23 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   let shareNode = null;
   if (config.share) {
     (async () => {
+      // The share cache is encrypted under the share key, so a rotated key
+      // makes every cached record unreadable: a restart then re-seeds
+      // nothing, publishes a presence with no snapshot, and every visitor
+      // waits forever on a live watcher with nothing to serve. Keying the
+      // cache directory by the share key gives each rotation a fresh cache;
+      // dead generations (including the legacy unkeyed dir) are swept.
+      const shareCacheRoot = path.join(repository.gitDir, 'gitpigeon');
+      const generation = createHash('sha256')
+        .update(`gitpigeon-share-cache/1\0${config.share.key}`)
+        .digest('hex')
+        .slice(0, 16);
+      const shareCacheName = `share-cache-${generation}`;
+      for (const entry of await readdir(shareCacheRoot, { withFileTypes: true }).catch(() => [])) {
+        if (entry.isDirectory() && entry.name.startsWith('share-cache') && entry.name !== shareCacheName) {
+          await rm(path.join(shareCacheRoot, entry.name), { recursive: true, force: true }).catch(() => {});
+        }
+      }
       shareNode = await connectShareGuest({
         repositoryId: config.repositoryId,
         share: { key: config.share.key },
@@ -323,7 +340,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
         shareNode,
         ownership,
         deviceClaim,
-        { committedOnly: true, cacheDir: path.join(repository.gitDir, 'gitpigeon', 'share-cache') },
+        { committedOnly: true, cacheDir: path.join(shareCacheRoot, shareCacheName) },
       );
       shareSync = shareNet.synchronizer;
       await shareSync.start();
