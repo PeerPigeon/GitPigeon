@@ -80,12 +80,12 @@ export class ControlServer {
       return { indexId: rotated.indexId };
     }
     if (frame.kind === 'set-repository-sharing') {
-      // Unlock: mint a share (key + this machine's key as trust anchor) so
-      // the repository gets a public read-tier link. Lock: stop publishing.
-      // A key already given out cannot be untold — existing link holders
-      // keep what they replicated — but a locked repository publishes no
-      // new heads, and a later unlock mints a FRESH key, so old links go
-      // stale rather than following the repository forever.
+      // One repository, one link, ALWAYS. Unlock resumes the repository's
+      // permanent share identity — key, owner anchor, and mirror keypair —
+      // minting one only the first time. Lock stops publishing but stows
+      // the identity dormant instead of deleting it, so the link every
+      // reader already holds comes back to life on the next unlock. Lock
+      // is a pause, not a revocation.
       const repositoryId = String(frame.targetRepositoryId ?? '');
       const shared = Boolean(frame.shared);
       if (!REPOSITORY_ID.test(repositoryId)) throw new Error('Invalid repository ID');
@@ -100,29 +100,31 @@ export class ControlServer {
         throw new Error("This is a mirror of someone else's shared repository");
       }
       if (shared && !config.share) {
-        const { createShareKey } = await import('./share.js');
-        const { loadPairingKeyPair } = await import('./pairing-identity.js');
-        const keyPair = await loadPairingKeyPair(this.root);
-        const share = { key: createShareKey(), ownerPublicKey: keyPair.pub, role: 'owner' };
-        // The mirror preference is sticky across lock/unlock: the retired
-        // share took its mirror (and, for Nostr, its keypair) with it, and
-        // the fresh share comes up mirrored the same way unprompted.
-        if (config.mirrorDefaults) {
+        const { shareDormant, ...rest } = config;
+        let share = shareDormant ?? null;
+        if (!share) {
+          const { createShareKey } = await import('./share.js');
+          const { loadPairingKeyPair } = await import('./pairing-identity.js');
+          const keyPair = await loadPairingKeyPair(this.root);
+          share = { key: createShareKey(), ownerPublicKey: keyPair.pub, role: 'owner' };
+        }
+        // The mirror preference is sticky: a share that never had a mirror
+        // comes up mirrored the way this repository always mirrors.
+        if (!share.mirror && rest.mirrorDefaults) {
           try {
             const { buildMirrorFromDefaults } = await import('./mirror.js');
-            const rebuilt = await buildMirrorFromDefaults(config.mirrorDefaults);
+            const rebuilt = await buildMirrorFromDefaults(rest.mirrorDefaults);
             if (rebuilt) share.mirror = rebuilt;
           } catch (error) {
-            this.logger.warn?.(`Mirror preference could not be re-attached: ${error.message}`);
+            this.logger.warn?.(`Mirror preference could not be attached: ${error.message}`);
           }
         }
-        config = await saveConfig(repository.gitDir, { ...config, share });
-        this.logger.info?.(`Shared ${path.basename(entry.repository)} publicly${share.mirror ? ' with its mirror re-attached' : ''}`);
+        config = await saveConfig(repository.gitDir, { ...rest, share });
+        this.logger.info?.(`Shared ${path.basename(entry.repository)} publicly${shareDormant ? ' at its usual link' : ''}${share.mirror ? ' with its mirror attached' : ''}`);
       } else if (!shared && config.share) {
         const { share, ...rest } = config;
-        void share;
-        config = await saveConfig(repository.gitDir, rest);
-        this.logger.info?.(`Locked ${path.basename(entry.repository)}; its share link is now stale`);
+        config = await saveConfig(repository.gitDir, { ...rest, shareDormant: share });
+        this.logger.info?.(`Locked ${path.basename(entry.repository)}; the same link resumes on the next unlock`);
       }
       await registerMachinePigeon(repository, config, { root: this.root });
       // Answer NOW. The session reload behind a toggle takes seconds (room

@@ -1615,6 +1615,10 @@ async function commandShare(args, cwd, verbose) {
   const root = machineIndexRoot();
   const keyPair = await loadPairingKeyPair(root);
   let share = config.share ?? null;
+  // One repository, one link, always: a dormant share (stowed by a lock)
+  // resumes with its original key, owner, and mirror identity.
+  const resumed = !share && Boolean(config.shareDormant);
+  if (resumed) share = config.shareDormant;
   const created = !share;
   if (!share) {
     share = { key: createShareKey(), ownerPublicKey: keyPair.pub, role: 'owner' };
@@ -1688,7 +1692,7 @@ async function commandShare(args, cwd, verbose) {
     };
     mirrorChanged = true;
   }
-  if (created && !share.mirror && !mirrorChanged && config.mirrorDefaults) {
+  if ((created || resumed) && !share.mirror && !mirrorChanged && config.mirrorDefaults) {
     // The mirror preference is sticky: a fresh share comes up mirrored the
     // way this repository always mirrors, without being asked again.
     try {
@@ -1714,8 +1718,9 @@ async function commandShare(args, cwd, verbose) {
   } else if (share.mirror?.type === 's3') {
     mirrorDefaults = { ...share.mirror };
   }
-  if (created || mirrorChanged) {
+  if (created || resumed || mirrorChanged) {
     const next = { ...config, share };
+    delete next.shareDormant;
     if (mirrorDefaults) next.mirrorDefaults = mirrorDefaults;
     else delete next.mirrorDefaults;
     await saveConfig(repository.gitDir, next);
@@ -1729,7 +1734,9 @@ async function commandShare(args, cwd, verbose) {
   };
   console.log(created
     ? 'This repository is now shared. Anyone with this link can read and mirror it;'
-    : 'This repository is already shared. Anyone with this link can read and mirror it;');
+    : resumed
+      ? 'This repository is shared again at its usual link. Anyone with it can read and mirror;'
+      : 'This repository is already shared. Anyone with this link can read and mirror it;');
   console.log('only your approved devices can change it.\n');
   console.log(createShareUrl(parameters));
   console.log(`\nLocal dev variant:\n${createShareUrl({ ...parameters, origin: 'https://localhost:3000' })}`);
@@ -1738,7 +1745,7 @@ async function commandShare(args, cwd, verbose) {
       ? `Nostr, ${share.mirror.relays.length} relay${share.mirror.relays.length === 1 ? '' : 's'} (${share.mirror.relays.join(', ')})`
       : `${share.mirror.publicBaseUrl} (${share.mirror.type === 'ipfs' ? `IPFS node ${share.mirror.apiUrl}` : `bucket ${share.mirror.bucket}`})`}`);
   }
-  if (created || mirrorChanged) {
+  if (created || resumed || mirrorChanged) {
     // The running session predates the share (or its mirror); reopen it.
     const restarted = await stopWatchService(root);
     if (restarted) await startWatchService({ root, verbose });

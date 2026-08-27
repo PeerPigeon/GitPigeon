@@ -26,25 +26,25 @@ export function validateConfig(input) {
   if (signalingServer && !/^wss?:\/\//i.test(signalingServer)) {
     throw new Error('Signaling server must use ws:// or wss://');
   }
-  let share;
-  if (input.share) {
-    const role = String(input.share.role ?? '');
+  const normalizeShare = (rawShare) => {
+    if (!rawShare) return undefined;
+    const role = String(rawShare.role ?? '');
     if (role !== 'owner' && role !== 'mirror') throw new Error('Share role must be owner or mirror');
-    share = {
-      key: validateSecret(input.share.key),
-      ownerPublicKey: String(input.share.ownerPublicKey ?? '').trim(),
+    const share = {
+      key: validateSecret(rawShare.key),
+      ownerPublicKey: String(rawShare.ownerPublicKey ?? '').trim(),
       role,
-      createdAt: String(input.share.createdAt ?? new Date().toISOString()),
+      createdAt: String(rawShare.createdAt ?? new Date().toISOString()),
     };
     if (share.ownerPublicKey.length < 16 || share.ownerPublicKey.length > 512) {
       throw new Error('Invalid share owner public key');
     }
-    // The always-on mirror rides inside the share (rotating or locking the
-    // share retires its mirror with it). This normalizer rebuilds share from
-    // scratch, so every field it does not carry forward dies on the next
-    // load — the mirror silently evaporated on restart until it was listed.
-    if (input.share.mirror && typeof input.share.mirror === 'object') {
-      const mirror = input.share.mirror;
+    // The always-on mirror rides inside the share. This normalizer rebuilds
+    // share from scratch, so every field it does not carry forward dies on
+    // the next load — the mirror silently evaporated on restart until it
+    // was listed.
+    if (rawShare.mirror && typeof rawShare.mirror === 'object') {
+      const mirror = rawShare.mirror;
       const publicBaseUrl = String(mirror.publicBaseUrl ?? '');
       const type = mirror.type === 'nostr' ? 'nostr' : mirror.type === 'ipfs' ? 'ipfs' : 's3';
       if (type === 'nostr') {
@@ -81,7 +81,13 @@ export function validateConfig(input) {
         }
       }
     }
-  }
+    return share;
+  };
+  const share = normalizeShare(input.share);
+  // One share identity per repository, forever: locking stows the share
+  // here instead of deleting it, so the next unlock resumes the SAME link
+  // — key, owner, and mirror identity included.
+  const shareDormant = normalizeShare(input.shareDormant);
   // The mirror PREFERENCE outlives any one share: locking retires the
   // share's mirror (its ciphertext belongs to the retired key), but the
   // next share should come up mirrored the same way without being asked.
@@ -125,6 +131,7 @@ export function validateConfig(input) {
     deviceId,
     ...(signalingServer ? { signalingServer } : {}),
     ...(share ? { share } : {}),
+    ...(shareDormant ? { shareDormant } : {}),
     ...(mirrorDefaults ? { mirrorDefaults } : {}),
     createdAt: String(input.createdAt ?? new Date().toISOString()),
   };

@@ -184,3 +184,68 @@ test('a paired browser commits the working tree through the watcher', async (t) 
   assert.equal(second.ok, false);
   assert.match(second.message, /Nothing to commit/);
 });
+
+test('lock then unlock resumes the same share identity — one link, always', async (t) => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const run = promisify(execFile);
+  const { loadConfig, saveConfig } = await import('../src/config.js');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'gitpigeon-control-share-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const repoDir = path.join(root, 'sharedrepo');
+  await run('git', ['init', '-q', repoDir]);
+  const gitDir = path.join(repoDir, '.git');
+  const config = await saveConfig(gitDir, {
+    version: 1,
+    repositoryId: 'repo-shared-0001',
+    secret: 's'.repeat(43),
+    deviceId: 'device-aaaaaaaa',
+    share: {
+      key: 'k'.repeat(43),
+      ownerPublicKey: 'owner-public-key-owner-public-key',
+      role: 'owner',
+      mirror: {
+        type: 'nostr',
+        secretKey: 'a'.repeat(64),
+        relays: ['wss://relay.example'],
+        publicBaseUrl: 'nostr:' + 'b'.repeat(64) + '?relays=wss%3A%2F%2Frelay.example',
+      },
+    },
+  });
+  await registerMachinePigeon({ root: repoDir, gitDir }, config, { root, pid: null });
+
+  const node = new FakeNode();
+  const server = new ControlServer({ node, indexId, root });
+  server.start();
+  t.after(() => server.stop());
+
+  node.receive('browser', indexId, CONTROL_CHANNEL, {
+    kind: 'set-repository-sharing',
+    requestId: 'lock1',
+    targetRepositoryId: 'repo-shared-0001',
+    shared: false,
+  }, 'direct');
+  for (let waited = 0; waited < 100 && !node.directFrames(CONTROL_CHANNEL).length; waited += 1) await settle();
+  const locked = await loadConfig(gitDir);
+  assert.equal(locked.share, undefined, 'a locked repository publishes nothing');
+  assert.equal(locked.shareDormant?.key, 'k'.repeat(43), 'the identity is stowed, not destroyed');
+  assert.equal(locked.shareDormant?.mirror?.secretKey, 'a'.repeat(64));
+
+  node.receive('browser', indexId, CONTROL_CHANNEL, {
+    kind: 'set-repository-sharing',
+    requestId: 'unlock1',
+    targetRepositoryId: 'repo-shared-0001',
+    shared: true,
+  }, 'direct');
+  for (let waited = 0; waited < 100 && node.directFrames(CONTROL_CHANNEL).length < 2; waited += 1) await settle();
+  const resumed = await loadConfig(gitDir);
+  assert.equal(resumed.share?.key, 'k'.repeat(43), 'unlock resumes the SAME share key');
+  assert.equal(resumed.share?.ownerPublicKey, 'owner-public-key-owner-public-key');
+  assert.equal(resumed.share?.mirror?.secretKey, 'a'.repeat(64), 'the mirror identity survives too');
+  assert.equal(resumed.shareDormant, undefined, 'the dormant slot empties on resume');
+  const [lockReply, unlockReply] = node.directFrames(CONTROL_CHANNEL);
+  assert.equal(lockReply.ok, true);
+  assert.equal(unlockReply.ok, true);
+  assert.equal(unlockReply.shareKey, 'k'.repeat(43), 'the browser is told the resumed key');
+});
