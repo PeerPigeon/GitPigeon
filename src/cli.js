@@ -315,12 +315,22 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     // edits keep flowing when clicks appear to hang.
     if (frame.kind === 'ping' && frame.requestId) {
       // The browser's round-trip probe, gossip-shaped like everything
-      // else. The pong travels every path; its arrival IS the proof.
-      const pong = { kind: 'pong', requestId: String(frame.requestId) };
-      Promise.allSettled([
-        sendChannelDirect(node, peerId, config.repositoryId, CONTROL_CHANNEL, pong),
-        broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, pong),
-      ]).catch(() => {});
+      // else. The pong travels every path; its arrival IS the proof — and
+      // it carries the current head pointer, because storage replication
+      // can stand off (vector ties across restarts) while the channel is
+      // demonstrably alive. Proof and truth in one small frame.
+      (async () => {
+        let head = null;
+        try {
+          const record = await node.storage?.get('public', `gitpigeon/v1/${config.repositoryId}/head/${config.deviceId}`);
+          head = record?.value ?? null;
+        } catch { /* the pong is proof enough without it */ }
+        const pong = { kind: 'pong', requestId: String(frame.requestId), ...(head ? { head } : {}) };
+        await Promise.allSettled([
+          sendChannelDirect(node, peerId, config.repositoryId, CONTROL_CHANNEL, pong),
+          broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, pong),
+        ]);
+      })().catch(() => {});
       return;
     }
     if (frame.kind !== 'commit-repository') return;
