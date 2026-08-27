@@ -560,6 +560,13 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       filesystemWatcher?.close();
       if (peerRefreshTimer) clearTimeout(peerRefreshTimer);
       node.off('peerConnected', onPeerConnected);
+      // A graceful shutdown says goodbye BEFORE tearing down, so every
+      // browser flips to reconnecting immediately instead of waiting for
+      // its proof-of-life window to decay.
+      await Promise.race([
+        broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, { kind: 'goodbye' }).catch(() => {}),
+        sleep(750),
+      ]);
       unsubscribeSessionCommit?.();
       terminalServer.stop();
       realtimeServer.stop();
