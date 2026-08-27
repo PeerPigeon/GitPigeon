@@ -119,6 +119,30 @@ class RelayConnection {
     });
   }
 
+  async query(filter, timeoutMs = OK_TIMEOUT_MS) {
+    const socket = await this.#open();
+    const subId = `inv${Math.floor(Math.random() * 1_000_000)}`;
+    return await new Promise((resolve) => {
+      const events = [];
+      const finish = () => {
+        socket.removeEventListener('message', onMessage);
+        clearTimeout(timer);
+        try { socket.send(JSON.stringify(['CLOSE', subId])); } catch { /* best effort */ }
+        resolve(events);
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      const onMessage = (message) => {
+        let frame;
+        try { frame = JSON.parse(String(message.data)); } catch { return; }
+        if (!Array.isArray(frame) || frame[1] !== subId) return;
+        if (frame[0] === 'EVENT' && frame[2]) events.push(frame[2]);
+        if (frame[0] === 'EOSE' || frame[0] === 'CLOSED') finish();
+      };
+      socket.addEventListener('message', onMessage);
+      socket.send(JSON.stringify(['REQ', subId, filter]));
+    });
+  }
+
   close() {
     this.socket?.close();
     this.socket = null;
@@ -137,6 +161,29 @@ export class NostrMirrorClient {
 
   async publicBase() {
     return nostrPublicBase(await nostrPublicKey(this.secretKey), this.relays);
+  }
+
+  /**
+   * Square up with the relays: one query per relay for our own records,
+   * merged to the newest sighting per address. The seed skips whatever is
+   * already held fresh — records only change while a watcher runs, so
+   * anything present was uploaded when it last changed.
+   */
+  async inventory() {
+    const publicKey = await nostrPublicKey(this.secretKey);
+    const seen = new Map();
+    const results = await Promise.allSettled(this.connections.map((relay) =>
+      relay.query({ authors: [publicKey], kinds: [NOSTR_MIRROR_KIND] })));
+    for (const outcome of results) {
+      if (outcome.status !== 'fulfilled') continue;
+      for (const event of outcome.value) {
+        const dTag = event.tags?.find((tag) => tag[0] === 'd')?.[1];
+        if (!dTag) continue;
+        const at = Number(event.created_at) * 1000;
+        if (!seen.has(dTag) || at > seen.get(dTag)) seen.set(dTag, at);
+      }
+    }
+    return seen;
   }
 
   async put(key, body) {

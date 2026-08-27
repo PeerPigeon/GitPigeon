@@ -257,13 +257,26 @@ export function startShareMirror({ node, repositoryId, client, logger = {} }) {
    * current publication set — registry → heads → manifest → chunks — and
    * enqueue whatever exists.
    */
+  const REFRESH_STALENESS_MS = 72 * 60 * 60 * 1000;
   const seedCurrent = async () => {
     const prefix = `gitpigeon/v1/${repositoryId}`;
+    // Square up before seeding: whatever the store already holds fresh is
+    // skipped. Records only change while a watcher runs, so presence in the
+    // inventory means the last change was uploaded; age beyond the refresh
+    // window still re-uploads to keep best-effort retention warm.
+    const inventory = await (client.inventory?.().catch(() => null) ?? null);
     const seen = new Set();
     const seed = (space, key) => {
       const id = `${space} ${key}`;
       if (seen.has(id)) return;
       seen.add(id);
+      if (inventory) {
+        const heldAt = inventory.get(mirrorObjectKey(repositoryId, space, key));
+        if (heldAt && Date.now() - heldAt < REFRESH_STALENESS_MS) {
+          logger.debug?.(`Mirror already holds ${space}/${key}; skipping seed`);
+          return;
+        }
+      }
       enqueue(space, key);
     };
     const registryKey = `${prefix}/registry`;
