@@ -362,6 +362,10 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       }
     })().catch((error) => log.debug?.(`Session commit: ${error.message}`));
   });
+  // The counterpart of the goodbye: announce THIS session the moment it
+  // opens, so browsers that were told the watcher left flip back without
+  // waiting for a ping cycle.
+  broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, { kind: 'hello' }).catch(() => {});
   const sessionPeerUpdates = startPeerUpdates({
     node,
     root: machineIndexRoot(),
