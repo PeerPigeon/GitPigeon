@@ -564,12 +564,19 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       filesystemWatcher?.close();
       if (peerRefreshTimer) clearTimeout(peerRefreshTimer);
       node.off('peerConnected', onPeerConnected);
-      // A graceful shutdown says goodbye BEFORE tearing down, so every
-      // browser flips to reconnecting immediately instead of waiting for
-      // its proof-of-life window to decay.
+      // A graceful shutdown says goodbye BEFORE tearing down. The channel
+      // may be half-dead in exactly this moment, so the goodbye travels
+      // every path — broadcast AND direct to each connected peer — the same
+      // multi-path treatment push results get. The stop command has already
+      // returned by now, so the wait costs the person nothing.
+      const farewell = { kind: 'goodbye' };
       await Promise.race([
-        broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, { kind: 'goodbye' }).catch(() => {}),
-        sleep(750),
+        Promise.allSettled([
+          broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, farewell),
+          ...node.getConnectedPeers().map((peerId) =>
+            sendChannelDirect(node, peerId, config.repositoryId, CONTROL_CHANNEL, farewell)),
+        ]),
+        sleep(1_500),
       ]);
       unsubscribeSessionCommit?.();
       terminalServer.stop();
@@ -998,6 +1005,10 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     });
     await stopped;
   } finally {
+    // `git pigeon stop` waits on the service state file. Remove it FIRST so
+    // the command returns instantly; goodbyes and teardown continue behind
+    // it — nothing after this line needs the state file.
+    if (control) await control.close().catch(() => {});
     automaticUpdates?.stop();
     await peerUpdates?.stop()?.catch?.(() => {});
     process.off('SIGINT', stop);
@@ -1012,7 +1023,6 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     if (lanApprovals) await lanApprovals.close();
     if (terminalHistory) await terminalHistory.close();
     if (machineIndex) await machineIndex.close();
-    if (control) await control.close();
   }
   if (restartAfterRotation && !installedUpdate) {
     log.info('Restarting the watcher service on the rotated index secret');
