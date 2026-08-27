@@ -7,6 +7,7 @@ import process from 'node:process';
 import { deviceHostName } from './device-name.js';
 import { DEFAULT_POLL_MS, DEFAULT_SYNC_WAIT_MS } from './constants.js';
 import { RepositoryCache } from './cache.js';
+import { CONTROL_CHANNEL, onChannelMessage, sendChannelDirect } from './channel.js';
 import { createIdentity, loadConfig, saveConfig } from './config.js';
 import {
   createWatchServiceControl,
@@ -303,6 +304,53 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   // the flakiest link on some networks — watchers whose index connection
   // stalls still hold rock-solid repository rooms, and an update channel
   // that only ever rode the weakest mesh went silent exactly when needed.
+  // Commit over the REPOSITORY channel. The index room can be mid-
+  // renegotiation while this session's channel is demonstrably alive (live
+  // edits flowing, terminal open); an already-connected path must be enough
+  // to commit. Same intent-token replay contract as the index-room op.
+  const sessionCommitOutcomes = new Map();
+  const unsubscribeSessionCommit = onChannelMessage(node, config.repositoryId, CONTROL_CHANNEL, (frame, { peerId, kind }) => {
+    if (kind !== 'direct' || frame.kind !== 'commit-repository') return;
+    (async () => {
+      const requestId = String(frame.requestId ?? '');
+      if (!requestId) return;
+      const reply = (payload) => sendChannelDirect(node, peerId, config.repositoryId, CONTROL_CHANNEL, {
+        kind: 'result', requestId, ...payload,
+      });
+      try {
+        const token = String(frame.token ?? '');
+        if (token && sessionCommitOutcomes.has(token)) {
+          await reply({ ok: true, ...sessionCommitOutcomes.get(token) });
+          return;
+        }
+        const message = String(frame.message ?? '').trim().slice(0, 500);
+        if (!message) throw new Error('A commit message is required');
+        await repository.git(['add', '-A']);
+        const status = (await repository.git(['status', '--porcelain'])).stdout.trim();
+        if (!status) throw new Error('Nothing to commit — the working tree is clean');
+        const identity = [];
+        const hasIdentity = await repository.git(['config', 'user.email']).then(
+          (result) => Boolean(result.stdout.trim()),
+          () => false,
+        );
+        if (!hasIdentity) {
+          const host = deviceHostName();
+          identity.push('-c', `user.name=${host}`, '-c', `user.email=gitpigeon@${host}`);
+        }
+        await repository.git([...identity, 'commit', '-m', message]);
+        const commit = (await repository.git(['rev-parse', '--short', 'HEAD'])).stdout.trim();
+        log.info(`Committed ${commit} on ${config.repositoryId.slice(0, 8)} from a paired browser (repository channel)`);
+        if (token) {
+          sessionCommitOutcomes.set(token, { commit });
+          while (sessionCommitOutcomes.size > 32) sessionCommitOutcomes.delete(sessionCommitOutcomes.keys().next().value);
+        }
+        schedulePublish();
+        await reply({ ok: true, commit });
+      } catch (error) {
+        await reply({ ok: false, message: error.message }).catch(() => {});
+      }
+    })().catch((error) => log.debug?.(`Session commit: ${error.message}`));
+  });
   const sessionPeerUpdates = startPeerUpdates({
     node,
     root: machineIndexRoot(),
@@ -501,6 +549,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       filesystemWatcher?.close();
       if (peerRefreshTimer) clearTimeout(peerRefreshTimer);
       node.off('peerConnected', onPeerConnected);
+      unsubscribeSessionCommit?.();
       terminalServer.stop();
       realtimeServer.stop();
       await sessionPeerUpdates.stop().catch(() => {});
