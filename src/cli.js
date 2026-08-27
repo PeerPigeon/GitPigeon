@@ -583,11 +583,18 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       filesystemWatcher?.close();
       if (peerRefreshTimer) clearTimeout(peerRefreshTimer);
       node.off('peerConnected', onPeerConnected);
-      // A graceful shutdown says goodbye BEFORE tearing down. The channel
-      // may be half-dead in exactly this moment, so the goodbye travels
-      // every path — broadcast AND direct to each connected peer — the same
-      // multi-path treatment push results get. The stop command has already
-      // returned by now, so the wait costs the person nothing.
+      // A graceful shutdown says goodbye BEFORE tearing down — as a
+      // DURABLE RECORD first, because a frame is one shot into channels
+      // that are unreliable at exactly this moment, while a storage record
+      // rides retried, anti-entropy replication and persists in every
+      // replica until heard. A fresh presence at the next start supersedes
+      // it by timestamp; no clearing step exists to forget.
+      await node.storage?.put('public', `gitpigeon/v1/${config.repositoryId}/farewell/${config.deviceId}`, {
+        protocol: 'gitpigeon/1',
+        repositoryId: config.repositoryId,
+        deviceId: config.deviceId,
+        at: new Date().toISOString(),
+      }).catch(() => {});
       const farewell = { kind: 'goodbye' };
       await Promise.race([
         Promise.allSettled([
