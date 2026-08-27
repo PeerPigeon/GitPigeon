@@ -235,6 +235,41 @@ export class ControlServer {
       }, 0).unref?.();
       return { mirror: mirror ? mirror.publicBaseUrl : null };
     }
+    if (frame.kind === 'commit-repository') {
+      // The browser's Commit button, GitHub-style: the browser is a thin
+      // client and THIS machine is its server. Live-workspace edits are
+      // already on this filesystem via the realtime server; committing them
+      // is a watcher action, so no authority moves anywhere.
+      const repositoryId = String(frame.targetRepositoryId ?? '');
+      if (!REPOSITORY_ID.test(repositoryId)) throw new Error('Invalid repository ID');
+      const message = String(frame.message ?? '').trim().slice(0, 500);
+      if (!message) throw new Error('A commit message is required');
+      const entries = await listMachinePigeons({ root: this.root, activeOnly: false });
+      const entry = entries.find((candidate) => candidate.repositoryId === repositoryId);
+      if (!entry) throw new Error('That repository is not registered on this machine');
+      const { GitRepository } = await import('./git.js');
+      const { deviceHostName } = await import('./device-name.js');
+      const repository = await GitRepository.discover(entry.repository);
+      await repository.git(['add', '-A']);
+      const status = (await repository.git(['status', '--porcelain'])).stdout.trim();
+      if (!status) throw new Error('Nothing to commit — the working tree is clean');
+      // Committing must never fail on a machine with no git identity
+      // configured — the machine's name stands in — but a CONFIGURED
+      // identity always wins; -c would override it unconditionally.
+      const identity = [];
+      const hasIdentity = await repository.git(['config', 'user.email']).then(
+        (result) => Boolean(result.stdout.trim()),
+        () => false,
+      );
+      if (!hasIdentity) {
+        const host = deviceHostName();
+        identity.push('-c', `user.name=${host}`, '-c', `user.email=gitpigeon@${host}`);
+      }
+      await repository.git([...identity, 'commit', '-m', message]);
+      const commit = (await repository.git(['rev-parse', '--short', 'HEAD'])).stdout.trim();
+      this.logger.info?.(`Committed ${commit} on ${path.basename(entry.repository)} from a paired browser`);
+      return { commit };
+    }
     throw new Error(`Unsupported control command: ${String(frame.kind ?? 'none')}`);
   }
 

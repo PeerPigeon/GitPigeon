@@ -134,3 +134,53 @@ test('a control frame for another index is ignored', async (t) => {
   await settle();
   assert.equal(node.direct.length, 0);
 });
+
+test('a paired browser commits the working tree through the watcher', async (t) => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { writeFile } = await import('node:fs/promises');
+  const run = promisify(execFile);
+  const root = await mkdtemp(path.join(os.tmpdir(), 'gitpigeon-control-commit-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const repoDir = path.join(root, 'workrepo');
+  await run('git', ['init', '-q', repoDir]);
+  await writeFile(path.join(repoDir, 'edited.txt'), 'edited from a browser\n');
+  await registerMachinePigeon({ root: repoDir, gitDir: path.join(repoDir, '.git') }, {
+    repositoryId: 'repo-commit-001',
+    secret: 's'.repeat(43),
+    deviceId: 'device-aaaaaaaa',
+  }, { root, pid: null });
+
+  const node = new FakeNode();
+  const server = new ControlServer({ node, indexId, root });
+  server.start();
+  t.after(() => server.stop());
+
+  node.receive('browser', indexId, CONTROL_CHANNEL, {
+    kind: 'commit-repository',
+    requestId: 'c1',
+    targetRepositoryId: 'repo-commit-001',
+    message: 'browser commit',
+  }, 'direct');
+  // Committing shells out to git twice; give it a real moment.
+  for (let waited = 0; waited < 100 && !node.directFrames(CONTROL_CHANNEL).length; waited += 1) await settle();
+
+  const [reply] = node.directFrames(CONTROL_CHANNEL);
+  assert.equal(reply.ok, true, reply.message);
+  assert.match(reply.commit, /^[0-9a-f]{7,12}$/);
+  const log = await run('git', ['-C', repoDir, 'log', '--oneline']);
+  assert.match(log.stdout, /browser commit/);
+
+  // A clean tree reports 'nothing to commit' instead of an empty commit.
+  node.receive('browser', indexId, CONTROL_CHANNEL, {
+    kind: 'commit-repository',
+    requestId: 'c2',
+    targetRepositoryId: 'repo-commit-001',
+    message: 'again',
+  }, 'direct');
+  for (let waited = 0; waited < 100 && node.directFrames(CONTROL_CHANNEL).length < 2; waited += 1) await settle();
+  const second = node.directFrames(CONTROL_CHANNEL)[1];
+  assert.equal(second.ok, false);
+  assert.match(second.message, /Nothing to commit/);
+});
