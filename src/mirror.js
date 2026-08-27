@@ -299,3 +299,40 @@ export function startShareMirror({ node, repositoryId, client, logger = {} }) {
     },
   };
 }
+
+/**
+ * Build a fresh share.mirror from the repository's sticky preference. Nostr
+ * mints a NEW keypair per share, so retiring a share key retires its mirror
+ * identity with it; IPFS re-derives the public base from the node (skipped
+ * with a throw if the node is unreachable); S3 config carries over whole.
+ */
+export async function buildMirrorFromDefaults(defaults) {
+  if (!defaults) return null;
+  if (defaults.type === 'nostr') {
+    const { generateNostrMirrorKey, nostrPublicBase, nostrPublicKey } = await import('./nostr-mirror.js');
+    const secretKey = generateNostrMirrorKey();
+    return {
+      type: 'nostr',
+      secretKey,
+      relays: [...defaults.relays],
+      publicBaseUrl: nostrPublicBase(await nostrPublicKey(secretKey), defaults.relays),
+    };
+  }
+  if (defaults.type === 'ipfs') {
+    const client = new IpfsMirrorClient(defaults);
+    return {
+      type: 'ipfs',
+      apiUrl: defaults.apiUrl,
+      ...(defaults.authorization ? { authorization: defaults.authorization } : {}),
+      gateway: defaults.gateway,
+      publicBaseUrl: await client.publicBase(),
+    };
+  }
+  if (defaults.type === 's3') {
+    return {
+      ...defaults,
+      publicBaseUrl: defaults.publicBaseUrl ?? `${defaults.endpoint}/${defaults.bucket}${defaults.prefix ? `/${defaults.prefix}` : ''}`,
+    };
+  }
+  return null;
+}

@@ -82,6 +82,42 @@ export function validateConfig(input) {
       }
     }
   }
+  // The mirror PREFERENCE outlives any one share: locking retires the
+  // share's mirror (its ciphertext belongs to the retired key), but the
+  // next share should come up mirrored the same way without being asked.
+  let mirrorDefaults;
+  if (input.mirrorDefaults && typeof input.mirrorDefaults === 'object') {
+    const defaults = input.mirrorDefaults;
+    if (defaults.type === 'nostr') {
+      const relays = Array.isArray(defaults.relays) ? defaults.relays.map(String).filter((relay) => /^wss?:\/\//.test(relay)) : [];
+      if (relays.length) mirrorDefaults = { type: 'nostr', relays };
+    } else if (defaults.type === 'ipfs') {
+      const apiUrl = String(defaults.apiUrl ?? '');
+      if (/^https?:\/\//.test(apiUrl)) {
+        mirrorDefaults = {
+          type: 'ipfs',
+          apiUrl,
+          ...(defaults.authorization ? { authorization: String(defaults.authorization) } : {}),
+          gateway: String(defaults.gateway ?? 'https://ipfs.io'),
+        };
+      }
+    } else if (defaults.type === 's3') {
+      const endpoint = String(defaults.endpoint ?? '');
+      const bucket = String(defaults.bucket ?? '');
+      if (/^https?:\/\//.test(endpoint) && bucket) {
+        mirrorDefaults = {
+          type: 's3',
+          endpoint,
+          bucket,
+          prefix: String(defaults.prefix ?? ''),
+          region: String(defaults.region ?? 'auto'),
+          accessKeyId: String(defaults.accessKeyId ?? ''),
+          secretAccessKey: String(defaults.secretAccessKey ?? ''),
+          ...(defaults.publicBaseUrl ? { publicBaseUrl: String(defaults.publicBaseUrl) } : {}),
+        };
+      }
+    }
+  }
   return {
     version: CONFIG_VERSION,
     repositoryId: validateRepositoryId(input.repositoryId),
@@ -89,6 +125,7 @@ export function validateConfig(input) {
     deviceId,
     ...(signalingServer ? { signalingServer } : {}),
     ...(share ? { share } : {}),
+    ...(mirrorDefaults ? { mirrorDefaults } : {}),
     createdAt: String(input.createdAt ?? new Date().toISOString()),
   };
 }

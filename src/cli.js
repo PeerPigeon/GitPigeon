@@ -1580,8 +1580,37 @@ async function commandShare(args, cwd, verbose) {
     };
     mirrorChanged = true;
   }
+  if (created && !share.mirror && !mirrorChanged && config.mirrorDefaults) {
+    // The mirror preference is sticky: a fresh share comes up mirrored the
+    // way this repository always mirrors, without being asked again.
+    try {
+      const { buildMirrorFromDefaults } = await import('./mirror.js');
+      const rebuilt = await buildMirrorFromDefaults(config.mirrorDefaults);
+      if (rebuilt) {
+        share.mirror = rebuilt;
+        mirrorChanged = true;
+      }
+    } catch (error) {
+      console.log(`The configured mirror could not be re-attached: ${error.message}`);
+    }
+  }
+  let mirrorDefaults = config.mirrorDefaults;
+  if (mirrorOption === 'off') {
+    mirrorDefaults = undefined;
+  } else if (share.mirror?.type === 'nostr') {
+    mirrorDefaults = { type: 'nostr', relays: [...share.mirror.relays] };
+  } else if (share.mirror?.type === 'ipfs') {
+    const { secretKey, publicBaseUrl, ...rest } = share.mirror;
+    void secretKey; void publicBaseUrl;
+    mirrorDefaults = { ...rest };
+  } else if (share.mirror?.type === 's3') {
+    mirrorDefaults = { ...share.mirror };
+  }
   if (created || mirrorChanged) {
-    await saveConfig(repository.gitDir, { ...config, share });
+    const next = { ...config, share };
+    if (mirrorDefaults) next.mirrorDefaults = mirrorDefaults;
+    else delete next.mirrorDefaults;
+    await saveConfig(repository.gitDir, next);
   }
   const parameters = {
     repositoryId: config.repositoryId,

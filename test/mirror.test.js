@@ -83,3 +83,22 @@ test('the mirror follows local writes, seeds the current set, and ignores remote
   assert.deepEqual(uploads, [mirrorObjectKey('repo1234', 'public', 'gitpigeon/v1/repo1234/registry')]);
   mirror.stop();
 });
+
+test('the mirror preference survives config normalization and rebuilds per share', async () => {
+  const { validateConfig, createIdentity } = await import('../src/config.js');
+  const { buildMirrorFromDefaults } = await import('../src/mirror.js');
+  const base = createIdentity();
+  const config = validateConfig({
+    ...base,
+    mirrorDefaults: { type: 'nostr', relays: ['wss://relay.damus.io', 'wss://nos.lol'] },
+  });
+  assert.deepEqual(config.mirrorDefaults, { type: 'nostr', relays: ['wss://relay.damus.io', 'wss://nos.lol'] });
+  const first = await buildMirrorFromDefaults(config.mirrorDefaults);
+  const second = await buildMirrorFromDefaults(config.mirrorDefaults);
+  assert.equal(first.type, 'nostr');
+  assert.deepEqual(first.relays, config.mirrorDefaults.relays);
+  assert.match(first.publicBaseUrl, /^nostr:[0-9a-f]{64}\?relays=/);
+  // A fresh share gets a FRESH keypair: retiring a share retires its mirror identity.
+  assert.notEqual(first.secretKey, second.secretKey);
+  assert.notEqual(first.publicBaseUrl, second.publicBaseUrl);
+});

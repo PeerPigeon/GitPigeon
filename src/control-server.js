@@ -103,11 +103,21 @@ export class ControlServer {
         const { createShareKey } = await import('./share.js');
         const { loadPairingKeyPair } = await import('./pairing-identity.js');
         const keyPair = await loadPairingKeyPair(this.root);
-        config = await saveConfig(repository.gitDir, {
-          ...config,
-          share: { key: createShareKey(), ownerPublicKey: keyPair.pub, role: 'owner' },
-        });
-        this.logger.info?.(`Shared ${path.basename(entry.repository)} publicly`);
+        const share = { key: createShareKey(), ownerPublicKey: keyPair.pub, role: 'owner' };
+        // The mirror preference is sticky across lock/unlock: the retired
+        // share took its mirror (and, for Nostr, its keypair) with it, and
+        // the fresh share comes up mirrored the same way unprompted.
+        if (config.mirrorDefaults) {
+          try {
+            const { buildMirrorFromDefaults } = await import('./mirror.js');
+            const rebuilt = await buildMirrorFromDefaults(config.mirrorDefaults);
+            if (rebuilt) share.mirror = rebuilt;
+          } catch (error) {
+            this.logger.warn?.(`Mirror preference could not be re-attached: ${error.message}`);
+          }
+        }
+        config = await saveConfig(repository.gitDir, { ...config, share });
+        this.logger.info?.(`Shared ${path.basename(entry.repository)} publicly${share.mirror ? ' with its mirror re-attached' : ''}`);
       } else if (!shared && config.share) {
         const { share, ...rest } = config;
         void share;
@@ -206,7 +216,13 @@ export class ControlServer {
       const share = { ...config.share };
       if (mirror) share.mirror = mirror;
       else delete share.mirror;
-      const updated = await saveConfig(repository.gitDir, { ...config, share });
+      const next = { ...config, share };
+      if (mirror?.type === 'nostr') next.mirrorDefaults = { type: 'nostr', relays: [...mirror.relays] };
+      else if (mirror?.type === 'ipfs') {
+        next.mirrorDefaults = { type: 'ipfs', apiUrl: mirror.apiUrl, ...(mirror.authorization ? { authorization: mirror.authorization } : {}), gateway: mirror.gateway };
+      } else if (mirror?.type === 's3') next.mirrorDefaults = { ...mirror };
+      else delete next.mirrorDefaults;
+      const updated = await saveConfig(repository.gitDir, next);
       await registerMachinePigeon(repository, updated, { root: this.root });
       this.logger.info?.(mirror
         ? `Mirror for ${path.basename(entry.repository)} set to ${mirror.publicBaseUrl}`
