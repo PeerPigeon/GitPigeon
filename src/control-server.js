@@ -236,6 +236,14 @@ export class ControlServer {
       return { mirror: mirror ? mirror.publicBaseUrl : null };
     }
     if (frame.kind === 'commit-repository') {
+      // Retries are how a commit outlives a flapping channel, and a retry
+      // whose predecessor actually landed must not commit twice or report
+      // 'Nothing to commit' over a success. The browser sends one token per
+      // commit INTENT; repeats replay the recorded outcome.
+      const token = String(frame.token ?? '');
+      if (token && this.recentCommits?.has(token)) {
+        return this.recentCommits.get(token);
+      }
       // The browser's Commit button, GitHub-style: the browser is a thin
       // client and THIS machine is its server. Live-workspace edits are
       // already on this filesystem via the realtime server; committing them
@@ -268,6 +276,14 @@ export class ControlServer {
       await repository.git([...identity, 'commit', '-m', message]);
       const commit = (await repository.git(['rev-parse', '--short', 'HEAD'])).stdout.trim();
       this.logger.info?.(`Committed ${commit} on ${path.basename(entry.repository)} from a paired browser`);
+      if (token) {
+        this.recentCommits ??= new Map();
+        this.recentCommits.set(token, { commit, replayed: true });
+        // A small memory of intent outcomes, not a ledger.
+        while (this.recentCommits.size > 32) {
+          this.recentCommits.delete(this.recentCommits.keys().next().value);
+        }
+      }
       return { commit };
     }
     throw new Error(`Unsupported control command: ${String(frame.kind ?? 'none')}`);
