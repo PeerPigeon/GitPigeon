@@ -373,9 +373,18 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     })().catch((error) => log.debug?.(`Session commit: ${error.message}`));
   });
   // The counterpart of the goodbye: announce THIS session the moment it
-  // opens, so browsers that were told the watcher left flip back without
-  // waiting for a ping cycle.
-  broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, { kind: 'hello' }).catch(() => {});
+  // opens — and AGAIN whenever a peer connects, because the open-time hello
+  // fires into a room nobody has rejoined yet and an announcement nobody
+  // hears never happened. Throttled so a reconnect storm is one hello.
+  let lastHelloAt = 0;
+  const sayHello = () => {
+    if (Date.now() - lastHelloAt < 5_000) return;
+    lastHelloAt = Date.now();
+    broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, { kind: 'hello' }).catch(() => {});
+  };
+  sayHello();
+  const onHelloPeer = () => sayHello();
+  node.on('peerConnected', onHelloPeer);
   const sessionPeerUpdates = startPeerUpdates({
     node,
     root: machineIndexRoot(),
@@ -588,6 +597,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
         ]),
         sleep(1_500),
       ]);
+      node.off('peerConnected', onHelloPeer);
       unsubscribeSessionCommit?.();
       terminalServer.stop();
       realtimeServer.stop();
