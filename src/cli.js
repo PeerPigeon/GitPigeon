@@ -7,7 +7,7 @@ import process from 'node:process';
 import { deviceHostName } from './device-name.js';
 import { DEFAULT_POLL_MS, DEFAULT_SYNC_WAIT_MS } from './constants.js';
 import { RepositoryCache } from './cache.js';
-import { CONTROL_CHANNEL, onChannelMessage, sendChannelDirect } from './channel.js';
+import { CONTROL_CHANNEL, broadcastChannel, onChannelMessage, sendChannelDirect } from './channel.js';
 import { createIdentity, loadConfig, saveConfig } from './config.js';
 import {
   createWatchServiceControl,
@@ -310,13 +310,24 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   // to commit. Same intent-token replay contract as the index-room op.
   const sessionCommitOutcomes = new Map();
   const unsubscribeSessionCommit = onChannelMessage(node, config.repositoryId, CONTROL_CHANNEL, (frame, { peerId, kind }) => {
-    if (kind !== 'direct' || frame.kind !== 'commit-repository') return;
+    // Direct AND broadcast are both accepted: a half-dead channel can eat
+    // direct frames while room gossip still routes — the same reason live
+    // edits keep flowing when clicks appear to hang.
+    if (frame.kind !== 'commit-repository') return;
+    void kind;
     (async () => {
       const requestId = String(frame.requestId ?? '');
       if (!requestId) return;
-      const reply = (payload) => sendChannelDirect(node, peerId, config.repositoryId, CONTROL_CHANNEL, {
-        kind: 'result', requestId, ...payload,
-      });
+      // The reply must survive the same half-dead channel the request did:
+      // send it directly AND broadcast it. requestId scopes it; the intent
+      // token makes duplicate delivery harmless.
+      const reply = async (payload) => {
+        const resultFrame = { kind: 'result', requestId, ...payload };
+        await Promise.allSettled([
+          sendChannelDirect(node, peerId, config.repositoryId, CONTROL_CHANNEL, resultFrame),
+          broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, resultFrame),
+        ]);
+      };
       try {
         const token = String(frame.token ?? '');
         if (token && sessionCommitOutcomes.has(token)) {
