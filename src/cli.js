@@ -1955,7 +1955,19 @@ async function commandWatch(args, cwd, verbose) {
   if (stateDir) throw new Error('--state-dir is reserved for the GitPigeon service');
   if (foreground) throw new Error('GitPigeon foreground watching is managed by its single machine-wide service');
 
-  const { repository, config } = await configuredRepository(cwd);
+  let repository;
+  let config;
+  try {
+    ({ repository, config } = await configuredRepository(cwd));
+  } catch (error) {
+    const message = String(error.message);
+    if (!message.includes('Not a Git repository') && !message.includes('not configured')) throw error;
+    // `git pigeon watch` in a plain folder means "make this a watched
+    // repository": run the exact bootstrap `git pigeon init` performs —
+    // `git init` included — which registers the repository and starts the
+    // machine-wide watcher. Nothing left to do afterwards.
+    return await commandInit([], cwd, verbose);
+  }
   const root = machineIndexRoot();
   const wasRegistered = (await listMachinePigeons({ root, activeOnly: false }))
     .some((entry) => entry.repository === repository.root);
