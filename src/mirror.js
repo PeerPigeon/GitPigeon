@@ -267,7 +267,7 @@ export function startShareMirror({ node, repositoryId, client, logger = {} }) {
     const inventory = await (client.inventory?.().catch(() => null) ?? null);
     const seen = new Set();
     const seed = (space, key) => {
-      const id = `${space} ${key}`;
+      const id = `${space}\u0000${key}`;
       if (seen.has(id)) return;
       seen.add(id);
       if (inventory) {
