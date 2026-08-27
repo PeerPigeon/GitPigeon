@@ -1617,10 +1617,19 @@ async function commandShare(args, cwd, verbose) {
     mirrorNostr = takeOption(args, '--mirror-nostr');
     mirrorNostrFlag = mirrorNostr !== undefined;
   }
+  const rotate = takeFlag(args, '--rotate');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const { repository, config } = await configuredRepository(cwd);
   if (config.share?.role === 'mirror') {
     throw new Error("This is a mirror of someone else's shared repository.");
+  }
+  // --rotate is the deliberate new-link action: discard the permanent share
+  // identity (active or dormant) and mint a fresh one — new key, new mirror
+  // keypair. Every previously distributed link stops working, on purpose.
+  if (rotate) {
+    delete config.share;
+    delete config.shareDormant;
+    console.log('Rotating the share identity: every previously shared link is now dead.\n');
   }
   const root = machineIndexRoot();
   const keyPair = await loadPairingKeyPair(root);
@@ -1702,18 +1711,23 @@ async function commandShare(args, cwd, verbose) {
     };
     mirrorChanged = true;
   }
-  if ((created || resumed) && !share.mirror && !mirrorChanged && config.mirrorDefaults) {
+  if ((created || resumed) && !share.mirror && !mirrorChanged) {
     // The mirror preference is sticky: a fresh share comes up mirrored the
-    // way this repository always mirrors, without being asked again.
+    // way this repository always mirrors, without being asked again — and a
+    // repository with no preference at all defaults to Nostr on the free
+    // public relays, so a bare `git pigeon share` never hands out a link
+    // that goes dark the moment the watcher does.
     try {
+      const { DEFAULT_NOSTR_RELAYS } = await import('./nostr-mirror.js');
+      const defaults = config.mirrorDefaults ?? { type: 'nostr', relays: [...DEFAULT_NOSTR_RELAYS] };
       const { buildMirrorFromDefaults } = await import('./mirror.js');
-      const rebuilt = await buildMirrorFromDefaults(config.mirrorDefaults);
+      const rebuilt = await buildMirrorFromDefaults(defaults);
       if (rebuilt) {
         share.mirror = rebuilt;
         mirrorChanged = true;
       }
     } catch (error) {
-      console.log(`The configured mirror could not be re-attached: ${error.message}`);
+      console.log(`The configured mirror could not be attached: ${error.message}`);
     }
   }
   let mirrorDefaults = config.mirrorDefaults;
@@ -1728,7 +1742,7 @@ async function commandShare(args, cwd, verbose) {
   } else if (share.mirror?.type === 's3') {
     mirrorDefaults = { ...share.mirror };
   }
-  if (created || resumed || mirrorChanged) {
+  if (created || resumed || mirrorChanged || rotate) {
     const next = { ...config, share };
     delete next.shareDormant;
     if (mirrorDefaults) next.mirrorDefaults = mirrorDefaults;
@@ -1755,7 +1769,7 @@ async function commandShare(args, cwd, verbose) {
       ? `Nostr, ${share.mirror.relays.length} relay${share.mirror.relays.length === 1 ? '' : 's'} (${share.mirror.relays.join(', ')})`
       : `${share.mirror.publicBaseUrl} (${share.mirror.type === 'ipfs' ? `IPFS node ${share.mirror.apiUrl}` : `bucket ${share.mirror.bucket}`})`}`);
   }
-  if (created || resumed || mirrorChanged) {
+  if (created || resumed || mirrorChanged || rotate) {
     // The running session predates the share (or its mirror); reopen it.
     const restarted = await stopWatchService(root);
     if (restarted) await startWatchService({ root, verbose });
