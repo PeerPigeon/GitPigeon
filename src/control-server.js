@@ -144,7 +144,25 @@ export class ControlServer {
       const config = await loadConfig(repository.gitDir);
       if (!config.share) throw new Error('Unlock (share) the repository before configuring its mirror');
       let mirror = null;
-      if (frame.mirror && frame.mirror.type === 'ipfs') {
+      if (frame.mirror && frame.mirror.type === 'nostr') {
+        // Zero-setup default: free public relays, identity generated here
+        // and kept across reconfigurations so every copied link stays valid.
+        const { DEFAULT_NOSTR_RELAYS, generateNostrMirrorKey, nostrPublicBase, nostrPublicKey } = await import('./nostr-mirror.js');
+        const requested = Array.isArray(frame.mirror.relays)
+          ? frame.mirror.relays.map(String).map((relay) => relay.trim()).filter(Boolean)
+          : [];
+        const relays = requested.length ? requested : [...DEFAULT_NOSTR_RELAYS];
+        if (relays.some((relay) => !/^wss?:\/\//.test(relay))) throw new Error('Nostr relays must use wss://');
+        const secretKey = config.share.mirror?.type === 'nostr' && config.share.mirror.secretKey
+          ? config.share.mirror.secretKey
+          : generateNostrMirrorKey();
+        mirror = {
+          type: 'nostr',
+          secretKey,
+          relays,
+          publicBaseUrl: nostrPublicBase(await nostrPublicKey(secretKey), relays),
+        };
+      } else if (frame.mirror && frame.mirror.type === 'ipfs') {
         // The IPFS adapter is pure HTTP against a kubo RPC endpoint.
         // Deriving the public base from the node's identity doubles as a
         // reachability and auth check, so a bad endpoint fails HERE, into

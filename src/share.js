@@ -118,6 +118,8 @@ export function parseShareUrl(value) {
 }
 
 export function validateMirrorUrl(value) {
+  // A Nostr base is not a URL: nostr:<pubkey>?relays=<wss…,wss…>
+  if (/^nostr:[0-9a-f]{64}\?relays=.+$/.test(String(value))) return String(value);
   let url;
   try {
     url = new URL(String(value));

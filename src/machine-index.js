@@ -112,7 +112,8 @@ function validEntry(value) {
       // Only the PUBLIC base URL of the always-on mirror travels in the
       // index record — bucket credentials never leave the repository config.
       const mirror = String(value.share.mirror ?? '');
-      if (/^https:\/\//.test(mirror) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//.test(mirror)) {
+      if (/^https:\/\//.test(mirror) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//.test(mirror)
+        || /^nostr:[0-9a-f]{64}\?relays=.+$/.test(mirror)) {
         share.mirror = mirror.slice(0, 2_048);
       }
     }

@@ -46,8 +46,14 @@ export function validateConfig(input) {
     if (input.share.mirror && typeof input.share.mirror === 'object') {
       const mirror = input.share.mirror;
       const publicBaseUrl = String(mirror.publicBaseUrl ?? '');
-      const type = mirror.type === 'ipfs' ? 'ipfs' : 's3';
-      if (type === 'ipfs') {
+      const type = mirror.type === 'nostr' ? 'nostr' : mirror.type === 'ipfs' ? 'ipfs' : 's3';
+      if (type === 'nostr') {
+        const secretKey = String(mirror.secretKey ?? '');
+        const relays = Array.isArray(mirror.relays) ? mirror.relays.map(String).filter((relay) => /^wss?:\/\//.test(relay)) : [];
+        if (/^[0-9a-f]{64}$/.test(secretKey) && relays.length && publicBaseUrl.startsWith('nostr:')) {
+          share.mirror = { type: 'nostr', secretKey, relays, publicBaseUrl };
+        }
+      } else if (type === 'ipfs') {
         const apiUrl = String(mirror.apiUrl ?? '');
         if (/^https?:\/\//.test(apiUrl) && /^https?:\/\//.test(publicBaseUrl)) {
           share.mirror = {

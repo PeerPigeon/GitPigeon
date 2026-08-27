@@ -84,6 +84,9 @@ Repositories
        --mirror https://<endpoint>/<bucket>[/<prefix>]
                                         Attach an S3-compatible cloud mirror
                                         (credentials from AWS_* env vars)
+       --mirror-nostr [wss://a,wss://b] Attach a Nostr mirror on free public
+                                        relays (zero setup; keypair generated
+                                        and kept by the watcher)
        --mirror-ipfs <kubo-rpc-url>     Attach an IPFS mirror through a
                                         node's HTTP RPC API (auth from
                                         IPFS_API_AUTHORIZATION if needed)
@@ -352,9 +355,15 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       if (config.share.mirror) {
         try {
           const { IpfsMirrorClient, S3MirrorClient, startShareMirror } = await import('./mirror.js');
-          const client = config.share.mirror.type === 'ipfs'
-            ? new IpfsMirrorClient(config.share.mirror)
-            : new S3MirrorClient(config.share.mirror);
+          let client;
+          if (config.share.mirror.type === 'nostr') {
+            const { NostrMirrorClient } = await import('./nostr-mirror.js');
+            client = new NostrMirrorClient(config.share.mirror);
+          } else {
+            client = config.share.mirror.type === 'ipfs'
+              ? new IpfsMirrorClient(config.share.mirror)
+              : new S3MirrorClient(config.share.mirror);
+          }
           shareMirror = startShareMirror({
             node: shareNode,
             repositoryId: config.repositoryId,
@@ -1473,6 +1482,23 @@ async function commandShare(args, cwd, verbose) {
   const mirrorPublic = takeOption(args, '--mirror-public');
   const mirrorIpfs = takeOption(args, '--mirror-ipfs');
   const mirrorGateway = takeOption(args, '--mirror-gateway');
+  // --mirror-nostr works bare (default relays) or with a relay list.
+  let mirrorNostr;
+  let mirrorNostrFlag = false;
+  const nostrIndex = args.indexOf('--mirror-nostr');
+  if (nostrIndex !== -1) {
+    mirrorNostrFlag = true;
+    const next = args[nostrIndex + 1];
+    if (next !== undefined && !next.startsWith('--')) {
+      mirrorNostr = next;
+      args.splice(nostrIndex, 2);
+    } else {
+      args.splice(nostrIndex, 1);
+    }
+  } else {
+    mirrorNostr = takeOption(args, '--mirror-nostr');
+    mirrorNostrFlag = mirrorNostr !== undefined;
+  }
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const { repository, config } = await configuredRepository(cwd);
   if (config.share?.role === 'mirror') {
@@ -1489,6 +1515,25 @@ async function commandShare(args, cwd, verbose) {
   if (mirrorOption === 'off') {
     mirrorChanged = Boolean(share.mirror);
     delete share.mirror;
+  } else if (mirrorNostrFlag) {
+    // --mirror-nostr [wss://a,wss://b] — free public relays by default,
+    // identity is a keypair generated here and kept across re-runs so the
+    // published base (and every copied link) stays stable.
+    const { DEFAULT_NOSTR_RELAYS, generateNostrMirrorKey, nostrPublicBase, nostrPublicKey } = await import('./nostr-mirror.js');
+    const relays = mirrorNostr
+      ? String(mirrorNostr).split(',').map((relay) => relay.trim()).filter(Boolean)
+      : [...DEFAULT_NOSTR_RELAYS];
+    if (relays.some((relay) => !/^wss?:\/\//.test(relay))) throw new Error('Nostr relays must use wss:// (or ws:// on loopback)');
+    const secretKey = share.mirror?.type === 'nostr' && share.mirror.secretKey
+      ? share.mirror.secretKey
+      : generateNostrMirrorKey();
+    share.mirror = {
+      type: 'nostr',
+      secretKey,
+      relays,
+      publicBaseUrl: nostrPublicBase(await nostrPublicKey(secretKey), relays),
+    };
+    mirrorChanged = true;
   } else if (mirrorIpfs) {
     // --mirror-ipfs http(s)://<kubo-rpc-endpoint> — the adapter is pure
     // HTTP against any node's RPC API (LAN box, container, hosted RPC);
@@ -1552,7 +1597,9 @@ async function commandShare(args, cwd, verbose) {
   console.log(createShareUrl(parameters));
   console.log(`\nLocal dev variant:\n${createShareUrl({ ...parameters, origin: 'https://localhost:3000' })}`);
   if (share.mirror) {
-    console.log(`\nAlways-on mirror: ${share.mirror.publicBaseUrl} (${share.mirror.type === 'ipfs' ? `IPFS node ${share.mirror.apiUrl}` : `bucket ${share.mirror.bucket}`})`);
+    console.log(`\nAlways-on mirror: ${share.mirror.type === 'nostr'
+      ? `Nostr, ${share.mirror.relays.length} relay${share.mirror.relays.length === 1 ? '' : 's'} (${share.mirror.relays.join(', ')})`
+      : `${share.mirror.publicBaseUrl} (${share.mirror.type === 'ipfs' ? `IPFS node ${share.mirror.apiUrl}` : `bucket ${share.mirror.bucket}`})`}`);
   }
   if (created || mirrorChanged) {
     // The running session predates the share (or its mirror); reopen it.
