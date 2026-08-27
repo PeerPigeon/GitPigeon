@@ -81,6 +81,15 @@ Repositories
   git pigeon share                      Print a public read-only share link
                                         (holders mirror it; approved devices
                                         edit; forks can propose changes)
+       --mirror https://<endpoint>/<bucket>[/<prefix>]
+                                        Attach an S3-compatible cloud mirror
+                                        (credentials from AWS_* env vars)
+       --mirror-ipfs <kubo-rpc-url>     Attach an IPFS mirror through a
+                                        node's HTTP RPC API (auth from
+                                        IPFS_API_AUTHORIZATION if needed)
+       --mirror-gateway <url>           Gateway readers use (default ipfs.io)
+       --mirror-public <url>            Public base readers fetch from
+       --mirror off                     Detach the cloud mirror
   git pigeon propose [--title T]        Offer this branch's commits to the
                                         shared repository's owner
   git pigeon proposals                  List proposals awaiting review
@@ -342,11 +351,14 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       // BEFORE the synchronizer so the initial publish is captured too.
       if (config.share.mirror) {
         try {
-          const { S3MirrorClient, startShareMirror } = await import('./mirror.js');
+          const { IpfsMirrorClient, S3MirrorClient, startShareMirror } = await import('./mirror.js');
+          const client = config.share.mirror.type === 'ipfs'
+            ? new IpfsMirrorClient(config.share.mirror)
+            : new S3MirrorClient(config.share.mirror);
           shareMirror = startShareMirror({
             node: shareNode,
             repositoryId: config.repositoryId,
-            client: new S3MirrorClient(config.share.mirror),
+            client,
             logger: log,
           });
           log.info(`Share mirror live for ${config.repositoryId.slice(0, 8)} at ${config.share.mirror.publicBaseUrl}`);
@@ -1459,6 +1471,8 @@ async function commandPair(args, verbose) {
 async function commandShare(args, cwd, verbose) {
   const mirrorOption = takeOption(args, '--mirror');
   const mirrorPublic = takeOption(args, '--mirror-public');
+  const mirrorIpfs = takeOption(args, '--mirror-ipfs');
+  const mirrorGateway = takeOption(args, '--mirror-gateway');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const { repository, config } = await configuredRepository(cwd);
   if (config.share?.role === 'mirror') {
@@ -1475,6 +1489,27 @@ async function commandShare(args, cwd, verbose) {
   if (mirrorOption === 'off') {
     mirrorChanged = Boolean(share.mirror);
     delete share.mirror;
+  } else if (mirrorIpfs) {
+    // --mirror-ipfs http(s)://<kubo-rpc-endpoint> — the adapter is pure
+    // HTTP against any node's RPC API (LAN box, container, hosted RPC);
+    // nothing is installed here. Auth, when the endpoint needs it, comes
+    // from IPFS_API_AUTHORIZATION in the environment.
+    const { IpfsMirrorClient } = await import('./mirror.js');
+    const authorization = process.env.IPFS_API_AUTHORIZATION || null;
+    const client = new IpfsMirrorClient({
+      apiUrl: mirrorIpfs,
+      authorization,
+      ...(mirrorGateway ? { gateway: mirrorGateway } : {}),
+    });
+    const publicBaseUrl = mirrorPublic ?? await client.publicBase();
+    share.mirror = {
+      type: 'ipfs',
+      apiUrl: new URL(mirrorIpfs).origin,
+      ...(authorization ? { authorization } : {}),
+      gateway: mirrorGateway ?? 'https://ipfs.io',
+      publicBaseUrl,
+    };
+    mirrorChanged = true;
   } else if (mirrorOption) {
     // --mirror https://<endpoint>/<bucket>[/<prefix>] — credentials come
     // from the standard AWS environment, never from the command line where
@@ -1516,7 +1551,9 @@ async function commandShare(args, cwd, verbose) {
   console.log('only your approved devices can change it.\n');
   console.log(createShareUrl(parameters));
   console.log(`\nLocal dev variant:\n${createShareUrl({ ...parameters, origin: 'https://localhost:3000' })}`);
-  if (share.mirror) console.log(`\nAlways-on mirror: ${share.mirror.publicBaseUrl} (bucket ${share.mirror.bucket})`);
+  if (share.mirror) {
+    console.log(`\nAlways-on mirror: ${share.mirror.publicBaseUrl} (${share.mirror.type === 'ipfs' ? `IPFS node ${share.mirror.apiUrl}` : `bucket ${share.mirror.bucket}`})`);
+  }
   if (created || mirrorChanged) {
     // The running session predates the share (or its mirror); reopen it.
     const restarted = await stopWatchService(root);

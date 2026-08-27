@@ -144,7 +144,27 @@ export class ControlServer {
       const config = await loadConfig(repository.gitDir);
       if (!config.share) throw new Error('Unlock (share) the repository before configuring its mirror');
       let mirror = null;
-      if (frame.mirror) {
+      if (frame.mirror && frame.mirror.type === 'ipfs') {
+        // The IPFS adapter is pure HTTP against a kubo RPC endpoint.
+        // Deriving the public base from the node's identity doubles as a
+        // reachability and auth check, so a bad endpoint fails HERE, into
+        // the browser's error surface, not silently in the session.
+        const { IpfsMirrorClient } = await import('./mirror.js');
+        const { validateMirrorUrl } = await import('./share.js');
+        const apiUrl = String(frame.mirror.apiUrl ?? '');
+        const authorization = frame.mirror.authorization ? String(frame.mirror.authorization).slice(0, 512) : null;
+        const gateway = frame.mirror.gateway ? validateMirrorUrl(String(frame.mirror.gateway)) : 'https://ipfs.io';
+        const client = new IpfsMirrorClient({ apiUrl, authorization, gateway });
+        mirror = {
+          type: 'ipfs',
+          apiUrl: new URL(apiUrl).origin,
+          ...(authorization ? { authorization } : {}),
+          gateway,
+          publicBaseUrl: frame.mirror.publicUrl
+            ? validateMirrorUrl(String(frame.mirror.publicUrl))
+            : await client.publicBase(),
+        };
+      } else if (frame.mirror) {
         const { validateMirrorUrl } = await import('./share.js');
         const endpointUrl = new URL(validateMirrorUrl(String(frame.mirror.url ?? '')));
         const [bucket, ...prefixParts] = endpointUrl.pathname.replace(/^\/+/, '').split('/').filter(Boolean);
@@ -153,6 +173,7 @@ export class ControlServer {
         const secretAccessKey = String(frame.mirror.secretAccessKey ?? '').slice(0, 256);
         if (!accessKeyId || !secretAccessKey) throw new Error('The mirror needs an access key id and secret');
         mirror = {
+          type: 's3',
           endpoint: endpointUrl.origin,
           bucket,
           prefix: prefixParts.join('/'),

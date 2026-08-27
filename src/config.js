@@ -45,19 +45,34 @@ export function validateConfig(input) {
     // load — the mirror silently evaporated on restart until it was listed.
     if (input.share.mirror && typeof input.share.mirror === 'object') {
       const mirror = input.share.mirror;
-      const endpoint = String(mirror.endpoint ?? '');
-      const bucket = String(mirror.bucket ?? '');
       const publicBaseUrl = String(mirror.publicBaseUrl ?? '');
-      if (/^https?:\/\//.test(endpoint) && bucket && /^https?:\/\//.test(publicBaseUrl)) {
-        share.mirror = {
-          endpoint,
-          bucket,
-          prefix: String(mirror.prefix ?? ''),
-          region: String(mirror.region ?? 'auto'),
-          accessKeyId: String(mirror.accessKeyId ?? ''),
-          secretAccessKey: String(mirror.secretAccessKey ?? ''),
-          publicBaseUrl,
-        };
+      const type = mirror.type === 'ipfs' ? 'ipfs' : 's3';
+      if (type === 'ipfs') {
+        const apiUrl = String(mirror.apiUrl ?? '');
+        if (/^https?:\/\//.test(apiUrl) && /^https?:\/\//.test(publicBaseUrl)) {
+          share.mirror = {
+            type: 'ipfs',
+            apiUrl,
+            ...(mirror.authorization ? { authorization: String(mirror.authorization) } : {}),
+            gateway: String(mirror.gateway ?? 'https://ipfs.io'),
+            publicBaseUrl,
+          };
+        }
+      } else {
+        const endpoint = String(mirror.endpoint ?? '');
+        const bucket = String(mirror.bucket ?? '');
+        if (/^https?:\/\//.test(endpoint) && bucket && /^https?:\/\//.test(publicBaseUrl)) {
+          share.mirror = {
+            type: 's3',
+            endpoint,
+            bucket,
+            prefix: String(mirror.prefix ?? ''),
+            region: String(mirror.region ?? 'auto'),
+            accessKeyId: String(mirror.accessKeyId ?? ''),
+            secretAccessKey: String(mirror.secretAccessKey ?? ''),
+            publicBaseUrl,
+          };
+        }
       }
     }
   }
