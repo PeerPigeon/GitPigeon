@@ -313,6 +313,16 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     // Direct AND broadcast are both accepted: a half-dead channel can eat
     // direct frames while room gossip still routes — the same reason live
     // edits keep flowing when clicks appear to hang.
+    if (frame.kind === 'ping' && frame.requestId) {
+      // The browser's round-trip probe, gossip-shaped like everything
+      // else. The pong travels every path; its arrival IS the proof.
+      const pong = { kind: 'pong', requestId: String(frame.requestId) };
+      Promise.allSettled([
+        sendChannelDirect(node, peerId, config.repositoryId, CONTROL_CHANNEL, pong),
+        broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, pong),
+      ]).catch(() => {});
+      return;
+    }
     if (frame.kind !== 'commit-repository') return;
     void kind;
     (async () => {
