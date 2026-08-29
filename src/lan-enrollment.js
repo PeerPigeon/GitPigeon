@@ -124,7 +124,11 @@ export async function startLanApprovalService(indexSession, {
   const subscriptions = new Map();
   let closed = false;
   let publishing = false;
-  let lastBucket = null;
+  // Buckets this service has written and not yet garbage-collected. Starts
+  // drained: with no requests there is nothing to publish and nothing to
+  // clear.
+  const publishedBuckets = new Set();
+  let drained = true;
 
   await bind(socket, LAN_MULTICAST_PORT);
   socket.addMembership(LAN_MULTICAST_ADDRESS);
@@ -164,7 +168,12 @@ export async function startLanApprovalService(indexSession, {
         subscriptions.delete(requestId);
       }
       const bucket = Math.floor(now / requestBucketMs);
-      if (bucket !== lastBucket || requests.size > 0) {
+      // Publish ONLY while requests are pending, plus one clearing record
+      // when they drain. Writing a record on every bucket rollover leaked an
+      // immortal key every five seconds of uptime — 102k records and 55MB of
+      // index-room storage in under a week — and gossip anti-entropy choked
+      // reconciling the room. Nothing prunes what nothing deletes.
+      if (requests.size > 0 || !drained) {
         await storage.put('public', deviceRequestsKey(indexId, bucket), {
           protocol: DEVICE_REQUEST_PROTOCOL,
           kind: 'requests',
@@ -174,7 +183,15 @@ export async function startLanApprovalService(indexSession, {
             .filter((record) => !record.grantedAt)
             .map((record) => record.request),
         });
-        lastBucket = bucket;
+        publishedBuckets.add(bucket);
+        drained = requests.size === 0;
+      }
+      // Browsers read the current bucket and the two before it; anything this
+      // service wrote beyond that window is garbage nobody will read again.
+      for (const published of [...publishedBuckets]) {
+        if (published > bucket - 3) continue;
+        try { await storage.delete('public', deviceRequestsKey(indexId, published)); } catch { /* replicas expire it */ }
+        publishedBuckets.delete(published);
       }
       if (indexSession.node.getConnectedPeers().length === 0) return;
       for (const record of requests.values()) {
