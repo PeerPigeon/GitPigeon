@@ -196,9 +196,12 @@ test('a service from an older build is not treated as already running', async ()
   // A running service keeps serving its own code. The protocol number only
   // changes when the wire changes, so without a build check a new release
   // installed and the previous process carried on serving indefinitely — new
-  // behaviour never took effect.
+  // behaviour never took effect. The check is ORDERED, not an inequality:
+  // the auto-updater legitimately moves the service ahead of an old
+  // /usr/local/bin shim, and treating "different" as "stale" made that shim
+  // kill the newer healthy service on every invocation.
   assert.match(source, /buildVersion: GITPIGEON_VERSION/);
-  assert.match(source, /const stale = current\.running && current\.buildVersion !== GITPIGEON_VERSION/);
+  assert.match(source, /const stale = current\.running && isNewerVersion\(GITPIGEON_VERSION, current\.buildVersion\)/);
   assert.match(source, /if \(current\.running && current\.compatible && !stale\) return/);
 });
 

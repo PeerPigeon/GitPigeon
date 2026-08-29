@@ -4,6 +4,7 @@ import { mkdir, readdir, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { spawn } from 'node:child_process';
 import { deviceHostName } from './device-name.js';
 import { DEFAULT_POLL_MS, DEFAULT_SYNC_WAIT_MS } from './constants.js';
 import { RepositoryCache } from './cache.js';
@@ -56,7 +57,7 @@ import { createTerminalHistory, terminalHistoryKey } from './terminal-history.js
 import { RealtimeWorkspaceServer } from './realtime-server.js';
 import { WorkspaceFiles, workspaceDigest } from './workspace.js';
 import { liveWorkspaceDigest } from './live-workspace.js';
-import { clearInstalledUpdate, startAutomaticUpdates } from './auto-update.js';
+import { clearInstalledUpdate, isNewerVersion, readInstalledUpdate, startAutomaticUpdates } from './auto-update.js';
 import { pullPeerUpdateOnce, startPeerUpdates } from './peer-update.js';
 import { GITPIGEON_VERSION, IS_STANDALONE } from './version.js';
 
@@ -2384,7 +2385,43 @@ async function commandDoctor(args, cwd) {
   console.log(`Repository:  ${repository.root}`);
 }
 
+/**
+ * A pkg-installed /usr/local/bin binary is frozen until someone reruns an
+ * installer with root, while the auto-updater keeps moving the service ahead
+ * of it. That version skew is what let an outdated shim kill a healthy newer
+ * service. Every standalone invocation therefore delegates to the newest
+ * verified update binary when one is ahead of this build — whatever is on
+ * disk at the shim path stops mattering, permanently.
+ */
+async function delegateToInstalledUpdate(argv) {
+  if (!IS_STANDALONE || process.env.GITPIGEON_NO_DELEGATE === '1') return false;
+  const installed = await readInstalledUpdate(machineIndexRoot()).catch(() => null);
+  if (!installed || !isNewerVersion(installed.releaseVersion, GITPIGEON_VERSION)) return false;
+  if (path.resolve(installed.executable) === path.resolve(process.execPath)) return false;
+  let code;
+  try {
+    code = await new Promise((resolve, reject) => {
+      const child = spawn(installed.executable, argv, {
+        stdio: 'inherit',
+        windowsHide: true,
+        shell: false,
+        // The guard breaks delegation loops when a corrupt update record
+        // claims a version ahead of the binary it points at.
+        env: { ...process.env, GITPIGEON_NO_DELEGATE: '1' },
+      });
+      child.on('error', reject);
+      child.on('close', (value) => resolve(value ?? 1));
+    });
+  } catch {
+    // The update binary vanished between the record check and the spawn;
+    // this build still works, so run the command here instead.
+    return false;
+  }
+  process.exit(code);
+}
+
 export async function main(argv = process.argv.slice(2), options = {}) {
+  await delegateToInstalledUpdate(argv);
   const args = [...argv];
   const cwd = options.cwd ?? process.cwd();
   const verbose = takeFlag(args, '--verbose');

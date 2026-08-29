@@ -8,8 +8,13 @@ stage=$(mktemp -d)
 scripts=$(mktemp -d)
 trap 'rm -rf "$stage" "$scripts"' EXIT
 
-install -d "$stage/usr/local/bin" "$stage/Applications/GitPigeon.app/Contents/MacOS"
-install -m 0755 "$binary" "$stage/usr/local/bin/git-pigeon"
+install -d "$stage/usr/local/bin" "$stage/usr/local/libexec/gitpigeon" "$stage/Applications/GitPigeon.app/Contents/MacOS"
+# /usr/local/bin gets a stable launcher, never the binary itself: the binary
+# auto-updates into the user's state directory, and a raw binary at the shim
+# path is frozen until someone reruns an installer with root. The launcher
+# never has to change, so this is the last time root touches it.
+install -m 0755 "$binary" "$stage/usr/local/libexec/gitpigeon/git-pigeon"
+install -m 0755 "$(dirname "$0")/git-pigeon-launcher.sh" "$stage/usr/local/bin/git-pigeon"
 printf '%s\n' '#!/bin/sh' \
   'case "${1-}" in' \
   '  gitpigeon:*) exec /usr/local/bin/git-pigeon protocol "$1" ;;' \
