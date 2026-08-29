@@ -6,7 +6,7 @@ import process from 'node:process';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { readInstalledUpdate } from './auto-update.js';
+import { isNewerVersion, readInstalledUpdate } from './auto-update.js';
 import { GITPIGEON_VERSION } from './version.js';
 
 const STANDALONE = typeof __GITPIGEON_STANDALONE__ === 'boolean'
@@ -214,9 +214,12 @@ export async function startWatchService({
   if (!root) throw new Error('GitPigeon service state root is required');
   return await withServiceStartLock(root, async () => {
     const current = await watchServiceStatus(root);
-    // A running service from an older build keeps serving its own code, so a
-    // freshly installed release would never take effect.
-    const stale = current.running && current.buildVersion !== GITPIGEON_VERSION;
+    // A running service from an OLDER build keeps serving its own code, so a
+    // freshly installed release must replace it. The comparison is ordered,
+    // not an inequality: the auto-updater moves the service ahead of the
+    // /usr/local/bin shim, and an outdated shim that treated "different" as
+    // "stale" killed the newer healthy service on every `git pigeon init`.
+    const stale = current.running && isNewerVersion(GITPIGEON_VERSION, current.buildVersion);
     if (current.running && current.compatible && !stale) return { started: false, ...current };
 
     // Replace every legacy per-repository watcher before creating the one
