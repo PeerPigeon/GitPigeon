@@ -249,13 +249,36 @@ export async function startWatchService({
       ];
       if (pollMs !== undefined) args.push(`--poll=${pollMs}ms`);
       if (verbose) args.push('--verbose');
-      child = spawn(executable, args, {
-        cwd: root,
-        detached: true,
-        windowsHide: true,
-        shell: false,
-        stdio: ['ignore', output.fd, output.fd],
-      });
+      // A detached service inherits its spawner's descriptor limit — 256
+      // when the chain started from launchd/Finder instead of a terminal.
+      // The mesh node alone (ICE sockets, data channels, signaling, PTYs,
+      // git spawns, relay mirrors) needs more than that, and running out
+      // fails fs.watch with EMFILE and stalls WebRTC mid-negotiation. Node
+      // cannot raise its own rlimit, so the POSIX spawn goes through sh to
+      // lift the soft limit before exec; the hard limit is the ceiling and
+      // every fallback keeps the service starting even if raising fails.
+      if (process.platform === 'win32') {
+        child = spawn(executable, args, {
+          cwd: root,
+          detached: true,
+          windowsHide: true,
+          shell: false,
+          stdio: ['ignore', output.fd, output.fd],
+        });
+      } else {
+        child = spawn('/bin/sh', [
+          '-c',
+          'ulimit -n 65536 2>/dev/null || ulimit -n 10240 2>/dev/null || true; exec "$@"',
+          'gitpigeon-service',
+          executable,
+          ...args,
+        ], {
+          cwd: root,
+          detached: true,
+          shell: false,
+          stdio: ['ignore', output.fd, output.fd],
+        });
+      }
       child.unref();
     } finally {
       await output.close();

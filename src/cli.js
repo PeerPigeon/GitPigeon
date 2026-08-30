@@ -487,6 +487,9 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   }
   let changeTimer;
   let filesystemWatcher;
+  let watcherRetryTimer;
+  let watcherRetryMs = 5_000;
+  let watcherFallbackTimer;
   let peerRefreshTimer;
   let started = false;
   let starting = false;
@@ -543,6 +546,57 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     await synchronizer.liveWorkspace?.pruneTrash?.().catch?.(() => {});
   };
 
+  // A repository must NEVER silently lose change detection. `fs.watch` can
+  // fail at creation (EMFILE when the process is out of descriptors) or die
+  // later through its 'error' event; either way the repo would look watched
+  // while nothing publishes. So a failed watcher is retried with backoff,
+  // and until one is live a slow digest poll keeps sync moving regardless.
+  const startFallbackPolling = () => {
+    if (watcherFallbackTimer || stopped) return;
+    watcherFallbackTimer = setInterval(() => {
+      publishChanges().catch((error) => log.error(error));
+    }, 5_000);
+  };
+
+  const stopFallbackPolling = () => {
+    if (!watcherFallbackTimer) return;
+    clearInterval(watcherFallbackTimer);
+    watcherFallbackTimer = undefined;
+  };
+
+  const scheduleWatcherRetry = () => {
+    if (watcherRetryTimer || stopped) return;
+    startFallbackPolling();
+    watcherRetryTimer = setTimeout(() => {
+      watcherRetryTimer = undefined;
+      startFilesystemWatcher();
+    }, watcherRetryMs);
+    watcherRetryMs = Math.min(watcherRetryMs * 2, 60_000);
+  };
+
+  const startFilesystemWatcher = () => {
+    if (filesystemWatcher || stopped) return;
+    try {
+      filesystemWatcher = watchFilesystem(repository.root, { recursive: true }, (_event, filename) => {
+        const changed = String(filename ?? "").replaceAll("\\", "/");
+        if (changed === ".git/gitpigeon" || changed.startsWith(".git/gitpigeon/")) return;
+        realtimeServer.filesystemChanged(changed).catch((error) => log.error(error));
+        schedulePublish();
+      });
+      filesystemWatcher.on("error", (error) => {
+        log.error(new Error(`Filesystem watcher for ${repository.root} died, retrying: ${error.message}`));
+        filesystemWatcher?.close();
+        filesystemWatcher = undefined;
+        scheduleWatcherRetry();
+      });
+      watcherRetryMs = 5_000;
+      stopFallbackPolling();
+    } catch (error) {
+      log.error(new Error(`Filesystem watcher for ${repository.root} failed to start, retrying: ${error.message}`));
+      scheduleWatcherRetry();
+    }
+  };
+
   const activate = async () => {
     if (started || starting || stopped) return;
     starting = true;
@@ -551,13 +605,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       await synchronizer.start();
       previousDigest = await synchronizer.localDigest();
       started = true;
-      filesystemWatcher = watchFilesystem(repository.root, { recursive: true }, (_event, filename) => {
-        const changed = String(filename ?? "").replaceAll("\\", "/");
-        if (changed === ".git/gitpigeon" || changed.startsWith(".git/gitpigeon/")) return;
-        realtimeServer.filesystemChanged(changed).catch((error) => log.error(error));
-        schedulePublish();
-      });
-      filesystemWatcher.on("error", (error) => log.error(error));
+      startFilesystemWatcher();
     } catch (error) {
       log.error(error);
     } finally {
@@ -592,6 +640,8 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       if (changeTimer) clearTimeout(changeTimer);
       clearInterval(sweepTimer);
       filesystemWatcher?.close();
+      if (watcherRetryTimer) clearTimeout(watcherRetryTimer);
+      stopFallbackPolling();
       if (peerRefreshTimer) clearTimeout(peerRefreshTimer);
       node.off('peerConnected', onPeerConnected);
       // A graceful shutdown says goodbye BEFORE tearing down — as a
