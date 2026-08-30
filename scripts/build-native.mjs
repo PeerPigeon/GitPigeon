@@ -89,6 +89,15 @@ await writeFile(config, `${JSON.stringify({
 await run(process.execPath, ["--experimental-sea-config", config]);
 await copyFile(process.execPath, output);
 if (process.platform === "darwin") {
+  // A universal node (the macOS installer ships one) carries the SEA fuse
+  // once per architecture slice, and postject refuses a binary where the
+  // sentinel appears twice. Thin the copy to the build machine's native
+  // slice before injection; a single-arch node passes through untouched.
+  const arch = process.arch === "arm64" ? "arm64" : "x86_64";
+  await run("lipo", ["-thin", arch, "-output", `${output}.thin`, output])
+    .then(() => copyFile(`${output}.thin`, output))
+    .then(() => rm(`${output}.thin`, { force: true }))
+    .catch(() => { /* already single-arch */ });
   await run("codesign", ["--remove-signature", output]).catch(() => {});
 }
 const postject = path.join(root, "node_modules", "postject", "dist", "cli.js");
