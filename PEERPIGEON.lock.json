@@ -1,13 +1,13 @@
 {
   "repository": "https://github.com/PeerPigeon/PeerPigeon",
-  "commit": "b1923ac2120fe2400b349f7b94edec5702ed4903",
+  "commit": "191ef5075c29b860b6f1785530b882d8ac81c6c7",
   "committedAt": "2026-08-30T00:00:00Z",
-  "commitMessage": "Pin freertc to the outbound-proof send gate",
+  "commitMessage": "Pin freertc to the first-pong trust gate",
   "packageVersion": "1.0.0",
   "transitivePins": {
     "freertc": {
       "repository": "https://github.com/draeder/freertc",
-      "commit": "9b1fe84f2da1e571f7515151411b715d7ad87eda"
+      "commit": "7ea6a7fb36e74c073b7e4c12cb5f024c1d322857"
     }
   },
   "resolvedAt": "2026-08-30T00:00:00Z"
