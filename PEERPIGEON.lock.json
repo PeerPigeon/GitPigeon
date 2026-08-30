@@ -1,13 +1,13 @@
 {
   "repository": "https://github.com/PeerPigeon/PeerPigeon",
-  "commit": "adbc15f142ba426fe93dd703e3d693f5bf39a53f",
+  "commit": "b98997620750b9174af907b5412478948836e3b9",
   "committedAt": "2026-08-30T00:00:00Z",
-  "commitMessage": "Race registry discovery instead of aborting it",
+  "commitMessage": "Pin freertc to the expiring pong proof",
   "packageVersion": "1.0.0",
   "transitivePins": {
     "freertc": {
       "repository": "https://github.com/draeder/freertc",
-      "commit": "e4d5b6293599bb29d0b2a959aae8844a167d147f"
+      "commit": "65ef61e1fa83bc934e509e603b78ff587f9ac7f9"
     }
   },
   "resolvedAt": "2026-08-30T00:00:00Z"
