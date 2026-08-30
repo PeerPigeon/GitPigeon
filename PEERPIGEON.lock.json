@@ -1,14 +1,14 @@
 {
   "repository": "https://github.com/PeerPigeon/PeerPigeon",
-  "commit": "659c2821f05dbfccb75c95f63699073955ab73d0",
-  "committedAt": "2026-08-22T02:09:06Z",
-  "commitMessage": "Back off rapidly flapping peer transports",
+  "commit": "7ad42d525d16a34a3fe6d77224e5e839950ac7e8",
+  "committedAt": "2026-08-30T00:00:00Z",
+  "commitMessage": "Pin freertc to the dead-connection send guard",
   "packageVersion": "1.0.0",
   "transitivePins": {
     "freertc": {
       "repository": "https://github.com/draeder/freertc",
-      "commit": "614254cf4b5185da917dca714ba7f65581191aae"
+      "commit": "247dc3072ded7f5c8222366b0a789255e4ec996e"
     }
   },
-  "resolvedAt": "2026-08-22T02:09:06Z"
+  "resolvedAt": "2026-08-30T00:00:00Z"
 }
