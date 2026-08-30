@@ -1,13 +1,13 @@
 {
   "repository": "https://github.com/PeerPigeon/PeerPigeon",
-  "commit": "ad945e47ce31bbea03dd20eaa158e2fe92b3aaf5",
+  "commit": "b30820addd327aec33d3dfa70fa08fc3b2dfdd2b",
   "committedAt": "2026-08-30T00:00:00Z",
-  "commitMessage": "Pin freertc to transport-level payload chunking",
+  "commitMessage": "Pin freertc to dormant edge parking",
   "packageVersion": "1.0.0",
   "transitivePins": {
     "freertc": {
       "repository": "https://github.com/draeder/freertc",
-      "commit": "5be65cbcbf1072dac34d8afe721ab551a3dc7dda"
+      "commit": "58c8996afa833f68eaae347061b5dd9a268f9029"
     }
   },
   "resolvedAt": "2026-08-30T00:00:00Z"
