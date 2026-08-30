@@ -1,13 +1,13 @@
 {
   "repository": "https://github.com/PeerPigeon/PeerPigeon",
-  "commit": "3dd17ea0106744b8d9f2b6fcdf7e14f445b0c31e",
+  "commit": "b1923ac2120fe2400b349f7b94edec5702ed4903",
   "committedAt": "2026-08-30T00:00:00Z",
-  "commitMessage": "Leave transiently unreachable peers alone on send refusal",
+  "commitMessage": "Pin freertc to the outbound-proof send gate",
   "packageVersion": "1.0.0",
   "transitivePins": {
     "freertc": {
       "repository": "https://github.com/draeder/freertc",
-      "commit": "4506ff4447c83866cc5f43bfdef9e18e8a12fad3"
+      "commit": "9b1fe84f2da1e571f7515151411b715d7ad87eda"
     }
   },
   "resolvedAt": "2026-08-30T00:00:00Z"
