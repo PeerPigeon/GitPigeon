@@ -1,13 +1,13 @@
 {
   "repository": "https://github.com/PeerPigeon/PeerPigeon",
-  "commit": "b98997620750b9174af907b5412478948836e3b9",
+  "commit": "ad945e47ce31bbea03dd20eaa158e2fe92b3aaf5",
   "committedAt": "2026-08-30T00:00:00Z",
-  "commitMessage": "Pin freertc to the expiring pong proof",
+  "commitMessage": "Pin freertc to transport-level payload chunking",
   "packageVersion": "1.0.0",
   "transitivePins": {
     "freertc": {
       "repository": "https://github.com/draeder/freertc",
-      "commit": "65ef61e1fa83bc934e509e603b78ff587f9ac7f9"
+      "commit": "5be65cbcbf1072dac34d8afe721ab551a3dc7dda"
     }
   },
   "resolvedAt": "2026-08-30T00:00:00Z"

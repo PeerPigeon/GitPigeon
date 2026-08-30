@@ -1,6 +1,6 @@
 {
   "name": "gitpigeon",
-  "version": "0.13.46",
+  "version": "0.13.47",
   "description": "Real-time, peer-to-peer synchronization for native Git repositories",
   "type": "module",
   "bin": {
@@ -35,13 +35,13 @@
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "node-pty": "^1.1.0",
-    "peerpigeon": "https://github.com/PeerPigeon/PeerPigeon/archive/b98997620750b9174af907b5412478948836e3b9.tar.gz",
+    "peerpigeon": "https://github.com/PeerPigeon/PeerPigeon/archive/ad945e47ce31bbea03dd20eaa158e2fe92b3aaf5.tar.gz",
     "werift": "0.24.4",
     "ws": "8.21.3",
     "yjs": "^13.6.32"
   },
   "overrides": {
-    "freertc": "git+https://github.com/draeder/freertc.git#65ef61e1fa83bc934e509e603b78ff587f9ac7f9"
+    "freertc": "git+https://github.com/draeder/freertc.git#5be65cbcbf1072dac34d8afe721ab551a3dc7dda"
   },
   "devDependencies": {
     "esbuild": "^0.25.12",
