@@ -1,13 +1,13 @@
 {
   "repository": "https://github.com/PeerPigeon/PeerPigeon",
-  "commit": "191ef5075c29b860b6f1785530b882d8ac81c6c7",
+  "commit": "adbc15f142ba426fe93dd703e3d693f5bf39a53f",
   "committedAt": "2026-08-30T00:00:00Z",
-  "commitMessage": "Pin freertc to the first-pong trust gate",
+  "commitMessage": "Race registry discovery instead of aborting it",
   "packageVersion": "1.0.0",
   "transitivePins": {
     "freertc": {
       "repository": "https://github.com/draeder/freertc",
-      "commit": "7ea6a7fb36e74c073b7e4c12cb5f024c1d322857"
+      "commit": "e4d5b6293599bb29d0b2a959aae8844a167d147f"
     }
   },
   "resolvedAt": "2026-08-30T00:00:00Z"
