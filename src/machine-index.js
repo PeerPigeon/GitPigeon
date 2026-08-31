@@ -317,6 +317,26 @@ export async function unregisterMachinePigeon(repository, { root = machineIndexR
   });
 }
 
+// Tombstones a repository by ID even when no clone or registration remains on
+// any machine — the escape hatch for directory records orphaned by retired or
+// re-paired devices that will never publish an update again.
+export async function tombstoneMachinePigeon(repositoryId, { root = machineIndexRoot(), now = Date.now() } = {}) {
+  const id = String(repositoryId ?? '');
+  if (!DEVICE.test(id)) throw new Error('Invalid GitPigeon repository ID');
+  return await withLock(root, async () => {
+    const value = await readState(root);
+    const previous = value.entries.length;
+    value.entries = value.entries.filter((entry) => entry.repositoryId !== id);
+    const tombstones = new Map((value.removed ?? []).map((item) => [item.repositoryId, item]));
+    tombstones.set(id, { repositoryId: id, removedAt: new Date(now).toISOString() });
+    value.removed = [...tombstones.values()]
+      .filter((item) => now - Date.parse(item.removedAt) < REMOVED_MEMORY_MS)
+      .slice(-100);
+    await writeState(root, value);
+    return { unregistered: previous - value.entries.length, state: value };
+  });
+}
+
 export async function markMachinePigeonStopped(repository, {
   root = machineIndexRoot(),
   pid = process.pid,

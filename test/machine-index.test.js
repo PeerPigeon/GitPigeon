@@ -267,3 +267,37 @@ test('an unwatched repository is stated as removed, not just omitted', async (t)
   assert.equal(republished.removed, undefined);
   assert.equal(republished.pigeons.length, 1);
 });
+
+test('a repository can be tombstoned by ID alone to clear orphaned directory records', async (t) => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const { registerMachinePigeon, tombstoneMachinePigeon, loadMachineIndex } =
+    await import('../src/machine-index.js');
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-tombstone-id-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  // A record orphaned by a retired or re-paired machine lists a repository no
+  // machine still watches. Nothing can unwatch it by name — there is no clone
+  // or registration left anywhere — so the ID is the only handle.
+  const orphaned = await tombstoneMachinePigeon('o'.repeat(32), { root, now: 1_700_000_000_000 });
+  assert.equal(orphaned.unregistered, 0);
+  assert.deepEqual(orphaned.state.removed, [
+    { repositoryId: 'o'.repeat(32), removedAt: '2023-11-14T22:13:20.000Z' },
+  ]);
+
+  // When the ID is still registered locally, tombstoning removes the entry
+  // too; a tombstone alongside a live local entry converges to removal anyway.
+  const repository = { root: path.join(root, 'repo'), gitDir: path.join(root, 'repo/.git') };
+  await registerMachinePigeon(repository, {
+    repositoryId: 'r'.repeat(32),
+    secret: 'z'.repeat(43),
+    deviceId: 'd'.repeat(32),
+    name: 'test',
+  }, { root, pid: null });
+  const registered = await tombstoneMachinePigeon('r'.repeat(32), { root });
+  assert.equal(registered.unregistered, 1);
+  assert.equal((await loadMachineIndex({ root })).entries.length, 0);
+
+  await assert.rejects(tombstoneMachinePigeon('!bad', { root }), /Invalid GitPigeon repository ID/);
+});

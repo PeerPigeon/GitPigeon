@@ -43,6 +43,7 @@ export {
   markMachinePigeonsStopped,
   openDashboard,
   registerMachinePigeon,
+  tombstoneMachinePigeon,
   unregisterMachinePigeon,
 } from './machine-index.js';
 export * from './device-grants.js';

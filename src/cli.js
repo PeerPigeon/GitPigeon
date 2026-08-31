@@ -38,6 +38,7 @@ import {
   markMachinePigeonsStopped,
   openDashboard,
   registerMachinePigeon,
+  tombstoneMachinePigeon,
   unregisterMachinePigeon,
 } from './machine-index.js';
 import {
@@ -77,7 +78,8 @@ Pair a browser or device
 
 Repositories
   git pigeon init [INVITE] [DIR]        Start syncing a repository
-  git pigeon unwatch [REPO]             Stop syncing one
+  git pigeon unwatch [REPO | --id ID]   Stop syncing one (--id tombstones a
+                                        repository no machine still watches)
   git pigeon list                       Show what this machine syncs
   git pigeon invite                     Print an invite for one repository
   git pigeon share                      Print a public read-only share link
@@ -2140,6 +2142,15 @@ async function commandList(args) {
 }
 
 async function commandUnwatch(args, cwd) {
+  const repositoryId = takeOption(args, '--id');
+  if (repositoryId) {
+    if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+    const result = await tombstoneMachinePigeon(repositoryId);
+    console.log(result.unregistered
+      ? `Removed and tombstoned ${repositoryId} in the encrypted PeerPigeon index.`
+      : `Tombstoned ${repositoryId} in the encrypted PeerPigeon index. Paired browsers will drop it once the tombstone propagates.`);
+    return;
+  }
   const name = args.shift();
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   if (!name) {
