@@ -1,14 +1,14 @@
 {
   "repository": "https://github.com/PeerPigeon/PeerPigeon",
-  "commit": "1d6bcd2161b9937a3cc71f268bf4658cbafda38c",
-  "committedAt": "2026-08-31T22:33:42Z",
-  "commitMessage": "Stop the watcher transport recovery from killing its own handshakes",
+  "commit": "388b0f881cd82e5eedbfb02dcc90597b1d9025d9",
+  "committedAt": "2026-08-31T23:42:39Z",
+  "commitMessage": "Pin freertc to the transient-transport ping gate",
   "packageVersion": "1.0.0",
   "transitivePins": {
     "freertc": {
       "repository": "https://github.com/draeder/freertc",
-      "commit": "1055aa5ca84d650f93ed7525e27d0e799d4f011d"
+      "commit": "d8c606cb343b052c3ebcabf2d9a7e3062e5d4690"
     }
   },
-  "resolvedAt": "2026-08-31T22:33:42Z"
+  "resolvedAt": "2026-08-31T23:42:39Z"
 }
