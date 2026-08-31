@@ -2410,7 +2410,41 @@ async function commandProtocol(args, verbose) {
 async function commandStatus(args, cwd) {
   const json = takeFlag(args, '--json');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
-  const { repository, config } = await configuredRepository(cwd);
+  // Outside a configured repository, status is still a real question — is
+  // the machine-wide watcher running, and what does it watch? Erroring here
+  // made the most natural health check fail exactly where people ran it.
+  let configured = null;
+  try {
+    configured = await configuredRepository(cwd);
+  } catch {
+    const watcher = await watchServiceStatus(machineIndexRoot());
+    const registrations = await listMachinePigeons({ activeOnly: false });
+    const repositories = watchedRepositories(registrations).map((repository) => ({
+      name: repository.name,
+      repositoryId: repository.repositoryId,
+      repository: repository.root,
+      watching: watcher.running && watchServiceHasRepository(watcher, repository.root),
+    }));
+    const value = {
+      repository: null,
+      service: watcher.running ? 'running' : 'stopped',
+      watcherPid: watcher.running ? watcher.pid : null,
+      repositories,
+    };
+    if (json) {
+      console.log(JSON.stringify(value, null, 2));
+      return;
+    }
+    console.log('This directory is not a GitPigeon repository.');
+    console.log(`Watcher service:  ${watcher.running ? `running (PID ${watcher.pid})` : 'stopped'}`);
+    console.log(`Repositories:     ${repositories.length}`);
+    for (const entry of repositories) {
+      console.log(`  ${entry.name.padEnd(Math.max(...repositories.map((r) => r.name.length)))}  ${entry.repositoryId.slice(0, 10)}  ${entry.watching ? 'watching' : 'stopped'}  ${entry.repository}`);
+    }
+    if (!repositories.length) console.log('Run `git pigeon init` in a repository to start syncing one.');
+    return;
+  }
+  const { repository, config } = configured;
   const cache = new RepositoryCache(repository.gitDir);
   const trackedFiles = await new WorkspaceFiles(repository, cache).list();
   const state = await cache.loadState();
