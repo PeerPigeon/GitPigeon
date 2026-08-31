@@ -189,7 +189,12 @@ async function writeState(root, value) {
 async function withLock(root, operation) {
   await mkdir(root, { recursive: true, mode: 0o700 });
   const { lock } = statePaths(root);
-  const deadline = Date.now() + 5_000;
+  // The deadline must outlive LOCK_STALE_MS. When it was five seconds, a
+  // lock left by a crashed holder aged five-to-ten seconds could never be
+  // stolen before the deadline hit — every waiter timed out, a restarting
+  // service died on the spot, and a machine sat headless until someone ran
+  // `git pigeon start` by hand.
+  const deadline = Date.now() + LOCK_STALE_MS + 5_000;
   while (true) {
     try {
       const handle = await open(lock, 'wx', 0o600);
