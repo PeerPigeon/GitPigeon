@@ -2179,8 +2179,10 @@ async function commandUnwatch(args, cwd) {
     throw new Error(`Repository name "${name}" is ambiguous:\n${matches.map(({ root }) => `  ${root}`).join('\n')}`);
   }
   const match = matches[0];
-  const repository = await GitRepository.discover(match.root);
-  await unregisterMachinePigeon(repository);
+  // Unregister the recorded path directly: a clone that was moved or deleted
+  // from disk is exactly the registration unwatch exists to clean up, and
+  // discovering it as a Git repository can never succeed then.
+  await unregisterMachinePigeon({ root: match.root });
   console.log(`Removed ${match.name} from the encrypted PeerPigeon index. The machine-wide service is still running.`);
 }
 

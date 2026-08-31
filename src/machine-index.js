@@ -305,8 +305,14 @@ export async function unregisterMachinePigeon(repository, { root = machineIndexR
     // blank the dashboard — which also meant a removed repository never
     // disappeared: the live record simply stopped mentioning it, and the
     // cache filled the silence forever.
+    const remaining = new Set(value.entries.map((item) => item.repositoryId));
     const tombstones = new Map((value.removed ?? []).map((item) => [item.repositoryId, item]));
     for (const item of dropped) {
+      // A duplicate clone elsewhere on this machine still registers the
+      // repository, so dropping this path does not remove the repository.
+      // Tombstoning it anyway outdated the surviving registration and the
+      // fleet converged on deleting a repository every machine still wanted.
+      if (remaining.has(item.repositoryId)) continue;
       tombstones.set(item.repositoryId, { repositoryId: item.repositoryId, removedAt: new Date(now).toISOString() });
     }
     value.removed = [...tombstones.values()]

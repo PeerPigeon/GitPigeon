@@ -268,6 +268,41 @@ test('an unwatched repository is stated as removed, not just omitted', async (t)
   assert.equal(republished.pigeons.length, 1);
 });
 
+test('unregistering one duplicate clone does not tombstone the surviving registration', async (t) => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const { registerMachinePigeon, unregisterMachinePigeon, loadMachineIndex } =
+    await import('../src/machine-index.js');
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-duplicate-clone-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const config = {
+    repositoryId: 'e'.repeat(32),
+    secret: 'z'.repeat(43),
+    deviceId: 'd'.repeat(32),
+    name: 'test',
+  };
+  await registerMachinePigeon({ root: path.join(root, 'test') }, config, { root, pid: null });
+  await registerMachinePigeon({ root: path.join(root, 'test-2') }, config, { root, pid: null });
+
+  // Dropping one path while another still registers the repository is a
+  // rename or de-duplication, not a removal. Tombstoning it anyway outdated
+  // the surviving registration and the fleet deleted a repository every
+  // machine still wanted.
+  await unregisterMachinePigeon({ root: path.join(root, 'test-2') }, { root });
+  const state = await loadMachineIndex({ root });
+  assert.equal(state.entries.length, 1);
+  assert.equal(state.entries[0].repository, path.join(root, 'test'));
+  assert.deepEqual(state.removed, []);
+
+  // Dropping the last path is a removal and states one.
+  await unregisterMachinePigeon({ root: path.join(root, 'test') }, { root });
+  const removed = await loadMachineIndex({ root });
+  assert.equal(removed.entries.length, 0);
+  assert.equal(removed.removed.length, 1);
+  assert.equal(removed.removed[0].repositoryId, 'e'.repeat(32));
+});
+
 test('a repository can be tombstoned by ID alone to clear orphaned directory records', async (t) => {
   const { mkdtemp, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
