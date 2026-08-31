@@ -50,7 +50,7 @@ import {
 import { startDeviceApprovalResponder } from './device-approval-mesh.js';
 import { loadPairingKeyPair, localPairingCode } from './pairing-identity.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
-import { installNativeIntegration } from './native-install.js';
+import { installNativeIntegration, refreshNativeCommandShim } from './native-install.js';
 import { ControlServer } from './control-server.js';
 import { RepositorySynchronizer } from './protocol.js';
 import { TerminalServer } from './terminal-server.js';
@@ -1069,6 +1069,15 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     indexWatcher.on("error", (error) => log.error(error));
     await control.ready();
     log.info(`GitPigeon service is watching ${sessions.size} ${sessions.size === 1 ? 'repository' : 'repositories'} as PID ${process.pid}`);
+    if (IS_STANDALONE) {
+      // Machines installed before the shim chased current.json keep a stale
+      // `git pigeon` on PATH forever; every service start heals it.
+      try {
+        await refreshNativeCommandShim();
+      } catch (error) {
+        log.warn(`Could not refresh the git-pigeon command shim: ${error.message}`);
+      }
+    }
     automaticUpdates = startAutomaticUpdates({
       enabled: IS_STANDALONE,
       root,

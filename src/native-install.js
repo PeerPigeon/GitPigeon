@@ -43,6 +43,29 @@ function shellCommand(invocation, trailing = '') {
   return `${invocation.map(shellQuote).join(' ')}${trailing}`;
 }
 
+// Mirrors machineIndexRoot() for the platform the shim will run on.
+function shimStateDirExpression(platform) {
+  return platform === 'darwin'
+    ? '"${GITPIGEON_STATE_DIR:-$HOME/Library/Application Support/GitPigeon}"'
+    : '"${GITPIGEON_STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gitpigeon}"';
+}
+
+// The shim must chase the automatically updated build at run time. Baking in
+// the install-time binary left `git pigeon` answering as an old build forever:
+// automatic updates replace the running service but never rewrite /usr/local.
+function shimScript(invocation, platform, trailing) {
+  return `#!/bin/sh
+current=${shimStateDirExpression(platform)}/updates/current.json
+if [ -f "$current" ]; then
+  target=$(sed -n 's/.*"executable"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' "$current")
+  if [ -n "$target" ] && [ -x "$target" ]; then
+    exec "$target"${trailing}
+  fi
+fi
+exec ${shellCommand(invocation, trailing)}
+`;
+}
+
 async function installMacOS(invocation, home, run) {
   const localBin = path.join(home, '.local', 'bin');
   const commandPath = path.join(localBin, 'git-pigeon');
@@ -51,10 +74,10 @@ async function installMacOS(invocation, home, run) {
   const macos = path.join(contents, 'MacOS');
   await mkdir(localBin, { recursive: true, mode: 0o755 });
   await mkdir(macos, { recursive: true, mode: 0o755 });
-  await writeFile(commandPath, `#!/bin/sh\nexec ${shellCommand(invocation, ' "$@"')}\n`, { mode: 0o755 });
+  await writeFile(commandPath, shimScript(invocation, 'darwin', ' "$@"'), { mode: 0o755 });
   await chmod(commandPath, 0o755);
   const handlerPath = path.join(macos, 'git-pigeon-handler');
-  await writeFile(handlerPath, `#!/bin/sh\nexec ${shellCommand(invocation, ' protocol "$1"')}\n`, { mode: 0o755 });
+  await writeFile(handlerPath, shimScript(invocation, 'darwin', ' protocol "$1"'), { mode: 0o755 });
   await chmod(handlerPath, 0o755);
   await writeFile(path.join(contents, 'Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -82,7 +105,7 @@ async function installLinux(invocation, home, run) {
   const desktop = path.join(applications, 'gitpigeon.desktop');
   await mkdir(localBin, { recursive: true, mode: 0o755 });
   await mkdir(applications, { recursive: true, mode: 0o755 });
-  await writeFile(commandPath, `#!/bin/sh\nexec ${shellCommand(invocation, ' "$@"')}\n`, { mode: 0o755 });
+  await writeFile(commandPath, shimScript(invocation, 'linux', ' "$@"'), { mode: 0o755 });
   await chmod(commandPath, 0o755);
   await writeFile(desktop, `[Desktop Entry]
 Name=GitPigeon
@@ -137,4 +160,23 @@ export async function installNativeIntegration({
   if (platform === 'darwin') return await installMacOS(invocation, home, run);
   if (platform === 'win32') return await installWindows(invocation, environment, run);
   return await installLinux(invocation, home, run);
+}
+
+// Rewrites just the `git pigeon` command shim. The service calls this on
+// every start so machines installed before the shim chased current.json heal
+// themselves on the next automatic update, with nobody running `install`.
+// Windows is untouched: its .cmd wrapper cannot resolve JSON portably, and the
+// installed binary there delegates to the newest update by itself.
+export async function refreshNativeCommandShim({
+  platform = process.platform,
+  home = os.homedir(),
+  invocation = currentGitPigeonInvocation(),
+} = {}) {
+  if (platform === 'win32') return null;
+  const localBin = path.join(home, '.local', 'bin');
+  const commandPath = path.join(localBin, 'git-pigeon');
+  await mkdir(localBin, { recursive: true, mode: 0o755 });
+  await writeFile(commandPath, shimScript(invocation, platform, ' "$@"'), { mode: 0o755 });
+  await chmod(commandPath, 0o755);
+  return { commandPath };
 }
