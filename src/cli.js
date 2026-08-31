@@ -2426,6 +2426,7 @@ async function commandStatus(args, cwd) {
       watching: watcher.running && watchServiceHasRepository(watcher, repository.root),
     }));
     const value = {
+      version: GITPIGEON_VERSION,
       repository: null,
       service: watcher.running ? 'running' : 'stopped',
       watcherPid: watcher.running ? watcher.pid : null,
@@ -2436,6 +2437,7 @@ async function commandStatus(args, cwd) {
       return;
     }
     console.log('This directory is not a GitPigeon repository.');
+    console.log(`GitPigeon:        ${GITPIGEON_VERSION}`);
     console.log(`Watcher service:  ${watcher.running ? `running (PID ${watcher.pid})` : 'stopped'}`);
     console.log(`Repositories:     ${repositories.length}`);
     for (const entry of repositories) {
@@ -2451,6 +2453,7 @@ async function commandStatus(args, cwd) {
   const watcher = await watchServiceStatus(machineIndexRoot());
   const registered = watchServiceHasRepository(watcher, repository.root);
   const value = {
+    version: GITPIGEON_VERSION,
     repository: repository.root,
     repositoryId: config.repositoryId,
     deviceId: config.deviceId,
@@ -2464,6 +2467,7 @@ async function commandStatus(args, cwd) {
   };
   if (json) console.log(JSON.stringify(value, null, 2));
   else {
+    console.log(`GitPigeon:        ${GITPIGEON_VERSION}`);
     console.log(`Repository:       ${value.repository}`);
     console.log(`Pigeon ID:        ${value.repositoryId}`);
     console.log(`Device:           ${value.deviceId}`);
