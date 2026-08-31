@@ -50,7 +50,7 @@ import {
 import { startDeviceApprovalResponder } from './device-approval-mesh.js';
 import { loadPairingKeyPair, localPairingCode } from './pairing-identity.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
-import { installNativeIntegration, refreshNativeCommandShim } from './native-install.js';
+import { ensureServiceWatchdog, installNativeIntegration, refreshNativeCommandShim, removeServiceWatchdog } from './native-install.js';
 import { ControlServer } from './control-server.js';
 import { RepositorySynchronizer } from './protocol.js';
 import { TerminalServer } from './terminal-server.js';
@@ -1076,6 +1076,14 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
         await refreshNativeCommandShim();
       } catch (error) {
         log.warn(`Could not refresh the git-pigeon command shim: ${error.message}`);
+      }
+      // Supervision installs itself the same way: after this, a service that
+      // dies for any reason is revived by launchd within a minute instead of
+      // staying down until someone runs `git pigeon start` by hand.
+      try {
+        await ensureServiceWatchdog();
+      } catch (error) {
+        log.warn(`Could not install the watcher supervision agent: ${error.message}`);
       }
     }
     automaticUpdates = startAutomaticUpdates({
@@ -2248,6 +2256,11 @@ export async function commandStop(args, {
 } = {}) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const root = indexRoot ?? machineIndexRoot();
+  if (IS_STANDALONE) {
+    // Stop means STOPPED: the supervision agent would otherwise revive the
+    // service within a minute of the person asking it to stay down.
+    try { await removeServiceWatchdog(); } catch { /* agent may not exist */ }
+  }
   const registrations = await listMachinePigeons({ root, activeOnly: false });
   const stoppedService = await stopWatchService(root);
   let discoveredPids;

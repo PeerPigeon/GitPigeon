@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { chmod, mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -160,6 +160,81 @@ export async function installNativeIntegration({
   if (platform === 'darwin') return await installMacOS(invocation, home, run);
   if (platform === 'win32') return await installWindows(invocation, environment, run);
   return await installLinux(invocation, home, run);
+}
+
+// A watcher that dies for any reason — a crashed restart, a stale lock, a
+// panic — used to stay down until a person ran `git pigeon start` by hand.
+// launchd is the supervisor macOS already ships: this agent runs
+// `git-pigeon start` once a minute, which no-ops while the service is
+// healthy and revives it when it is not. Worst-case downtime becomes one
+// minute instead of forever, with no change to how the service itself runs.
+const WATCHDOG_LABEL = 'dev.gitpigeon.watchdog';
+
+export function watchdogPlist(commandPath) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>${WATCHDOG_LABEL}</string>
+<key>ProgramArguments</key><array>
+<string>${commandPath}</string>
+<string>start</string>
+</array>
+<key>RunAtLoad</key><true/>
+<key>StartInterval</key><integer>60</integer>
+<key>ProcessType</key><string>Background</string>
+<key>StandardOutPath</key><string>/dev/null</string>
+<key>StandardErrorPath</key><string>/dev/null</string>
+</dict></plist>
+`;
+}
+
+export async function ensureServiceWatchdog({
+  platform = process.platform,
+  home = os.homedir(),
+  commandPath = path.join(os.homedir(), '.local', 'bin', 'git-pigeon'),
+  uid = process.getuid?.(),
+  run = execFile,
+} = {}) {
+  if (platform !== 'darwin' || uid === undefined) return null;
+  const agents = path.join(home, 'Library', 'LaunchAgents');
+  const plist = path.join(agents, `${WATCHDOG_LABEL}.plist`);
+  const content = watchdogPlist(commandPath);
+  let existing = null;
+  try { existing = await readFile(plist, 'utf8'); } catch { /* not installed yet */ }
+  const changed = existing !== content;
+  if (changed) {
+    await mkdir(agents, { recursive: true, mode: 0o755 });
+    await writeFile(plist, content, { mode: 0o644 });
+  }
+  let loaded = false;
+  try {
+    await run('launchctl', ['print', `gui/${uid}/${WATCHDOG_LABEL}`]);
+    loaded = true;
+  } catch { /* not loaded */ }
+  // Reload only when something actually changed: a bootout kills the agent's
+  // in-flight process, and the agent's own `start` invocation runs this very
+  // code — an unconditional reload would have it terminate itself mid-start.
+  if (changed && loaded) {
+    try { await run('launchctl', ['bootout', `gui/${uid}/${WATCHDOG_LABEL}`]); } catch { /* already gone */ }
+    loaded = false;
+  }
+  if (!loaded) await run('launchctl', ['bootstrap', `gui/${uid}`, plist]);
+  return { plist, changed };
+}
+
+// `git pigeon stop` means STOPPED: without this, the watchdog would revive
+// the service within a minute of the person asking it to stay down.
+export async function removeServiceWatchdog({
+  platform = process.platform,
+  home = os.homedir(),
+  uid = process.getuid?.(),
+  run = execFile,
+} = {}) {
+  if (platform !== 'darwin' || uid === undefined) return null;
+  const plist = path.join(home, 'Library', 'LaunchAgents', `${WATCHDOG_LABEL}.plist`);
+  try { await run('launchctl', ['bootout', `gui/${uid}/${WATCHDOG_LABEL}`]); } catch { /* not loaded */ }
+  await rm(plist, { force: true });
+  return { plist };
 }
 
 // Rewrites just the `git pigeon` command shim. The service calls this on
