@@ -974,7 +974,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
             await reply({ requestId, ok: true, already: true, target: existing.repository, deviceName: deviceHostName() });
             return;
           }
-          const base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), 'GitPigeon'));
+          const base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), 'Documents', 'GitPigeon'));
           await mkdir(base, { recursive: true });
           const target = await availableCloneTarget(
             base,
@@ -2348,7 +2348,7 @@ async function availableCloneTarget(base, name) {
 
 export async function materializeGrantedRepositories(values, {
   root = machineIndexRoot(),
-  base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), "GitPigeon")),
+  base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), "Documents", "GitPigeon")),
 } = {}) {
   if (!Array.isArray(values)) return [];
   if (values.length > 1_000) throw new Error("The approved GitPigeon index contains too many repositories");
@@ -2395,7 +2395,7 @@ async function commandProtocol(args, verbose) {
     sharedJoin = parseShareUrl(value);
   } catch { /* not a share link; fall through to the sealed clone flow */ }
   if (sharedJoin) {
-    const base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), 'GitPigeon'));
+    const base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), 'Documents', 'GitPigeon'));
     await mkdir(base, { recursive: true });
     const target = await availableCloneTarget(
       base,
@@ -2409,7 +2409,7 @@ async function commandProtocol(args, verbose) {
   const envelope = parseNativeCloneUrl(value);
   const grant = openDeviceGrant(identity, envelope, { purpose: 'clone' });
   const repository = validateNativeClonePayload(grant);
-  const base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), 'GitPigeon'));
+  const base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), 'Documents', 'GitPigeon'));
   await mkdir(base, { recursive: true });
   const target = await availableCloneTarget(
     base,
