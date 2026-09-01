@@ -1,14 +1,14 @@
 {
   "repository": "https://github.com/PeerPigeon/PeerPigeon",
-  "commit": "388b0f881cd82e5eedbfb02dcc90597b1d9025d9",
-  "committedAt": "2026-08-31T23:42:39Z",
-  "commitMessage": "Pin freertc to the transient-transport ping gate",
+  "commit": "4dd0ebcba58441f98255a200e04c7c564577252f",
+  "committedAt": "2026-09-01T00:11:51Z",
+  "commitMessage": "Pin freertc to the universal channel-send gate",
   "packageVersion": "1.0.0",
   "transitivePins": {
     "freertc": {
       "repository": "https://github.com/draeder/freertc",
-      "commit": "d8c606cb343b052c3ebcabf2d9a7e3062e5d4690"
+      "commit": "039988b9ea4e562e376ae811b327f8070cea8412"
     }
   },
-  "resolvedAt": "2026-08-31T23:42:39Z"
+  "resolvedAt": "2026-09-01T00:11:51Z"
 }
