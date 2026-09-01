@@ -809,6 +809,10 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
 
   const sessions = new Map();
   const repositoryErrors = new Map();
+  // Consecutive sync passes in which an adopted share was absent from every
+  // readable record; the share is only dropped after several, so one flaky
+  // record read cannot bounce a serving session.
+  const shareAbsenceStreak = new Map();
   let control;
   let machineIndex;
   let lanApprovals;
@@ -946,6 +950,53 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
         if (!added.length) return;
         log.info("PeerPigeon index added " + added.length + " shared " + (added.length === 1 ? "repository" : "repositories"));
         await reconcile();
+      },
+      // A share is fleet-wide: when any machine shares a repository this
+      // machine also registers, adopt the share so every watcher serves it
+      // from its own local source — one machine sleeping must not take a
+      // public link down. When the owner locks, the adopted share is dropped
+      // again (with hysteresis, so one machine's flaky record read cannot
+      // bounce sessions).
+      onRemoteShares: async (shares) => {
+        const entries = await listMachinePigeons({ root, activeOnly: false });
+        let changed = false;
+        for (const entry of entries) {
+          const remote = shares.get(entry.repositoryId) ?? null;
+          let repository;
+          let config;
+          try {
+            repository = await GitRepository.discover(entry.repository);
+            config = await loadConfig(repository.gitDir);
+          } catch {
+            continue;
+          }
+          if (remote) {
+            shareAbsenceStreak.delete(entry.repositoryId);
+            if (config.share || config.shareDormant?.key === remote.key) continue;
+            await saveConfig(repository.gitDir, {
+              ...config,
+              share: { key: remote.key, ownerPublicKey: remote.ownerPublicKey, role: 'mirror', adopted: true },
+            });
+            log.info(`Adopted the fleet share for ${path.basename(entry.repository)}; this machine serves it too`);
+          } else if (config.share?.adopted) {
+            const streak = (shareAbsenceStreak.get(entry.repositoryId) ?? 0) + 1;
+            shareAbsenceStreak.set(entry.repositoryId, streak);
+            if (streak < 3) continue;
+            shareAbsenceStreak.delete(entry.repositoryId);
+            const { share, ...rest } = config;
+            await saveConfig(repository.gitDir, rest);
+            log.info(`The fleet share for ${path.basename(entry.repository)} ended; this machine stopped serving it`);
+          } else {
+            continue;
+          }
+          changed = true;
+          const record = sessions.get(entry.repository);
+          if (record) {
+            sessions.delete(entry.repository);
+            await stopSession(record);
+          }
+        }
+        if (changed) scheduleReconcile();
       },
     });
     // One fleet-wide terminal history for every session this service opens,

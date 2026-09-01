@@ -607,6 +607,7 @@ async function connectMachineDirectory(index, logger = {}, {
   serviceInstanceId = null,
   onClose = async () => {},
   onRemoteRepositories = async () => {},
+  onRemoteShares = async () => {},
 } = {}) {
   await installNativeWebRTC();
   await installNativeStorage(root);
@@ -687,6 +688,11 @@ async function connectMachineDirectory(index, logger = {}, {
       const publisherIds = [...knownRosterIds];
       const capabilities = [];
       const remoteTombstones = new Map();
+      // A share is a fact about the repository, not the machine that minted
+      // it: collect every share any record declares so the whole fleet can
+      // adopt and serve it.
+      const remoteShares = new Map();
+      let readableRecords = 0;
       for (const publisherId of publisherIds) {
         if (publisherId === index.publisherId) continue;
         const key = publisherDirectoryKey(index.indexId, publisherId);
@@ -698,7 +704,16 @@ async function connectMachineDirectory(index, logger = {}, {
         if (value?.protocol !== INDEX_PROTOCOL || value.kind !== "publisher-directory"
           || value.indexId !== index.indexId || value.publisherId !== publisherId
           || !Array.isArray(value.pigeons)) continue;
+        readableRecords += 1;
         capabilities.push(...value.pigeons);
+        for (const pigeon of value.pigeons) {
+          const repositoryId = String(pigeon?.repositoryId ?? '');
+          const shareKey = String(pigeon?.share?.key ?? '');
+          const ownerPublicKey = String(pigeon?.share?.ownerPublicKey ?? '').trim();
+          if (remoteShares.has(repositoryId) || !SECRET.test(shareKey)) continue;
+          if (ownerPublicKey.length < 16 || ownerPublicKey.length > 512) continue;
+          remoteShares.set(repositoryId, { key: shareKey, ownerPublicKey });
+        }
         for (const item of Array.isArray(value.removed) ? value.removed : []) {
           const removedAt = Date.parse(String(item?.removedAt ?? ''));
           if (!Number.isFinite(removedAt)) continue;
@@ -742,6 +757,11 @@ async function connectMachineDirectory(index, logger = {}, {
         return registeredAt > tombstone;
       });
       if (alive.length) await onRemoteRepositories(alive);
+      // Delivered even when the map is empty — that is how an adopted share
+      // learns the owner locked it — but only when at least one record was
+      // actually readable, so a retrieval outage cannot masquerade as the
+      // whole fleet unsharing everything.
+      if (readableRecords > 0) await onRemoteShares(remoteShares);
     });
     remoteQueue = operation.catch((error) => logger.error?.(error));
     return operation;

@@ -35,6 +35,10 @@ export function validateConfig(input) {
       ownerPublicKey: String(rawShare.ownerPublicKey ?? '').trim(),
       role,
       createdAt: String(rawShare.createdAt ?? new Date().toISOString()),
+      // A share adopted from the fleet (another machine owns it) is dropped
+      // again when the owner locks; a share this machine was explicitly
+      // given (a share-link init) is not. The flag must survive reload.
+      ...(rawShare.adopted === true && role === 'mirror' ? { adopted: true } : {}),
     };
     if (share.ownerPublicKey.length < 16 || share.ownerPublicKey.length > 512) {
       throw new Error('Invalid share owner public key');

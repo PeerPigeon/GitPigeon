@@ -108,20 +108,32 @@ export class ControlServer {
           const keyPair = await loadPairingKeyPair(this.root);
           share = { key: createShareKey(), ownerPublicKey: keyPair.pub, role: 'owner' };
         }
-        // The mirror preference is sticky: a share that never had a mirror
-        // comes up mirrored the way this repository always mirrors.
-        if (!share.mirror && rest.mirrorDefaults) {
+        // The mirror preference is sticky, and — same rule as `git pigeon
+        // share` — a bare share defaults to Nostr on the free public relays.
+        // The dashboard used to mint mirrorless shares whenever no preference
+        // existed, so a link shared from the browser had no cloud mirror at
+        // all while the CLI's did.
+        if (!share.mirror) {
           try {
             const { buildMirrorFromDefaults } = await import('./mirror.js');
-            const rebuilt = await buildMirrorFromDefaults(rest.mirrorDefaults);
+            const { DEFAULT_NOSTR_RELAYS } = await import('./nostr-mirror.js');
+            const defaults = rest.mirrorDefaults ?? { type: 'nostr', relays: [...DEFAULT_NOSTR_RELAYS] };
+            const rebuilt = await buildMirrorFromDefaults(defaults);
             if (rebuilt) share.mirror = rebuilt;
           } catch (error) {
-            this.logger.warn?.(`Mirror preference could not be attached: ${error.message}`);
+            this.logger.warn?.(`Mirror could not be attached: ${error.message}`);
           }
         }
         config = await saveConfig(repository.gitDir, { ...rest, share });
         this.logger.info?.(`Shared ${path.basename(entry.repository)} publicly${shareDormant ? ' at its usual link' : ''}${share.mirror ? ' with its mirror attached' : ''}`);
       } else if (!shared && config.share) {
+        // Lock is an owner action: a machine that merely adopted the fleet
+        // share stowing its copy would flap back on the next sync while the
+        // owner kept publishing. Refusing here lets the browser's control
+        // fan-over reach the owning machine.
+        if (config.share.role === 'mirror') {
+          throw new Error('This repository is shared by another machine; the lock happens there');
+        }
         const { share, ...rest } = config;
         config = await saveConfig(repository.gitDir, { ...rest, shareDormant: share });
         this.logger.info?.(`Locked ${path.basename(entry.repository)}; the same link resumes on the next unlock`);
@@ -155,6 +167,10 @@ export class ControlServer {
       const repository = await GitRepository.discover(entry.repository);
       const config = await loadConfig(repository.gitDir);
       if (!config.share) throw new Error('Unlock (share) the repository before configuring its mirror');
+      // The mirror identity (and its secret key) belongs to the machine that
+      // owns the share; configuring it on an adopted copy would mint a second
+      // identity the published link knows nothing about.
+      if (config.share.role !== 'owner') throw new Error('The mirror is configured on the machine that owns the share');
       let mirror = null;
       if (frame.mirror && frame.mirror.type === 'nostr') {
         // Zero-setup default: free public relays, identity generated here
