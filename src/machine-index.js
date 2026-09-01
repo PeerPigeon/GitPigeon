@@ -831,6 +831,13 @@ async function connectMachineDirectory(index, logger = {}, {
   };
   node.on('peerConnected', (peerId) => {
     logger.debug?.(`[${roomLabel}] peer connected: ${peerId}`);
+    // A service that reconciled while it had no peers anchored its version
+    // chain on nothing: every publish afterwards carried a version below the
+    // cluster's and was rejected as stale — the watcher ran, published every
+    // heartbeat, and stayed invisible for half an hour until a restart
+    // happened to reconcile with peers present. A newly arrived peer is new
+    // version information; reconcile against it before the next write.
+    needsReconcile = true;
     if (ready) {
       publish().catch((error) => logger.error?.(error));
       syncRemoteRepositories().catch((error) => logger.error?.(error));
