@@ -1,8 +1,8 @@
 {
   "repository": "https://github.com/PeerPigeon/PeerPigeon",
-  "commit": "4dd0ebcba58441f98255a200e04c7c564577252f",
-  "committedAt": "2026-09-01T00:11:51Z",
-  "commitMessage": "Pin freertc to the universal channel-send gate",
+  "commit": "f3bcc3768b7135d5e70cd917c8d2724fa79ee089",
+  "committedAt": "2026-09-01T00:51:43Z",
+  "commitMessage": "Name the peer in negotiation-stall errors",
   "packageVersion": "1.0.0",
   "transitivePins": {
     "freertc": {
@@ -10,5 +10,5 @@
       "commit": "039988b9ea4e562e376ae811b327f8070cea8412"
     }
   },
-  "resolvedAt": "2026-09-01T00:11:51Z"
+  "resolvedAt": "2026-09-01T00:51:43Z"
 }

@@ -35,7 +35,7 @@
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "node-pty": "^1.1.0",
-    "peerpigeon": "https://github.com/PeerPigeon/PeerPigeon/archive/4dd0ebcba58441f98255a200e04c7c564577252f.tar.gz",
+    "peerpigeon": "https://github.com/PeerPigeon/PeerPigeon/archive/f3bcc3768b7135d5e70cd917c8d2724fa79ee089.tar.gz",
     "werift": "0.24.4",
     "ws": "8.21.3",
     "yjs": "^13.6.32"
