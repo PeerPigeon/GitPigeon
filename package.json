@@ -12,7 +12,6 @@
   "files": [
     "bin",
     "src",
-    "PEERPIGEON.lock.json",
     "README.md",
     "LICENSE"
   ],
@@ -35,13 +34,13 @@
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "node-pty": "^1.1.0",
-    "peerpigeon": "https://github.com/PeerPigeon/PeerPigeon/archive/54a657f55f29ea3a62aa444f67e7952c1ef67c48.tar.gz",
+    "peerpigeon": "github:PeerPigeon/PeerPigeon#main",
     "werift": "0.24.4",
     "ws": "8.21.3",
     "yjs": "^13.6.32"
   },
   "overrides": {
-    "freertc": "git+https://github.com/draeder/freertc.git#486cf7a4f2b7e87b60e567a2b2ee10c7fa9a6277"
+    "freertc": "github:draeder/freertc#main"
   },
   "devDependencies": {
     "esbuild": "^0.25.12",

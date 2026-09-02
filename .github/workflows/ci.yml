@@ -21,4 +21,6 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm ci --ignore-scripts
+      # No library pins: build against PeerPigeon and FreeRTC main as they are now.
+      - run: npm update peerpigeon freertc --ignore-scripts --no-audit --no-fund
       - run: npm run check

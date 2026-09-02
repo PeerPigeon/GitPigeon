@@ -39,6 +39,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # No library pins: build against PeerPigeon and FreeRTC main as they are now.
+      - run: npm update peerpigeon freertc --ignore-scripts --no-audit --no-fund
       - name: Build standalone executable
         shell: bash
         run: npm run build:native -- --output "dist/git-pigeon${{ runner.os == 'Windows' && '.exe' || '' }}"
