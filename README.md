@@ -5,12 +5,12 @@ Git repositories. It uses the native `git` executable and PeerPigeon's mesh and
 storage APIs, so every synchronized directory remains a standard Git repository
 that works with existing editors, hooks, GUIs, and command-line tools.
 
-GitPigeon's transport comes straight from the `main` branches of
-[`PeerPigeon/PeerPigeon`](https://github.com/PeerPigeon/PeerPigeon) and
-[`draeder/freertc`](https://github.com/draeder/freertc). Nothing is pinned to a
-commit: every install and every release build resolves both heads as they are
-at that moment, so a fix landing in either library reaches the next build
-without anyone bumping a hash.
+The PeerPigeon dependency comes directly from
+[`PeerPigeon/PeerPigeon`](https://github.com/PeerPigeon/PeerPigeon) and is pinned
+to commit
+[`ee07a5934bda5d05cf9b0f364a13456ba3438a1c`](https://github.com/PeerPigeon/PeerPigeon/commit/ee07a5934bda5d05cf9b0f364a13456ba3438a1c).
+The human- and machine-readable pin is also recorded in
+[`PEERPIGEON.lock.json`](./PEERPIGEON.lock.json).
 
 ## Project status
 
@@ -79,12 +79,11 @@ npm ci
 npm link
 ```
 
-`npm ci` installs the source repository's dependencies; it does not download a
-published GitPigeon package. PeerPigeon and FreeRTC come from the `main`
-branches on GitHub, not from the npm registry — run `npm update peerpigeon freertc`
-to move a checkout to their current heads, which is what release builds do.
-The repository's `.npmrc` disables dependency lifecycle scripts; the native
-build compiles what it needs itself.
+`npm ci` installs the source repository's locked dependencies; it does not download a
+published GitPigeon package. PeerPigeon is fetched directly from the pinned
+GitHub commit above, not from the npm registry. The repository's `.npmrc`
+disables dependency lifecycle scripts so PeerPigeon and FreeRTC stay at their
+locked revisions.
 
 The contributor install exposes the same `git-pigeon` executable. Run
 `git pigeon install` afterward to register the native URL handler; a fresh
