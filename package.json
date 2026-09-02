@@ -34,13 +34,13 @@
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "node-pty": "^1.1.0",
-    "peerpigeon": "github:PeerPigeon/PeerPigeon#main",
+    "peerpigeon": "git+https://github.com/PeerPigeon/PeerPigeon.git#main",
     "werift": "0.24.4",
     "ws": "8.21.3",
     "yjs": "^13.6.32"
   },
   "overrides": {
-    "freertc": "github:draeder/freertc#main"
+    "freertc": "git+https://github.com/draeder/freertc.git#main"
   },
   "devDependencies": {
     "esbuild": "^0.25.12",
