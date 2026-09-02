@@ -274,9 +274,31 @@ function repositorySessionSignature(config) {
   });
 }
 
+/**
+ * A watcher-owned share is never mirrorless. Readers try the watchers first
+ * and fall to the mirror when none answers, and the Nostr fallback on the
+ * free public relays is always there behind "Watcher" — a bare share was a
+ * link that died with the last watcher. Attach the default to any owner
+ * share that lacks one; the identity is minted once and kept, so every
+ * copied link stays valid.
+ */
+async function ensureShareMirror(repository, config) {
+  if (config.share?.role !== 'owner' || config.share.mirror) return config;
+  try {
+    const { buildMirrorFromDefaults } = await import('./mirror.js');
+    const { DEFAULT_NOSTR_RELAYS } = await import('./nostr-mirror.js');
+    const defaults = config.mirrorDefaults ?? { type: 'nostr', relays: [...DEFAULT_NOSTR_RELAYS] };
+    const mirror = await buildMirrorFromDefaults(defaults);
+    if (!mirror) return config;
+    return await saveConfig(repository.gitDir, { ...config, share: { ...config.share, mirror } });
+  } catch {
+    return config;
+  }
+}
+
 async function prepareRepositorySession(entry) {
   const repository = await GitRepository.discover(entry.repository);
-  const config = await loadConfig(repository.gitDir);
+  const config = await ensureShareMirror(repository, await loadConfig(repository.gitDir));
   return { repository, config, signature: repositorySessionSignature(config) };
 }
 

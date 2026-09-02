@@ -236,8 +236,18 @@ export class ControlServer {
         };
       }
       const share = { ...config.share };
-      if (mirror) share.mirror = mirror;
-      else delete share.mirror;
+      if (!mirror) {
+        // "Watcher" is never mirrorless: removing attached storage returns
+        // the share to the Nostr fallback on the free public relays, with
+        // the identity it already had (or a fresh one, kept from then on).
+        const { DEFAULT_NOSTR_RELAYS, generateNostrMirrorKey, nostrPublicBase, nostrPublicKey } = await import('./nostr-mirror.js');
+        const secretKey = config.share.mirror?.type === 'nostr' && config.share.mirror.secretKey
+          ? config.share.mirror.secretKey
+          : generateNostrMirrorKey();
+        const relays = [...DEFAULT_NOSTR_RELAYS];
+        mirror = { type: 'nostr', secretKey, relays, publicBaseUrl: nostrPublicBase(await nostrPublicKey(secretKey), relays) };
+      }
+      share.mirror = mirror;
       const next = { ...config, share };
       if (mirror?.type === 'nostr') next.mirrorDefaults = { type: 'nostr', relays: [...mirror.relays] };
       else if (mirror?.type === 'ipfs') {
@@ -246,9 +256,7 @@ export class ControlServer {
       else delete next.mirrorDefaults;
       const updated = await saveConfig(repository.gitDir, next);
       await registerMachinePigeon(repository, updated, { root: this.root });
-      this.logger.info?.(mirror
-        ? `Mirror for ${path.basename(entry.repository)} set to ${mirror.publicBaseUrl}`
-        : `Mirror removed from ${path.basename(entry.repository)}`);
+      this.logger.info?.(`Mirror for ${path.basename(entry.repository)} set to ${mirror.publicBaseUrl}`);
       // Same contract as the share toggle: answer now, reload behind.
       setTimeout(() => {
         Promise.resolve(this.onShareToggled(entry.repository))
