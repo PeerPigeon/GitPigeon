@@ -217,6 +217,9 @@ test('a browser whose base matches the file byte-for-byte is answered at once, e
   const responses = node.directFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'sync-response');
   assert.equal(responses.length, 1);
   assert.ok(Date.now() - startedAt < 1_000);
+  // ...and the same answer rides the room by broadcast, for the asker whose
+  // direct link is mid-renegotiation.
+  assert.equal(node.broadcastFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'sync-response').length, 1);
   Y.applyUpdate(browser, Buffer.from(responses[0].payload, 'base64'));
   assert.equal(browser.getText('content').toString(), content);
   // ...and the seed is byte-for-byte the structure a browser would have

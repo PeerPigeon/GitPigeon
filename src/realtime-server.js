@@ -450,9 +450,19 @@ export class RealtimeWorkspaceServer {
 
   #flushPendingSyncs(state) {
     const pending = state.pendingSyncs.splice(0);
-    for (const { peerId, frame } of pending) {
-      this.#send({ ...frame, kind: 'sync-response', payload: Y.encodeStateAsUpdate(state.doc, frame.payload) }, peerId).catch(() => {});
-    }
+    for (const { peerId, frame } of pending) this.#answerSync(state, peerId, frame).catch(() => {});
+  }
+
+  /**
+   * The answer travels direct AND by broadcast. A direct send needs the
+   * asker's key, which a channel mid-renegotiation may not have yet; the
+   * failure was swallowed and the browser sat on nothing until it gave up.
+   * Gossip carries the broadcast whatever the direct link is doing —
+   * the same rule the control channel's pong already follows.
+   */
+  async #answerSync(state, peerId, frame) {
+    const response = { ...frame, kind: 'sync-response', payload: Y.encodeStateAsUpdate(state.doc, frame.payload) };
+    await Promise.allSettled([this.#send(response, peerId), this.#send(response)]);
   }
 
   async #receive(peerId, frame) {
@@ -470,7 +480,7 @@ export class RealtimeWorkspaceServer {
         state.pendingSyncs.push({ peerId, frame });
         return;
       }
-      await this.#send({ ...frame, kind: 'sync-response', payload: Y.encodeStateAsUpdate(state.doc, frame.payload) }, peerId);
+      await this.#answerSync(state, peerId, frame);
       return;
     }
     // Apply and persist — nothing more. This used to also re-broadcast the
