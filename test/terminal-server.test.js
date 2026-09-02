@@ -12,7 +12,7 @@ import { FakeNode } from './fake-node.js';
 const repositoryId = 'repository-terminal';
 const serviceInstanceId = 'a'.repeat(32);
 const secret = 'terminal-test-secret';
-const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+const settle = () => new Promise((resolve) => setTimeout(resolve, 80));
 
 test('device list labels the current device immediately after its index', () => {
   const roster = Buffer.from(JSON.stringify([
