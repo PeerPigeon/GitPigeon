@@ -382,13 +382,30 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   // fires into a room nobody has rejoined yet and an announcement nobody
   // hears never happened. Throttled so a reconnect storm is one hello.
   let lastHelloAt = 0;
-  const sayHello = () => {
+  const sayHello = (peerId = null) => {
     if (Date.now() - lastHelloAt < 5_000) return;
     lastHelloAt = Date.now();
-    broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, { kind: 'hello' }).catch(() => {});
+    const hello = { kind: 'hello' };
+    broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, hello).catch(() => {});
+    if (peerId) sendChannelDirect(node, peerId, config.repositoryId, CONTROL_CHANNEL, hello).catch(() => {});
   };
   sayHello();
-  const onHelloPeer = () => sayHello();
+  // A fresh link loses frames for its first ten seconds or so (the peer's
+  // key is still being discovered), and a hello that dies there leaves the
+  // browser believing the goodbye it heard before the restart. Say it again
+  // once the link has had time to settle, direct to the newcomer as well.
+  const helloTimers = new Set();
+  const onHelloPeer = (peerId) => {
+    sayHello(String(peerId ?? '') || null);
+    for (const delay of [6_000, 12_000]) {
+      const timer = setTimeout(() => {
+        helloTimers.delete(timer);
+        if (!stopped) sayHello(String(peerId ?? '') || null);
+      }, delay);
+      timer.unref?.();
+      helloTimers.add(timer);
+    }
+  };
   node.on('peerConnected', onHelloPeer);
   const sessionPeerUpdates = startPeerUpdates({
     node,
@@ -659,6 +676,8 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
         sleep(1_500),
       ]);
       node.off('peerConnected', onHelloPeer);
+      for (const timer of helloTimers) clearTimeout(timer);
+      helloTimers.clear();
       unsubscribeSessionCommit?.();
       terminalLease?.release();
       realtimeServer.stop();
