@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   TERMINAL_CHANNEL,
+  deviceTerminalRoom,
   onChannelMessage,
   sendChannelDirect,
 } from './channel.js';
@@ -222,6 +223,7 @@ async function shellCommand(deviceName) {
     if (powershell) {
       return {
         shell,
+        flavor: 'powershell',
         args: ['-NoExit', '-Command',
           `function global:device { & ${deviceCommand} terminal-device @args }; $function:prompt = { "${psPrompt.replaceAll('"', '`"')}" }; Clear-Host; [Console]::Write([char]27+']777;gitpigeon-ready'+[char]7)`],
         env: {},
@@ -230,6 +232,7 @@ async function shellCommand(deviceName) {
     }
     return {
       shell,
+      flavor: 'cmd',
       args: ['/K', `doskey device=${DEVICE_COMMAND.map((value) => `"${value.replaceAll('"', '""')}"`).join(' ')} terminal-device $*& prompt ${cmdPrompt.replaceAll('&', '^&')}& cls`],
       env: {},
       initialize: '',
@@ -273,18 +276,23 @@ async function shellCommand(deviceName) {
     `export ${promptVariable}=$'${promptValue}'`,
     `export HISTFILE=${quoteShell(spoolPath)}`,
     'export HISTSIZE=10000',
+    // A line that starts with a space is plumbing, not a command anyone
+    // typed — the dashboard's `cd` on a repository switch — and stays out
+    // of both the shell's history and the fleet-wide record.
     ...(flavor === 'zsh' ? [
       'SAVEHIST=10000',
-      'setopt SHARE_HISTORY 2>/dev/null',
+      'setopt SHARE_HISTORY HIST_IGNORE_SPACE 2>/dev/null',
       'gitpigeon_capture_history() {',
       `  local gitpigeon_line=\${1%$'\\n'}`,
       '  [ -n "$gitpigeon_line" ] || return 0',
+      "  case $gitpigeon_line in ' '*) return 0;; esac",
       `  ${emitCapture}`,
       '  return 0',
       '}',
       'zshaddhistory_functions+=(gitpigeon_capture_history)',
     ] : [
       'export HISTFILESIZE=10000',
+      'export HISTCONTROL=ignorespace${HISTCONTROL:+:$HISTCONTROL}',
       'GITPIGEON_LAST_CAPTURE=$(builtin fc -ln -1 2>/dev/null)',
       'GITPIGEON_LAST_CAPTURE=${GITPIGEON_LAST_CAPTURE#"${GITPIGEON_LAST_CAPTURE%%[![:space:]]*}"}',
       'gitpigeon_capture_history() {',
@@ -322,6 +330,7 @@ async function shellCommand(deviceName) {
     ].join('\n'), { mode: 0o600 });
     return {
       shell,
+      flavor: 'zsh',
       args: [],
       env: { ZDOTDIR: directory, GITPIGEON_USER_ZDOTDIR: process.env.ZDOTDIR || homedir() },
       initialize: '',
@@ -335,40 +344,116 @@ async function shellCommand(deviceName) {
       '[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"',
       posixTail('PS1', bashPrompt, 'bash'),
     ].join('\n'), { mode: 0o600 });
-    return { shell, args: ['--rcfile', rcfile], env: {}, initialize: '' };
+    return { shell, flavor: 'bash', args: ['--rcfile', rcfile], env: {}, initialize: '' };
   }
   // An unknown shell falls back to typing the setup; the output gate hides
   // the echo, though the shell's own history may keep the line.
   return {
     shell,
+    flavor: 'sh',
     args: [],
     env: {},
     initialize: `device() { ${deviceCommand} terminal-device "$@"; }; export PS1=$'${bashPrompt}'; export HISTFILE=${quoteShell(spoolPath)}; clear; printf '\\033]777;gitpigeon-ready\\a'\r`,
   };
 }
 
+
+/**
+ * The line that moves a running shell into a directory. It is typed with a
+ * leading space so the shell's own history and the mesh record both skip
+ * it (HIST_IGNORE_SPACE / HISTCONTROL=ignorespace above).
+ */
+export function changeDirectoryLine(flavor, directory) {
+  if (flavor === 'powershell') return ` Set-Location -LiteralPath '${String(directory).replaceAll("'", "''")}'\r`;
+  if (flavor === 'cmd') return ` cd /d "${String(directory).replaceAll('"', '')}"\r`;
+  return ` cd ${quoteShell(directory)}\r`;
+}
+
+/**
+ * One shell server per watcher process.
+ *
+ * The terminal belongs to the DEVICE. There used to be one of these per
+ * repository, each with its own sessions and its own shell, so the same
+ * machine showed a different terminal behind every repository and the view
+ * went "unavailable" whenever the active repository's room happened to be
+ * down. Now a single server listens on the device room — reachable from
+ * whichever repository a browser is viewing, or none — and on every
+ * registered repository's terminal channel for dashboards that still dial
+ * by repository. Whichever road a frame takes, it lands in the same session
+ * table. Repositories only contribute a working directory: the one a
+ * session opens in, and the one it `cd`s to when the dashboard switches.
+ */
 export class TerminalServer {
-  constructor({ node, repository, secret, repositoryId, serviceInstanceId, deviceName = hostname(), logger = {}, spawnPty: spawnTerminal = spawnPty, history = null }) {
+  constructor({ node, serviceInstanceId, deviceName = hostname(), logger = {}, spawnPty: spawnTerminal = spawnPty, history = null, repositories = [] }) {
     this.node = node;
-    this.repository = repository;
-    this.secret = secret;
-    this.repositoryId = repositoryId;
     this.serviceInstanceId = serviceInstanceId;
     this.deviceName = cleanDeviceName(deviceName);
     this.logger = logger;
     this.spawnPty = spawnTerminal;
     this.history = history;
     this.sessions = new Map();
+    // Opens in flight, by session id: the same open arrives on every road
+    // at once and must spawn ONE shell, not one per road.
+    this.opening = new Set();
     this.relayReplies = new Map();
+    // repositoryId -> [{ root }]: several local clones may register the same
+    // repository; the first is the working directory of record and the
+    // channel stays open while any remain.
+    this.repositories = new Map();
+    this.subscriptions = new Map();
     this.started = false;
     this.sweepTimer = null;
-    this.unsubscribe = null;
+    for (const repository of repositories) this.addRepository(repository);
+  }
+
+  get deviceRoom() {
+    return deviceTerminalRoom(this.serviceInstanceId);
+  }
+
+  /**
+   * Serve a repository: its terminal channel routes here and its root is a
+   * working directory browsers can name. Returns a lease; releasing the last
+   * lease for a repository stops listening on its channel.
+   */
+  addRepository({ repositoryId, root }) {
+    const id = String(repositoryId ?? '');
+    if (!id) throw new Error('A terminal repository needs a repositoryId');
+    const entry = { root: String(root ?? '') };
+    this.repositories.set(id, [...(this.repositories.get(id) ?? []), entry]);
+    if (this.started) this.#listen(id);
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        const remaining = (this.repositories.get(id) ?? []).filter((candidate) => candidate !== entry);
+        if (remaining.length) {
+          this.repositories.set(id, remaining);
+          return;
+        }
+        this.repositories.delete(id);
+        this.subscriptions.get(id)?.();
+        this.subscriptions.delete(id);
+      },
+    };
+  }
+
+  repositoryRoot(repositoryId) {
+    return this.repositories.get(String(repositoryId ?? ''))?.[0]?.root ?? null;
   }
 
   start() {
     if (this.started) return;
     this.started = true;
-    this.unsubscribe = onChannelMessage(this.node, this.repositoryId, TERMINAL_CHANNEL, (frame, { peerId, kind }) => {
+    this.#listen(this.deviceRoom);
+    for (const repositoryId of this.repositories.keys()) this.#listen(repositoryId);
+    this.sweepTimer = setInterval(() => this.#sweep(), SWEEP_MS);
+    this.sweepTimer.unref?.();
+  }
+
+  #listen(room) {
+    if (this.subscriptions.has(room)) return;
+    this.subscriptions.set(room, onChannelMessage(this.node, room, TERMINAL_CHANNEL, (frame, { peerId }) => {
       // A relayed broadcast's envelope names the LAST HOP, not the browser
       // that asked — replying there sent "opened" to a bystander that
       // dropped it. The frame's replyTo is the requester's own address; the
@@ -380,10 +465,8 @@ export class TerminalServer {
       // crypto gates membership either way — and a broadcast arrives when a
       // stale peer id makes direct dialing miss. Replies go direct to the
       // envelope's fromPeerId, which is real and current by construction.
-      this.#receive(peerId, frame).catch((error) => this.logger.debug?.(`Terminal message: ${error.message}`));
-    });
-    this.sweepTimer = setInterval(() => this.#sweep(), SWEEP_MS);
-    this.sweepTimer.unref?.();
+      this.#receive(peerId, frame, room).catch((error) => this.logger.debug?.(`Terminal message: ${error.message}`));
+    }));
   }
 
   /**
@@ -394,17 +477,20 @@ export class TerminalServer {
   receiveRelayed(opened, { reply }) {
     if (!this.started) return;
     const frame = opened?.frame;
-    if (!frame || frame.repositoryId !== this.repositoryId) return;
+    if (!frame) return;
     const pseudoPeer = `relay:${String(opened.replyEpub ?? '').slice(0, 24)}`;
     this.relayReplies.set(pseudoPeer, reply);
-    this.#receive(pseudoPeer, frame).catch((error) => this.logger.debug?.(`Relayed terminal: ${error.message}`));
+    // A relayed frame names no room. Older dashboards stamp the repository
+    // they dialed; the reply carries it back so they recognize it.
+    const room = typeof frame.repositoryId === 'string' && frame.repositoryId ? frame.repositoryId : this.deviceRoom;
+    this.#receive(pseudoPeer, frame, room).catch((error) => this.logger.debug?.(`Relayed terminal: ${error.message}`));
   }
 
   stop() {
     if (!this.started) return;
     this.started = false;
-    this.unsubscribe?.();
-    this.unsubscribe = null;
+    for (const unsubscribe of this.subscriptions.values()) unsubscribe();
+    this.subscriptions.clear();
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.sweepTimer = null;
     for (const session of [...this.sessions.values()]) this.#close(session);
@@ -414,14 +500,20 @@ export class TerminalServer {
     return this.sessions.size;
   }
 
-  async #receive(peerId, frame) {
+  async #receive(peerId, frame, room) {
     if (!this.started) return;
     if (frame.serviceInstanceId !== this.serviceInstanceId || !SESSION.test(String(frame.sessionId ?? ''))
-      || !['open', 'input', 'resize', 'ping', 'close'].includes(String(frame.kind ?? ''))
+      || !['open', 'input', 'resize', 'ping', 'close', 'cwd'].includes(String(frame.kind ?? ''))
       || !Number.isSafeInteger(frame.sequence) || frame.sequence < 0) return;
     const id = `${peerId}:${frame.sessionId}`;
     if (frame.kind === 'open') {
-      await this.#open(peerId, frame, id);
+      if (this.sessions.has(id) || this.opening.has(id)) return;
+      this.opening.add(id);
+      try {
+        await this.#open(peerId, frame, id, room);
+      } finally {
+        this.opening.delete(id);
+      }
       return;
     }
     const session = this.sessions.get(id);
@@ -431,10 +523,7 @@ export class TerminalServer {
     if (frame.kind === 'ping') {
       // Answer, so the browser can tell a live session from one whose server
       // restarted out from under it — silence and health looked identical.
-      const session = this.sessions.get(id);
-      if (session) {
-        this.#send(peerId, frame.sessionId, 'pong', ++session.sentSequence, {}).catch(() => {});
-      }
+      this.#send(session, 'pong', ++session.sentSequence, {}).catch(() => {});
       return;
     }
     if (frame.kind === 'close') {
@@ -448,15 +537,44 @@ export class TerminalServer {
       );
       return;
     }
+    if (frame.kind === 'cwd') {
+      // The dashboard switched repositories: the SAME shell follows it. The
+      // directory check is async, so the cd is queued behind earlier input
+      // and ahead of later keystrokes — order is what a shell is.
+      session.pending = session.pending.then(async () => {
+        const directory = await this.#workingDirectory(frame, null);
+        if (directory && !session.closed) session.pty.write(changeDirectoryLine(session.flavor, directory));
+      }).catch(() => {});
+      return;
+    }
     if (typeof frame.payload !== 'string' || frame.payload.length > Math.ceil(MAX_INPUT_BYTES * 4 / 3) + 8) return;
     let input;
     try { input = Buffer.from(frame.payload, 'base64'); } catch { return; }
     if (input.length > MAX_INPUT_BYTES) return;
-    session.pty.write(input.toString('utf8'));
+    session.pending = session.pending.then(() => {
+      if (!session.closed) session.pty.write(input.toString('utf8'));
+    }).catch(() => {});
   }
 
-  async #open(peerId, frame, id) {
-    if (this.sessions.has(id)) return;
+  /**
+   * The directory a frame asks for: the repository it names, else (for a
+   * dashboard that dialed a repository's own channel) that repository. Null
+   * when nothing usable is registered or the folder is missing locally.
+   */
+  async #workingDirectory(frame, room) {
+    const candidates = [frame.workingRepositoryId, room].filter((value) => typeof value === 'string' && value);
+    for (const repositoryId of candidates) {
+      const root = this.repositoryRoot(repositoryId);
+      if (!root) continue;
+      try {
+        await stat(root);
+        return root;
+      } catch { /* a repository this machine has no local copy of */ }
+    }
+    return null;
+  }
+
+  async #open(peerId, frame, id, room) {
     // A new session from a peer replaces that peer's old one. Close frames are
     // easy to lose — a reloaded tab or a timed-out attempt leaves a zombie
     // session — and refusing the peer over its own zombie locked people out
@@ -464,13 +582,14 @@ export class TerminalServer {
     for (const session of [...this.sessions.values()]) {
       if (session.peerId === peerId) this.#close(session);
     }
+    const address = { peerId, sessionId: frame.sessionId, room };
     if (this.sessions.size >= MAX_SESSIONS) {
-      await this.#send(peerId, frame.sessionId, 'error', 0, { message: 'This watcher has reached its terminal session limit.' });
+      await this.#send(address, 'error', 0, { message: 'This watcher has reached its terminal session limit.' });
       return;
     }
     const devices = validRoster(frame.devices);
     if (!devices) {
-      await this.#send(peerId, frame.sessionId, 'error', 0, { message: 'The terminal device roster is invalid.' });
+      await this.#send(address, 'error', 0, { message: 'The terminal device roster is invalid.' });
       return;
     }
     const cols = boundedInteger(frame.cols, 20, 400, 100);
@@ -480,12 +599,11 @@ export class TerminalServer {
     let command;
     try {
       command = await shellCommand(this.deviceName);
-      // The terminal belongs to the device; the repository directory is only
+      // The terminal belongs to the device; a repository directory is only
       // the preferred working directory. A watcher can carry a repository it
       // has no local copy of yet, and refusing a shell over a missing folder
       // helped nobody.
-      let cwd = this.repository.root;
-      try { await stat(cwd); } catch { cwd = homedir(); }
+      const cwd = (await this.#workingDirectory(frame, room)) ?? homedir();
       // The service process inherits the identity of whatever terminal it
       // was originally launched from — on macOS that meant every watcher
       // shell carried Apple Terminal's TERM_PROGRAM and TERM_SESSION_ID, so
@@ -513,13 +631,16 @@ export class TerminalServer {
         },
       });
     } catch (error) {
-      await this.#send(peerId, frame.sessionId, 'error', 0, { message: `Could not open the watcher shell: ${error.message}` });
+      await this.#send(address, 'error', 0, { message: `Could not open the watcher shell: ${error.message}` });
       return;
     }
     const session = {
       id,
       peerId,
       sessionId: frame.sessionId,
+      room,
+      flavor: command.flavor ?? 'sh',
+      pending: Promise.resolve(),
       pty: terminal,
       cols,
       rows,
@@ -550,13 +671,15 @@ export class TerminalServer {
       // A shell that dies before the ready marker should die visibly.
       this.#releaseOutput(session, session.preamble);
       this.#flushOutput(session);
-      this.#send(peerId, session.sessionId, 'exit', ++session.sentSequence, { exitCode, signal }).catch(() => {});
+      this.#send(session, 'exit', ++session.sentSequence, { exitCode, signal }).catch(() => {});
       this.#close(session);
     }));
-    await this.#send(peerId, session.sessionId, 'opened', ++session.sentSequence, { deviceName: this.deviceName });
+    // Tell the browser where this machine's shell really lives. A session
+    // that arrived on a repository channel keeps working after that
+    // repository is unwatched only if the browser moves to the device room.
+    await this.#send(session, 'opened', ++session.sentSequence, { deviceName: this.deviceName, deviceRoom: this.deviceRoom });
     if (command.initialize) terminal.write(command.initialize);
   }
-
   /**
    * Strip history-capture OSC frames from the pty stream and merge each
    * reported command line into the mesh record. The frames are invisible
@@ -625,7 +748,7 @@ export class TerminalServer {
     session.output += data;
     session.outputBytes += Buffer.byteLength(data);
     if (session.outputBytes > MAX_OUTPUT_BYTES) {
-      this.#send(session.peerId, session.sessionId, 'error', ++session.sentSequence, {
+      this.#send(session, 'error', ++session.sentSequence, {
         message: 'Terminal output exceeded the watcher buffer limit.',
       }).catch(() => {});
       this.#close(session);
@@ -644,13 +767,13 @@ export class TerminalServer {
     session.outputBytes = 0;
     for (let offset = 0; offset < value.length; offset += OUTPUT_CHUNK_BYTES) {
       const payload = Buffer.from(value.slice(offset, offset + OUTPUT_CHUNK_BYTES)).toString('base64');
-      this.#send(session.peerId, session.sessionId, 'output', ++session.sentSequence, { payload }).catch(() => {
+      this.#send(session, 'output', ++session.sentSequence, { payload }).catch(() => {
         this.#close(session);
       });
     }
   }
 
-  async #send(peerId, sessionId, kind, sequence, fields = {}) {
+  async #send({ peerId, sessionId, room }, kind, sequence, fields = {}) {
     const frame = {
       serviceInstanceId: this.serviceInstanceId,
       sessionId,
@@ -663,11 +786,13 @@ export class TerminalServer {
     // place.
     const relay = this.relayReplies.get(peerId);
     if (relay) {
-      await relay({ frame: { ...frame, repositoryId: this.repositoryId } });
+      await relay({ frame: { ...frame, repositoryId: room } });
       return;
     }
+    // Replies take the road the session arrived on — the device room or a
+    // repository channel — so whichever the browser dialed hears back.
     try {
-      await sendChannelDirect(this.node, peerId, this.repositoryId, TERMINAL_CHANNEL, frame);
+      await sendChannelDirect(this.node, peerId, room, TERMINAL_CHANNEL, frame);
     } catch (error) {
       throw new Error(`The terminal peer is no longer reachable. (${error.message})`);
     }

@@ -278,22 +278,14 @@ async function prepareRepositorySession(entry) {
   return { repository, config, signature: repositorySessionSignature(config) };
 }
 
-async function openRepositorySession({ repository, config }, pollMs, log, serviceInstanceId, machineIndexId, node, deviceClaim = null, terminalHistory = null) {
+async function openRepositorySession({ repository, config }, pollMs, log, serviceInstanceId, machineIndexId, node, deviceClaim = null, terminalServer = null) {
   // Late-bound: the realtime server is created below but the synchronizer
   // needs to consult it for path ownership.
   const ownership = { owns: () => false };
   const { synchronizer } = openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node, ownership, deviceClaim);
-  const terminalServer = new TerminalServer({
-    node,
-    repository,
-    secret: config.secret,
-    repositoryId: config.repositoryId,
-    serviceInstanceId,
-    deviceName: deviceHostName(),
-    logger: log,
-    history: terminalHistory,
-  });
-  terminalServer.start();
+  // The terminal is the MACHINE's, served once per service process; this
+  // session only lends it a working directory and a repository channel.
+  const terminalLease = terminalServer?.addRepository({ repositoryId: config.repositoryId, root: repository.root }) ?? null;
   const realtimeServer = new RealtimeWorkspaceServer({
     node,
     repository,
@@ -635,7 +627,6 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   return {
     presenceDiagnostics: () => synchronizer.presenceDiagnostics?.() ?? null,
     writeError: () => realtimeServer.lastWriteError ?? null,
-    terminalRelay: (opened, io) => terminalServer.receiveRelayed(opened, io),
     async close() {
       if (stopped) return;
       stopped = true;
@@ -669,7 +660,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       ]);
       node.off('peerConnected', onHelloPeer);
       unsubscribeSessionCommit?.();
-      terminalServer.stop();
+      terminalLease?.release();
       realtimeServer.stop();
       await sessionPeerUpdates.stop().catch(() => {});
       shareMirror?.stop();
@@ -825,6 +816,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let controlServer;
   let pairingService;
   let terminalHistory = null;
+  let terminalServer = null;
   let restartAfterRotation = false;
 
   const publishServiceRepositoryState = async () => {
@@ -887,7 +879,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     sessions.set(entry.repository, record);
     repositoryErrors.delete(entry.repository);
     await publishServiceRepositoryState();
-    record.opening = openRepositorySession(prepared, pollMs, log, serviceInstanceId, machineIndexId, machineIndex.node, deviceClaim, terminalHistory)
+    record.opening = openRepositorySession(prepared, pollMs, log, serviceInstanceId, machineIndexId, machineIndex.node, deviceClaim, terminalServer)
       .then(async (session) => {
         record.session = session;
         if (record.cancelled) {
@@ -1007,6 +999,17 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       deviceId: deviceHostName(),
       logger: log,
     });
+    // ONE terminal per machine. It listens on the device room plus every
+    // repository's terminal channel, so the same shell answers whichever
+    // repository a dashboard is looking at — or none.
+    terminalServer = new TerminalServer({
+      node: machineIndex.node,
+      serviceInstanceId,
+      deviceName: deviceHostName(),
+      logger: log,
+      history: terminalHistory,
+    });
+    terminalServer.start();
     await reconcile();
     // Keep offering to pair for as long as this machine runs, so a browser
     // opened at any time is answered.
@@ -1047,20 +1050,12 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
           await reply({ requestId: String(opened?.requestId ?? ''), ok: false, message: String(error.message).slice(0, 200) }).catch(() => {});
         }
       },
-      // Terminal frames sealed over the pairing mesh route to the session
-      // that owns their repository.
-      onTerminalRelay: (opened, io) => {
-        const frame = opened?.frame;
-        if (!frame?.repositoryId) return;
-        for (const record of sessions.values()) {
-          if (record.prepared?.config?.repositoryId === frame.repositoryId) {
-            record.session?.terminalRelay?.(opened, io);
-            return;
-          }
-        }
-      },
+      // Terminal frames sealed over the pairing mesh reach the machine's one
+      // terminal server, whatever repository (if any) they name.
+      onTerminalRelay: (opened, io) => terminalServer?.receiveRelayed(opened, io),
       indexDiagnostics: () => ({
         ...machineIndex.diagnostics(),
+        terminalSessions: terminalServer?.activeSessionCount() ?? 0,
         // Per-repository session health, so a machine whose repo session died
         // says so in every peer's log instead of silently vanishing from
         // terminal rosters.
@@ -1175,6 +1170,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     indexWatcher?.close();
     while (reconciling) await sleep(10);
     for (const record of sessions.values()) await stopSession(record);
+    terminalServer?.stop();
     await markMachinePigeonsStopped({ root, pid: process.pid });
     controlServer?.stop();
     if (pairingService) await pairingService.close();

@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { TERMINAL_CHANNEL } from '../src/channel.js';
-import { TerminalServer } from '../src/terminal-server.js';
+import { TERMINAL_CHANNEL, deviceTerminalRoom } from '../src/channel.js';
+import { TerminalServer, changeDirectoryLine } from '../src/terminal-server.js';
 import { FakeNode } from './fake-node.js';
 
 const repositoryId = 'repository-terminal';
@@ -75,9 +76,7 @@ test('terminal frames from another repository or service instance are ignored', 
   const node = new FakeNode();
   const server = new TerminalServer({
     node,
-    repository: { root: '/tmp/example-repository' },
-    secret,
-    repositoryId,
+    repositories: [{ repositoryId, root: '/tmp/example-repository' }],
     serviceInstanceId,
     deviceName: 'test-device',
     spawnPty() { throw new Error('must not spawn a shell'); },
@@ -100,9 +99,7 @@ test('watcher terminal opens one bounded PTY and cleans it up on close', async (
   const spawned = [];
   const server = new TerminalServer({
     node,
-    repository: { root: '/tmp/example-repository' },
-    secret,
-    repositoryId,
+    repositories: [{ repositoryId, root: '/tmp/example-repository' }],
     serviceInstanceId,
     deviceName: 'test-device',
     spawnPty(shell, args, options) {
@@ -164,9 +161,7 @@ test('nothing before the ready marker reaches the browser or the history', async
   const spawned = [];
   const server = new TerminalServer({
     node,
-    repository: { root: '/tmp/example-repository' },
-    secret,
-    repositoryId,
+    repositories: [{ repositoryId, root: '/tmp/example-repository' }],
     serviceInstanceId,
     deviceName: 'test-device',
     spawnPty() {
@@ -212,9 +207,7 @@ test('history capture frames are stripped from output and merged; the seed rides
   const added = [];
   const server = new TerminalServer({
     node,
-    repository: { root: '/tmp/example-repository' },
-    secret,
-    repositoryId,
+    repositories: [{ repositoryId, root: '/tmp/example-repository' }],
     serviceInstanceId,
     deviceName: 'test-device',
     history: {
@@ -256,4 +249,116 @@ test('history capture frames are stripped from output and merged; the seed rides
     .map((f) => Buffer.from(f.payload, 'base64').toString('utf8'))
     .join('');
   assert.equal(output, 'prompt $ before after tail');
+});
+
+test('one shell per machine: the device room and every repository channel reach the same session', async (t) => {
+  const node = new FakeNode();
+  const spawned = [];
+  const repositoryA = await mkdtemp(path.join(tmpdir(), 'gitpigeon-terminal-a-'));
+  const repositoryB = await mkdtemp(path.join(tmpdir(), 'gitpigeon-terminal-b-'));
+  const server = new TerminalServer({
+    node,
+    serviceInstanceId,
+    deviceName: 'test-device',
+    repositories: [{ repositoryId: 'repo-a', root: repositoryA }],
+    spawnPty(shell, args, options) {
+      const terminal = new FakePty();
+      spawned.push({ options, terminal });
+      return terminal;
+    },
+  });
+  server.start();
+  t.after(() => server.stop());
+  // Repositories come and go while the server runs.
+  const lease = server.addRepository({ repositoryId: 'repo-b', root: repositoryB });
+
+  // The dashboard opens on the DEVICE room, naming the repository it is
+  // looking at only as the working directory; the same open also travels
+  // the repository channel for older watchers, and must not open twice.
+  const open = browserFrame('open', 0, { cols: 80, rows: 24, devices: [{ name: 'test-device' }], workingRepositoryId: 'repo-b' });
+  node.receive('browser-peer', deviceTerminalRoom(serviceInstanceId), TERMINAL_CHANNEL, open);
+  node.receive('browser-peer', 'repo-b', TERMINAL_CHANNEL, open);
+  await settle();
+  assert.equal(spawned.length, 1);
+  assert.equal(server.activeSessionCount(), 1);
+  assert.equal(spawned[0].options.cwd, repositoryB);
+  // Replies take the road the session arrived on.
+  const opened = node.direct.filter(({ frame }) => frame.kind === 'opened');
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].frame.repositoryId, deviceTerminalRoom(serviceInstanceId));
+
+  // Switching repositories moves the SAME shell — no new pty — with a
+  // history-invisible cd (leading space), and input keeps flowing.
+  node.receive('browser-peer', deviceTerminalRoom(serviceInstanceId), TERMINAL_CHANNEL, browserFrame('cwd', 1, { workingRepositoryId: 'repo-a' }));
+  node.receive('browser-peer', deviceTerminalRoom(serviceInstanceId), TERMINAL_CHANNEL, browserFrame('input', 2, {
+    payload: Buffer.from('pwd\r').toString('base64'),
+  }));
+  await settle();
+  assert.equal(spawned.length, 1);
+  assert.deepEqual(spawned[0].terminal.writes, [changeDirectoryLine('zsh', repositoryA), 'pwd\r']);
+  assert.equal(changeDirectoryLine('zsh', repositoryA), ` cd '${repositoryA}'\r`);
+  assert.equal(changeDirectoryLine('powershell', "C:\\it's"), " Set-Location -LiteralPath 'C:\\it''s'\r");
+  assert.equal(changeDirectoryLine('cmd', 'C:\\repo'), ' cd /d "C:\\repo"\r');
+
+  // A repository this machine no longer serves is not a directory to cd to.
+  lease.release();
+  node.receive('browser-peer', deviceTerminalRoom(serviceInstanceId), TERMINAL_CHANNEL, browserFrame('cwd', 3, { workingRepositoryId: 'repo-b' }));
+  await settle();
+  assert.equal(spawned[0].terminal.writes.length, 2);
+  // ...and its channel is no longer answered.
+  node.receive('other-peer', 'repo-b', TERMINAL_CHANNEL, { ...browserFrame('open', 0, { cols: 80, rows: 24, devices: [{ name: 'x' }] }), sessionId: 'c'.repeat(32) });
+  await settle();
+  assert.equal(spawned.length, 1);
+});
+
+test('a repository channel open without a named directory starts in that repository', async (t) => {
+  const node = new FakeNode();
+  const spawned = [];
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-terminal-'));
+  const server = new TerminalServer({
+    node,
+    serviceInstanceId,
+    deviceName: 'test-device',
+    repositories: [{ repositoryId, root }],
+    spawnPty(shell, args, options) {
+      const terminal = new FakePty();
+      spawned.push({ options, terminal });
+      return terminal;
+    },
+  });
+  server.start();
+  t.after(() => server.stop());
+  node.receive('browser-peer', repositoryId, TERMINAL_CHANNEL, browserFrame('open', 0, { cols: 80, rows: 24, devices: [{ name: 'test-device' }] }));
+  await settle();
+  assert.equal(spawned[0]?.options.cwd, root);
+  const opened = node.direct.find(({ frame }) => frame.kind === 'opened')?.frame;
+  assert.equal(opened?.repositoryId, repositoryId);
+  // ...and it points the browser at the machine's own room for the rest.
+  assert.equal(opened?.deviceRoom, deviceTerminalRoom(serviceInstanceId));
+});
+
+test('relayed frames reach the machine terminal whether or not they name a repository', async (t) => {
+  const node = new FakeNode();
+  const spawned = [];
+  const replies = [];
+  const server = new TerminalServer({
+    node,
+    serviceInstanceId,
+    deviceName: 'test-device',
+    spawnPty() {
+      const terminal = new FakePty();
+      spawned.push(terminal);
+      return terminal;
+    },
+  });
+  server.start();
+  t.after(() => server.stop());
+  server.receiveRelayed(
+    { replyEpub: 'browser-epub', frame: browserFrame('open', 0, { cols: 80, rows: 24, devices: [{ name: 'test-device' }] }) },
+    { reply: async (value) => { replies.push(value); } },
+  );
+  await settle();
+  assert.equal(spawned.length, 1);
+  assert.equal(replies[0]?.frame.kind, 'opened');
+  assert.equal(replies[0]?.frame.repositoryId, deviceTerminalRoom(serviceInstanceId));
 });

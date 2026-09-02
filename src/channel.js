@@ -18,6 +18,16 @@ export const REALTIME_CHANNEL = 'realtime';
 export const TERMINAL_CHANNEL = 'terminal';
 export const CONTROL_CHANNEL = 'control';
 
+/**
+ * The device-scoped terminal room tag. The watcher shell belongs to the
+ * MACHINE, not to any repository: a browser reaches it here from whichever
+ * repository it is viewing, and every repository's own terminal channel
+ * routes to the same shell for dashboards that still dial by repository.
+ */
+export function deviceTerminalRoom(serviceInstanceId) {
+  return `device:${serviceInstanceId}`;
+}
+
 // Reserved by the envelope. A payload must not use these names; they identify
 // where a frame belongs and are written last so they cannot be overwritten.
 export const RESERVED_FRAME_FIELDS = Object.freeze(['protocol', 'repositoryId', 'channel']);

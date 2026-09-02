@@ -35,9 +35,7 @@ test('the watcher shell opens even when node-pty ships without its execute bit',
   const node = new FakeNode();
   const server = new TerminalServer({
     node,
-    repository: { root: fileURLToPath(new URL('..', import.meta.url)) },
-    secret: 'terminal-spawn-secret',
-    repositoryId,
+    repositories: [{ repositoryId, root: fileURLToPath(new URL('..', import.meta.url)) }],
     serviceInstanceId,
     deviceName: 'spawn-test',
   });
