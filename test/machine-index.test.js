@@ -14,6 +14,7 @@ import {
   listMachinePigeons,
   loadMachineIndex,
   markMachinePigeonStopped,
+  markShareEnded,
   openDashboard,
   publisherDirectoryKey,
   publisherDirectoryValue,
@@ -335,4 +336,43 @@ test('a repository can be tombstoned by ID alone to clear orphaned directory rec
   assert.equal((await loadMachineIndex({ root })).entries.length, 0);
 
   await assert.rejects(tombstoneMachinePigeon('!bad', { root }), /Invalid GitPigeon repository ID/);
+});
+
+test('shares travel with every holder, carry their creation time, and end as a stated fact', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-share-record-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateRoot = path.join(root, 'state');
+  const repository = await createRepository(path.join(root, 'shared'));
+  const key = 'S'.repeat(43);
+  const adopted = {
+    ...createIdentity({ repositoryId: 'shared-pigeon', secret: 'c'.repeat(64), deviceId: 'gamma-device' }),
+    share: { key, ownerPublicKey: 'owner-public-key-of-another-machine', role: 'mirror', adopted: true, createdAt: '2026-09-01T10:00:00.000Z' },
+  };
+  // An adopter declares the share too — the link outlives the owner's record.
+  await registerMachinePigeon(repository, adopted, { root: stateRoot, pid: process.pid });
+  let state = await loadMachineIndex({ root: stateRoot });
+  let record = publisherDirectoryValue(state, await listMachinePigeons({ root: stateRoot, activeOnly: false }), Date.now());
+  assert.deepEqual(record.pigeons[0].share, {
+    key,
+    ownerPublicKey: 'owner-public-key-of-another-machine',
+    createdAt: '2026-09-01T10:00:00.000Z',
+    adopted: true,
+  });
+  assert.equal(record.sharesEnded, undefined);
+
+  // A lock is stated, and travels in the record.
+  await markShareEnded('shared-pigeon', key, { root: stateRoot, now: Date.parse('2026-09-02T12:00:00.000Z') });
+  state = await loadMachineIndex({ root: stateRoot });
+  assert.deepEqual(state.sharesEnded, [{ repositoryId: 'shared-pigeon', key, endedAt: '2026-09-02T12:00:00.000Z' }]);
+  record = publisherDirectoryValue(state, await listMachinePigeons({ root: stateRoot, activeOnly: false }), Date.parse('2026-09-02T12:00:01.000Z'));
+  assert.deepEqual(record.sharesEnded, [{ repositoryId: 'shared-pigeon', key, endedAt: '2026-09-02T12:00:00.000Z' }]);
+
+  // Re-sharing at the usual link retracts the ending.
+  const owner = { ...adopted, share: { key, ownerPublicKey: 'owner-public-key-of-another-machine', role: 'owner', createdAt: '2026-09-01T10:00:00.000Z' } };
+  await registerMachinePigeon(repository, owner, { root: stateRoot, pid: process.pid });
+  state = await loadMachineIndex({ root: stateRoot });
+  assert.deepEqual(state.sharesEnded, []);
+  record = publisherDirectoryValue(state, await listMachinePigeons({ root: stateRoot, activeOnly: false }), Date.now());
+  assert.equal(record.pigeons[0].share.adopted, undefined);
+  assert.equal(record.sharesEnded, undefined);
 });

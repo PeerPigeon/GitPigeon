@@ -136,6 +136,10 @@ export class ControlServer {
         }
         const { share, ...rest } = config;
         config = await saveConfig(repository.gitDir, { ...rest, shareDormant: share });
+        // A lock travels as a stated fact: every adopter and browser drops
+        // this key on sight, instead of guessing from the share going quiet.
+        const { markShareEnded } = await import('./machine-index.js');
+        await markShareEnded(entry.repositoryId, share.key, { root: this.root });
         this.logger.info?.(`Locked ${path.basename(entry.repository)}; the same link resumes on the next unlock`);
       }
       await registerMachinePigeon(repository, config, { root: this.root });

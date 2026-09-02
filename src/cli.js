@@ -31,6 +31,7 @@ import {
   claimDashboardPairing,
   completeDashboardPairing,
   connectMachineIndexService,
+  markShareEnded,
   listMachinePigeons,
   loadMachineIndex,
   machineIndexRoot,
@@ -54,6 +55,7 @@ import { ensureServiceWatchdog, installNativeIntegration, refreshNativeCommandSh
 import { ControlServer } from './control-server.js';
 import { RepositorySynchronizer } from './protocol.js';
 import { TerminalServer } from './terminal-server.js';
+import { preferredShare } from './share-precedence.js';
 import { createTerminalHistory, terminalHistoryKey } from './terminal-history.js';
 import { RealtimeWorkspaceServer } from './realtime-server.js';
 import { WorkspaceFiles, workspaceDigest } from './workspace.js';
@@ -819,10 +821,6 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
 
   const sessions = new Map();
   const repositoryErrors = new Map();
-  // Consecutive sync passes in which an adopted share was absent from every
-  // readable record; the share is only dropped after several, so one flaky
-  // record read cannot bounce a serving session.
-  const shareAbsenceStreak = new Map();
   let control;
   let machineIndex;
   let lanApprovals;
@@ -968,11 +966,12 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       // public link down. When the owner locks, the adopted share is dropped
       // again (with hysteresis, so one machine's flaky record read cannot
       // bounce sessions).
-      onRemoteShares: async (shares) => {
+      onRemoteShares: async (shares, ended = new Map()) => {
         const entries = await listMachinePigeons({ root, activeOnly: false });
         let changed = false;
         for (const entry of entries) {
           const remote = shares.get(entry.repositoryId) ?? null;
+          const endedHere = ended.get(entry.repositoryId) ?? [];
           let repository;
           let config;
           try {
@@ -981,25 +980,43 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
           } catch {
             continue;
           }
-          if (remote) {
-            shareAbsenceStreak.delete(entry.repositoryId);
-            if (config.share || config.shareDormant?.key === remote.key) continue;
-            await saveConfig(repository.gitDir, {
-              ...config,
-              share: { key: remote.key, ownerPublicKey: remote.ownerPublicKey, role: 'mirror', adopted: true },
-            });
-            log.info(`Adopted the fleet share for ${path.basename(entry.repository)}; this machine serves it too`);
-          } else if (config.share?.adopted) {
-            const streak = (shareAbsenceStreak.get(entry.repositoryId) ?? 0) + 1;
-            shareAbsenceStreak.set(entry.repositoryId, streak);
-            if (streak < 3) continue;
-            shareAbsenceStreak.delete(entry.repositoryId);
+          const name = path.basename(entry.repository);
+          const local = config.share ?? null;
+          const localDeclared = local ? {
+            key: local.key,
+            ownerPublicKey: local.ownerPublicKey,
+            createdAt: local.createdAt,
+            ...(local.mirror?.publicBaseUrl ? { mirror: local.mirror.publicBaseUrl } : {}),
+          } : null;
+          const adopt = (share) => ({ key: share.key, ownerPublicKey: share.ownerPublicKey, role: 'mirror', adopted: true });
+          let next = null;
+          let message = null;
+          if (local && local.role !== 'owner' && endedHere.some((item) => item.key === local.key)) {
+            // The owner locked it — stated, not inferred from silence.
             const { share, ...rest } = config;
-            await saveConfig(repository.gitDir, rest);
-            log.info(`The fleet share for ${path.basename(entry.repository)} ended; this machine stopped serving it`);
+            void share;
+            next = rest;
+            message = `The fleet share for ${name} ended; this machine stopped serving it`;
+          } else if (local && local.role === 'owner' && remote && remote.key !== local.key
+            && preferredShare(remote, localDeclared) === remote) {
+            // Two owners. One repository has one link, fleet-wide: yield to
+            // the fleet's share and serve it; our own is stowed, not lost,
+            // and stated ended so nothing keeps handing out its link.
+            next = { ...config, share: adopt(remote), shareDormant: local };
+            await markShareEnded(entry.repositoryId, local.key, { root }).catch(() => {});
+            message = `Yielded to the fleet's share for ${name}; this machine now serves it at the fleet's link`;
+          } else if (local && local.adopted && remote && remote.key !== local.key
+            && preferredShare(remote, localDeclared) === remote) {
+            next = { ...config, share: adopt(remote) };
+            message = `Switched to the fleet's share for ${name}`;
+          } else if (!local && remote && config.shareDormant?.key !== remote.key) {
+            next = { ...config, share: adopt(remote) };
+            message = `Adopted the fleet share for ${name}; this machine serves it too`;
           } else {
             continue;
           }
+          await saveConfig(repository.gitDir, next);
+          log.info(message);
           changed = true;
           const record = sessions.get(entry.repository);
           if (record) {

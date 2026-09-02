@@ -11,6 +11,7 @@ import process from 'node:process';
 import { GITPIGEON_VERSION } from './version.js';
 import { deviceHostName } from './device-name.js';
 import { installNativeStorage } from './native-storage.js';
+import { mergeShareDeclarations, preferredShare } from './share-precedence.js';
 import { installNativeWebRTC } from './webrtc.js';
 
 export const INDEX_PROTOCOL = 'gitpigeon-index/1';
@@ -109,6 +110,9 @@ function validEntry(value) {
     const ownerPublicKey = String(value.share.ownerPublicKey ?? '');
     if (SECRET.test(key) && ownerPublicKey.length >= 16 && ownerPublicKey.length <= 512) {
       share = { key, ownerPublicKey };
+      const createdAt = Date.parse(String(value.share.createdAt ?? ''));
+      if (Number.isFinite(createdAt)) share.createdAt = new Date(createdAt).toISOString();
+      if (value.share.adopted === true) share.adopted = true;
       // Only the PUBLIC base URL of the always-on mirror travels in the
       // index record — bucket credentials never leave the repository config.
       const mirror = String(value.share.mirror ?? '');
@@ -153,7 +157,34 @@ function validateState(value) {
         .map((item) => ({ repositoryId: String(item.repositoryId), removedAt: String(item.removedAt) }))
         .slice(-100)
       : [],
+    // Stated share endings (locks). A lock must travel as a FACT: adopters
+    // used to infer it from the share going absent, which a machine being
+    // offline looks exactly like.
+    sharesEnded: Array.isArray(value.sharesEnded)
+      ? value.sharesEnded
+        .filter((item) => DEVICE.test(String(item?.repositoryId ?? '')) && SECRET.test(String(item?.key ?? ''))
+          && Number.isFinite(Date.parse(String(item?.endedAt ?? ''))))
+        .map((item) => ({ repositoryId: String(item.repositoryId), key: String(item.key), endedAt: String(item.endedAt) }))
+        .slice(-100)
+      : [],
   };
+}
+
+/**
+ * State that this machine ended (locked) a share it owned, so every adopter
+ * and every browser drops it — a fact, not a silence. The marker is cleared
+ * by re-sharing at the usual link.
+ */
+export async function markShareEnded(repositoryId, key, { root = machineIndexRoot(), now = Date.now() } = {}) {
+  return await withLock(root, async () => {
+    const value = await readState(root);
+    value.sharesEnded = [
+      ...(value.sharesEnded ?? []).filter((item) => item.key !== key),
+      { repositoryId, key, endedAt: new Date(now).toISOString() },
+    ].filter((item) => now - Date.parse(item.endedAt) < REMOVED_MEMORY_MS).slice(-100);
+    await writeState(root, value);
+    return value;
+  });
 }
 
 function freshState() {
@@ -274,13 +305,22 @@ export async function registerMachinePigeon(repository, config, {
       pid,
       registeredAt: fresh || !previous?.registeredAt ? new Date().toISOString() : previous.registeredAt,
       signalingServer: config.signalingServer,
-      ...(config.share?.role === 'owner' ? { share: {
+      // Every machine holding the share declares it — the owner and every
+      // adopter — so the share (and the link) outlives any one machine's
+      // record. Adopters say so; the mirror and the creation time come from
+      // the owner and are merged on the way in.
+      ...(config.share ? { share: {
         key: config.share.key,
         ownerPublicKey: config.share.ownerPublicKey,
+        ...(config.share.createdAt ? { createdAt: config.share.createdAt } : {}),
+        ...(config.share.role !== 'owner' ? { adopted: true } : {}),
         ...(config.share.mirror?.publicBaseUrl ? { mirror: config.share.mirror.publicBaseUrl } : {}),
       } } : {}),
     });
     if (!entry) throw new Error('Could not register this repository with the encrypted GitPigeon index');
+    if (config.share) {
+      value.sharesEnded = (value.sharesEnded ?? []).filter((item) => item.key !== config.share.key);
+    }
     if (!fresh) {
       const tombstone = (value.removed ?? []).find((item) => item.repositoryId === entry.repositoryId);
       if (tombstone) {
@@ -465,6 +505,9 @@ export function directoryValue(index, entries, now = Date.now(), serviceInstance
       && now - Date.parse(item.removedAt) < REMOVED_MEMORY_MS
       && !grouped.has(item.repositoryId))
     .map((item) => ({ repositoryId: item.repositoryId, removedAt: item.removedAt }));
+  const sharesEnded = (index.sharesEnded ?? [])
+    .filter((item) => now - Date.parse(String(item?.endedAt ?? '')) < REMOVED_MEMORY_MS)
+    .map((item) => ({ repositoryId: item.repositoryId, key: item.key, endedAt: item.endedAt }));
   return {
     protocol: INDEX_PROTOCOL,
     indexId: index.indexId,
@@ -473,6 +516,8 @@ export function directoryValue(index, entries, now = Date.now(), serviceInstance
     // Stated removals, so browsers evict their cached copy instead of letting
     // it outlive the repository.
     ...(removed.length ? { removed } : {}),
+    // Stated share endings (locks), the same way.
+    ...(sharesEnded.length ? { sharesEnded } : {}),
   };
 }
 
@@ -692,6 +737,8 @@ async function connectMachineDirectory(index, logger = {}, {
       // it: collect every share any record declares so the whole fleet can
       // adopt and serve it.
       const remoteShares = new Map();
+      // Locks stated by owners: a share whose key is ended is not a share.
+      const remoteEnded = new Map();
       let readableRecords = 0;
       for (const publisherId of publisherIds) {
         if (publisherId === index.publisherId) continue;
@@ -706,13 +753,35 @@ async function connectMachineDirectory(index, logger = {}, {
           || !Array.isArray(value.pigeons)) continue;
         readableRecords += 1;
         capabilities.push(...value.pigeons);
+        for (const item of Array.isArray(value.sharesEnded) ? value.sharesEnded : []) {
+          const repositoryId = String(item?.repositoryId ?? '');
+          const key = String(item?.key ?? '');
+          const endedAt = Date.parse(String(item?.endedAt ?? ''));
+          if (!DEVICE.test(repositoryId) || !SECRET.test(key) || !Number.isFinite(endedAt)) continue;
+          const list = remoteEnded.get(repositoryId) ?? [];
+          if (!list.some((known) => known.key === key)) list.push({ key, endedAt: new Date(endedAt).toISOString() });
+          remoteEnded.set(repositoryId, list);
+        }
         for (const pigeon of value.pigeons) {
           const repositoryId = String(pigeon?.repositoryId ?? '');
           const shareKey = String(pigeon?.share?.key ?? '');
           const ownerPublicKey = String(pigeon?.share?.ownerPublicKey ?? '').trim();
-          if (remoteShares.has(repositoryId) || !SECRET.test(shareKey)) continue;
+          if (!SECRET.test(shareKey)) continue;
           if (ownerPublicKey.length < 16 || ownerPublicKey.length > 512) continue;
-          remoteShares.set(repositoryId, { key: shareKey, ownerPublicKey });
+          const createdAt = Date.parse(String(pigeon.share.createdAt ?? ''));
+          const mirror = String(pigeon.share.mirror ?? '');
+          const declared = {
+            key: shareKey,
+            ownerPublicKey,
+            ...(Number.isFinite(createdAt) ? { createdAt: new Date(createdAt).toISOString() } : {}),
+            ...(mirror ? { mirror } : {}),
+          };
+          // One winner per repository, decided by the shares alone (see
+          // share-precedence.js); the same key from several machines is one
+          // share, merged so the owner's mirror and creation time count.
+          const current = remoteShares.get(repositoryId) ?? null;
+          const merged = current?.key === declared.key ? mergeShareDeclarations(current, declared) : declared;
+          remoteShares.set(repositoryId, preferredShare(merged, current?.key === declared.key ? null : current));
         }
         for (const item of Array.isArray(value.removed) ? value.removed : []) {
           const removedAt = Date.parse(String(item?.removedAt ?? ''));
@@ -761,7 +830,13 @@ async function connectMachineDirectory(index, logger = {}, {
       // learns the owner locked it — but only when at least one record was
       // actually readable, so a retrieval outage cannot masquerade as the
       // whole fleet unsharing everything.
-      if (readableRecords > 0) await onRemoteShares(remoteShares);
+      if (readableRecords > 0) {
+        for (const [repositoryId, ended] of remoteEnded) {
+          const share = remoteShares.get(repositoryId);
+          if (share && ended.some((item) => item.key === share.key)) remoteShares.delete(repositoryId);
+        }
+        await onRemoteShares(remoteShares, remoteEnded);
+      }
     });
     remoteQueue = operation.catch((error) => logger.error?.(error));
     return operation;
