@@ -295,7 +295,12 @@ test('one shell per machine: the device room and every repository channel reach 
   }));
   await settle();
   assert.equal(spawned.length, 1);
-  assert.deepEqual(spawned[0].terminal.writes, [changeDirectoryLine('zsh', repositoryA), 'pwd\r']);
+  // The cd is phrased for whichever shell this platform spawned (cmd on a
+  // Windows runner); what is invariant is its place in the stream and the
+  // leading space that keeps it out of history.
+  const [cdLine, ...rest] = spawned[0].terminal.writes;
+  assert.ok(cdLine.startsWith(' ') && cdLine.includes(repositoryA) && cdLine.endsWith('\r'), cdLine);
+  assert.deepEqual(rest, ['pwd\r']);
   assert.equal(changeDirectoryLine('zsh', repositoryA), ` cd '${repositoryA}'\r`);
   assert.equal(changeDirectoryLine('powershell', "C:\\it's"), " Set-Location -LiteralPath 'C:\\it''s'\r");
   assert.equal(changeDirectoryLine('cmd', 'C:\\repo'), ' cd /d "C:\\repo"\r');
