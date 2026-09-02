@@ -364,10 +364,25 @@ export class RealtimeWorkspaceServer {
     // again on every restart. Everyone else opens empty, asks the mesh, and
     // adopts what the seeder answers; if the seeder never answers, seed from
     // the local file after a deadline rather than staying blank forever.
-    const seedFromFile = async () => {
-      let content = '';
-      try { content = await readFile(path.join(this.repository.root, ...normalized.split('/')), 'utf8'); }
+    const readCurrentFile = async () => {
+      try { return await readFile(path.join(this.repository.root, ...normalized.split('/')), 'utf8'); }
       catch (error) { if (error?.code !== 'ENOENT') throw error; }
+      return '';
+    };
+    let seeding = null;
+    const seedFromFile = () => {
+      // One seed per document, however many askers arrive at once.
+      seeding ??= seedFromFileOnce().finally(() => { seeding = null; });
+      return seeding;
+    };
+    const seedFromFileOnce = async () => {
+      if (state.seeded) return;
+      if (state.seedTimer) {
+        clearInterval(state.seedTimer);
+        state.seedTimer = null;
+      }
+      const content = await readCurrentFile();
+      if (state.seeded) return;
       if (content && state.text.length === 0) {
         const contentHash = createHash('sha256').update(content).digest('hex');
         const seed = new Y.Doc({ gc: false });
@@ -382,6 +397,18 @@ export class RealtimeWorkspaceServer {
       state.writeHistory.push(createHash('sha256').update(content).digest('hex'));
       state.seeded = true;
       this.#flushPendingSyncs(state);
+    };
+    state.seedFromFile = seedFromFile;
+    // The asker's base is byte-identical to this file. A seed of that content
+    // is the SAME Yjs structure whoever builds it — the seed's client id is
+    // derived from the content hash on every side — so seeding it now cannot
+    // union anything with anyone; the election below only ever protected
+    // DIVERGENT copies. Without this, every fresh document (all of them,
+    // after a watcher restart) sat on "Loading GitPigeon editor…" for the
+    // full 6–12s election even when both sides agreed on every byte.
+    state.matchesFile = async (baseHash) => {
+      const content = await readCurrentFile();
+      return Boolean(content) && createHash('sha256').update(content).digest('hex') === String(baseHash);
     };
     // NOBODY seeds from disk while the mesh already carries the document.
     // A restarted watcher seeding from its file while a browser still held
@@ -436,6 +463,9 @@ export class RealtimeWorkspaceServer {
       // A document still waiting to adopt the seeder's content has nothing
       // authoritative to answer with yet — but the asker must not be left
       // hanging: answer as soon as a seed lands.
+      if (!state.seeded && await state.matchesFile(frame.baseHash)) {
+        await state.seedFromFile();
+      }
       if (!state.seeded) {
         state.pendingSyncs.push({ peerId, frame });
         return;

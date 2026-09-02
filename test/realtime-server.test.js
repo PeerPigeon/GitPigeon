@@ -174,6 +174,89 @@ test('only the smallest live device seeds; the other adopts, never unions', asyn
   assert.equal(await readFile(path.join(rootB, 'src/example.js'), 'utf8'), 'authoritative content\n');
 });
 
+test('a browser whose base matches the file byte-for-byte is answered at once, election or not', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-seed-match-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await GitRepository.init(root);
+  const repositoryId = 'a'.repeat(64);
+  const content = 'shared and identical content\n';
+  await mkdir(path.join(root, 'src'), { recursive: true });
+  await writeFile(path.join(root, 'src/example.js'), content);
+  const node = new FakeNode();
+  // Deliberately DEFERRING: a smaller device is alive, so this watcher would
+  // otherwise wait the full seedFallbackMs (set absurdly long here) before
+  // it could answer anyone.
+  const server = new RealtimeWorkspaceServer({ node, repository, repositoryId, secret: 's', deviceId: 'zzzz-device', seedElectedFallbackMs: 60_000, seedFallbackMs: 60_000, seedRetryMs: 1_000 });
+  await server.start();
+  t.after(() => server.stop());
+  node.receive('peer-a', repositoryId, REALTIME_CHANNEL, { kind: 'presence', deviceId: 'aaaa-device', repositoryId });
+  await settle();
+
+  const documentId = createHash('sha256').update([
+    'gitpigeon-realtime-v2', repositoryId, 'refs/heads/main', 'src/example.js',
+  ].join('\0')).digest('hex');
+  const request = (baseHash, doc) => ({
+    documentId,
+    path: 'src/example.js',
+    revision: 'refs/heads/main',
+    baseHash,
+    messageId: randomBytes(16).toString('hex'),
+    kind: 'sync-request',
+    part: 0,
+    total: 1,
+    payload: Buffer.from(Y.encodeStateVector(doc)).toString('base64'),
+  });
+
+  // Same bytes on both sides: any seed of them is the same Yjs structure, so
+  // there is nothing an election could protect. Answer now.
+  const browser = new Y.Doc();
+  const matching = createHash('sha256').update(content).digest('hex');
+  const startedAt = Date.now();
+  node.receive('browser', repositoryId, REALTIME_CHANNEL, request(matching, browser));
+  await settle();
+  const responses = node.directFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'sync-response');
+  assert.equal(responses.length, 1);
+  assert.ok(Date.now() - startedAt < 1_000);
+  Y.applyUpdate(browser, Buffer.from(responses[0].payload, 'base64'));
+  assert.equal(browser.getText('content').toString(), content);
+  // ...and the seed is byte-for-byte the structure a browser would have
+  // built from the same base, so merging the two changes nothing.
+  const own = new Y.Doc({ gc: false });
+  own.clientID = Number.parseInt(matching.slice(0, 8), 16) || 1;
+  own.getText('content').insert(0, content);
+  Y.applyUpdate(browser, Y.encodeStateAsUpdate(own));
+  assert.equal(browser.getText('content').toString(), content);
+  browser.destroy();
+  own.destroy();
+});
+
+test('a browser whose base differs from the file still waits for the election', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-seed-mismatch-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await GitRepository.init(root);
+  const repositoryId = 'a'.repeat(64);
+  await mkdir(path.join(root, 'src'), { recursive: true });
+  await writeFile(path.join(root, 'src/example.js'), 'the watcher copy\n');
+  const node = new FakeNode();
+  const server = new RealtimeWorkspaceServer({ node, repository, repositoryId, secret: 's', deviceId: 'zzzz-device', seedElectedFallbackMs: 60_000, seedFallbackMs: 60_000, seedRetryMs: 1_000 });
+  await server.start();
+  t.after(() => server.stop());
+  node.receive('peer-a', repositoryId, REALTIME_CHANNEL, { kind: 'presence', deviceId: 'aaaa-device', repositoryId });
+  await settle();
+  const documentId = createHash('sha256').update([
+    'gitpigeon-realtime-v2', repositoryId, 'refs/heads/main', 'src/example.js',
+  ].join('\0')).digest('hex');
+  const browser = new Y.Doc();
+  node.receive('browser', repositoryId, REALTIME_CHANNEL, {
+    documentId, path: 'src/example.js', revision: 'refs/heads/main', baseHash: 'c'.repeat(64),
+    messageId: randomBytes(16).toString('hex'), kind: 'sync-request', part: 0, total: 1,
+    payload: Buffer.from(Y.encodeStateVector(browser)).toString('base64'),
+  });
+  await settleSeed();
+  assert.equal(node.directFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'sync-response').length, 0);
+  browser.destroy();
+});
+
 test('an external file edit never deletes concurrent typing', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-fsdiff-'));
   t.after(() => rm(root, { recursive: true, force: true }));
