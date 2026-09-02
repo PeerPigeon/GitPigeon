@@ -301,9 +301,9 @@ test('one shell per machine: the device room and every repository channel reach 
   const [cdLine, ...rest] = spawned[0].terminal.writes;
   assert.ok(cdLine.startsWith(' ') && cdLine.includes(repositoryA) && cdLine.endsWith('\r'), cdLine);
   assert.deepEqual(rest, ['pwd\r']);
-  assert.equal(changeDirectoryLine('zsh', repositoryA), ` cd '${repositoryA}'\r`);
-  assert.equal(changeDirectoryLine('powershell', "C:\\it's"), " Set-Location -LiteralPath 'C:\\it''s'\r");
-  assert.equal(changeDirectoryLine('cmd', 'C:\\repo'), ' cd /d "C:\\repo"\r');
+  assert.equal(changeDirectoryLine('zsh', repositoryA), ` clear; cd '${repositoryA}'\r`);
+  assert.equal(changeDirectoryLine('powershell', "C:\\it's"), " Clear-Host; Set-Location -LiteralPath 'C:\\it''s'\r");
+  assert.equal(changeDirectoryLine('cmd', 'C:\\repo'), ' cls & cd /d "C:\\repo"\r');
 
   // A repository this machine no longer serves is not a directory to cd to.
   lease.release();

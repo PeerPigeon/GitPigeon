@@ -364,9 +364,11 @@ async function shellCommand(deviceName) {
  * it (HIST_IGNORE_SPACE / HISTCONTROL=ignorespace above).
  */
 export function changeDirectoryLine(flavor, directory) {
-  if (flavor === 'powershell') return ` Set-Location -LiteralPath '${String(directory).replaceAll("'", "''")}'\r`;
-  if (flavor === 'cmd') return ` cd /d "${String(directory).replaceAll('"', '')}"\r`;
-  return ` cd ${quoteShell(directory)}\r`;
+  // Clear first: the switch lands on a clean screen with only the new
+  // prompt, not a growing ladder of cd lines from every repository visited.
+  if (flavor === 'powershell') return ` Clear-Host; Set-Location -LiteralPath '${String(directory).replaceAll("'", "''")}'\r`;
+  if (flavor === 'cmd') return ` cls & cd /d "${String(directory).replaceAll('"', '')}"\r`;
+  return ` clear; cd ${quoteShell(directory)}\r`;
 }
 
 /**
