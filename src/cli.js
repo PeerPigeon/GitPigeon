@@ -64,6 +64,8 @@ import { clearInstalledUpdate, isNewerVersion, readInstalledUpdate, startAutomat
 import { pullPeerUpdateOnce, startPeerUpdates } from './peer-update.js';
 import { GITPIGEON_VERSION, IS_STANDALONE } from './version.js';
 
+import { cloneDirectory, setCloneDirectory } from './clone-directory.js';
+
 const HELP = `GitPigeon — real-time peer-to-peer sync for native Git
 
 Getting started
@@ -114,6 +116,7 @@ Background service
   git pigeon start [--poll D]           Start the watcher
   git pigeon restart [--poll D]         Restart it
   git pigeon stop                       Stop it
+  git pigeon clone-dir [DIR | --reset]  Where this machine puts new clones
   git pigeon update [--local]           Update from the latest release, or
                                         with --local, from a paired watcher
                                         on the LAN mesh
@@ -1086,7 +1089,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
             await reply({ requestId, ok: true, already: true, target: existing.repository, deviceName: deviceHostName() });
             return;
           }
-          const base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), 'Documents', 'GitPigeon'));
+          const base = await cloneDirectory();
           await mkdir(base, { recursive: true });
           const target = await availableCloneTarget(
             base,
@@ -2453,9 +2456,10 @@ async function availableCloneTarget(base, name) {
 
 export async function materializeGrantedRepositories(values, {
   root = machineIndexRoot(),
-  base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), "Documents", "GitPigeon")),
+  base: statedBase = null,
 } = {}) {
   if (!Array.isArray(values)) return [];
+  const base = statedBase ?? await cloneDirectory({ root });
   if (values.length > 1_000) throw new Error("The approved GitPigeon index contains too many repositories");
   const capabilities = [];
   const seen = new Set();
@@ -2500,7 +2504,7 @@ async function commandProtocol(args, verbose) {
     sharedJoin = parseShareUrl(value);
   } catch { /* not a share link; fall through to the sealed clone flow */ }
   if (sharedJoin) {
-    const base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), 'Documents', 'GitPigeon'));
+    const base = await cloneDirectory();
     await mkdir(base, { recursive: true });
     const target = await availableCloneTarget(
       base,
@@ -2514,7 +2518,7 @@ async function commandProtocol(args, verbose) {
   const envelope = parseNativeCloneUrl(value);
   const grant = openDeviceGrant(identity, envelope, { purpose: 'clone' });
   const repository = validateNativeClonePayload(grant);
-  const base = path.resolve(process.env.GITPIGEON_CLONE_DIR ?? path.join(homedir(), 'Documents', 'GitPigeon'));
+  const base = await cloneDirectory();
   await mkdir(base, { recursive: true });
   const target = await availableCloneTarget(
     base,
@@ -2523,6 +2527,24 @@ async function commandProtocol(args, verbose) {
   const invite = createInvite(repository);
   await commandInit([invite, target], process.cwd(), verbose);
   console.log(`Cloned ${repository.name} to ${target}.`);
+}
+
+async function commandCloneDir(args) {
+  const reset = takeFlag(args, '--reset');
+  const directory = args.shift();
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  if (reset && directory) throw new Error('Give a directory or --reset, not both.');
+  if (reset) {
+    await setCloneDirectory(null);
+    console.log(`New clones on this machine land in ${await cloneDirectory()} (the default).`);
+    return;
+  }
+  if (!directory) {
+    console.log(await cloneDirectory());
+    return;
+  }
+  const stated = await setCloneDirectory(directory);
+  console.log(`New clones on this machine land in ${stated}. The dashboard's Clone button, share links and \`git pigeon clone\` all use it; repositories already cloned stay where they are.`);
 }
 
 async function commandStatus(args, cwd) {
@@ -2557,6 +2579,7 @@ async function commandStatus(args, cwd) {
     console.log('This directory is not a GitPigeon repository.');
     console.log(`GitPigeon:        ${GITPIGEON_VERSION}`);
     console.log(`Watcher service:  ${watcher.running ? `running (PID ${watcher.pid})` : 'stopped'}`);
+    console.log(`Clone directory:  ${await cloneDirectory()}`);
     console.log(`Repositories:     ${repositories.length}`);
     for (const entry of repositories) {
       console.log(`  ${entry.name.padEnd(Math.max(...repositories.map((r) => r.name.length)))}  ${entry.repositoryId.slice(0, 10)}  ${entry.watching ? 'watching' : 'stopped'}  ${entry.repository}`);
@@ -2684,6 +2707,7 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   if (command === 'stop') return await commandStop(args);
   if (command === 'update') return await commandUpdate(args, verbose);
   if (command === 'clone') return await commandClone(args, cwd, verbose);
+  if (command === 'clone-dir') return await commandCloneDir(args);
   if (command === 'protocol') return await commandProtocol(args, verbose);
   if (command === 'terminal-device') return commandTerminalDevice(args);
   if (command === 'status') return await commandStatus(args, cwd);
