@@ -1100,7 +1100,8 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
           await mkdir(base, { recursive: true });
           const target = await availableCloneTarget(
             base,
-            safeRepositoryDirectoryName(`shared-${parsed.repositoryId.slice(0, 8)}`, parsed.repositoryId),
+            safeRepositoryDirectoryName(parsed.name ?? `shared-${parsed.repositoryId.slice(0, 8)}`, parsed.repositoryId),
+            parsed.repositoryId,
           );
           const repository = await GitRepository.init(target);
           let config = createIdentity({ repositoryId: parsed.repositoryId, signalingServer: parsed.signalingServer });
@@ -2453,18 +2454,42 @@ function safeRepositoryDirectoryName(value, repositoryId) {
   return name || fallback;
 }
 
-async function availableCloneTarget(base, name) {
-  for (let suffix = 1; suffix < 1_000; suffix += 1) {
-    const target = path.join(base, suffix === 1 ? name : `${name}-${suffix}`);
+/**
+ * Where a clone lands: `<base>/<name>` — the folder's basename IS the
+ * repository's name, never a suffixed variant of it. A `-2` folder used to
+ * appear whenever a same-named folder existed, and that basename then leaked
+ * into the fleet as the repository's name. When a DIFFERENT repository already
+ * lives at `<base>/<name>`, the newcomer nests under its own id instead:
+ * `<base>/<id>/<name>` — the name stays whole and the id, the real identity,
+ * does the disambiguating. An empty folder is available; a folder that
+ * already holds this very repository is reused.
+ */
+async function availableCloneTarget(base, name, repositoryId = null) {
+  const direct = path.join(base, name);
+  const nested = repositoryId ? path.join(base, repositoryId.slice(0, 12), name) : null;
+  for (const target of [direct, nested].filter(Boolean)) {
+    let entries;
     try {
-      const entries = await readdir(target);
-      if (entries.length === 0) return target;
+      entries = await readdir(target);
     } catch (error) {
       if (error?.code === 'ENOENT') return target;
       throw error;
     }
+    if (entries.length === 0) return target;
+    if (repositoryId && await cloneHoldsRepository(target, repositoryId)) return target;
   }
-  throw new Error(`Could not choose an unused clone directory below ${base}`);
+  throw new Error(`${direct} already holds a different repository, and so does ${nested}`);
+}
+
+async function cloneHoldsRepository(target, repositoryId) {
+  try {
+    const repository = await GitRepository.discover(target);
+    if (repository.root !== path.resolve(target)) return false;
+    const config = await loadConfig(repository.gitDir);
+    return config.repositoryId === repositoryId;
+  } catch {
+    return false;
+  }
 }
 
 export async function materializeGrantedRepositories(values, {
@@ -2492,6 +2517,7 @@ export async function materializeGrantedRepositories(values, {
     const target = await availableCloneTarget(
       base,
       safeRepositoryDirectoryName(capability.name, capability.repositoryId),
+      capability.repositoryId,
     );
     await ensureCloneDirectory(target);
     const repository = await GitRepository.init(target);
@@ -2521,7 +2547,8 @@ async function commandProtocol(args, verbose) {
     await mkdir(base, { recursive: true });
     const target = await availableCloneTarget(
       base,
-      safeRepositoryDirectoryName(`shared-${sharedJoin.repositoryId.slice(0, 8)}`, sharedJoin.repositoryId),
+      safeRepositoryDirectoryName(sharedJoin.name ?? `shared-${sharedJoin.repositoryId.slice(0, 8)}`, sharedJoin.repositoryId),
+      sharedJoin.repositoryId,
     );
     await commandInit([value, target], process.cwd(), verbose);
     console.log(`Mirroring the shared repository at ${target}.`);
@@ -2536,6 +2563,7 @@ async function commandProtocol(args, verbose) {
   const target = await availableCloneTarget(
     base,
     safeRepositoryDirectoryName(repository.name, repository.repositoryId),
+    repository.repositoryId,
   );
   const invite = createInvite(repository);
   await commandInit([invite, target], process.cwd(), verbose);

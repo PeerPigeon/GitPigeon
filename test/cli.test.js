@@ -221,3 +221,31 @@ test('the version command prints the running build and nothing else', async () =
     console.log = original;
   }
 });
+
+test("two different repositories with one name never get a -2 folder: the second nests under its id", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "gitpigeon-clone-name-test-"));
+  const stateRoot = path.join(root, "state");
+  const cloneRoot = path.join(root, "repositories");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const capabilities = [
+    { repositoryId: "aaaaaaaaaaaa1111", secret: "a".repeat(43), name: "test" },
+    { repositoryId: "bbbbbbbbbbbb2222", secret: "b".repeat(43), name: "test" },
+  ];
+  const added = await materializeGrantedRepositories(capabilities, { root: stateRoot, base: cloneRoot });
+  const { realpath } = await import("node:fs/promises");
+  const real = await realpath(cloneRoot);
+  const roots = (await Promise.all(added.map((item) => realpath(item.repository.root)))).sort();
+  assert.deepEqual(roots, [
+    path.join(real, "bbbbbbbbbbbb", "test"),
+    path.join(real, "test"),
+  ]);
+  assert.ok(roots.every((value) => !/-\d+$/.test(value)), "no clone folder carries a numeric suffix");
+  // The folder basename is the repository's name on BOTH, and so is the
+  // stored name every watcher publishes.
+  for (const item of added) {
+    assert.equal(path.basename(item.repository.root), "test");
+    assert.equal(item.config.name, "test");
+  }
+  const entries = await listMachinePigeons({ root: stateRoot, activeOnly: false });
+  assert.deepEqual(entries.map((entry) => entry.name), ["test", "test"]);
+});
