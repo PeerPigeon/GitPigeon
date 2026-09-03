@@ -299,6 +299,18 @@ async function ensureShareMirror(repository, config) {
   }
 }
 
+/**
+ * The name a repository gets when nothing stated one: its folder's basename
+ * with any clone-target counter stripped. `-2`, `-3`… were only ever produced
+ * by the old clone chooser when a same-named folder existed; they are never a
+ * name, and a machine that cloned before that chooser was fixed must not
+ * publish them as one.
+ */
+function defaultRepositoryName(root) {
+  const base = path.basename(root);
+  return base.replace(/-\d+$/, '') || base;
+}
+
 async function prepareRepositorySession(entry) {
   const repository = await GitRepository.discover(entry.repository);
   let config = await ensureShareMirror(repository, await loadConfig(repository.gitDir));
@@ -306,8 +318,13 @@ async function prepareRepositorySession(entry) {
   // current folder basename, ONCE. After this the name is the repository's
   // own: moving the folder or cloning it into a `-2` directory elsewhere
   // never renames it, on this machine or across the fleet.
-  if (!(typeof config.name === 'string' && config.name.trim())) {
-    config = await saveConfig(repository.gitDir, { ...config, name: path.basename(repository.root) });
+  const stated = typeof config.name === 'string' ? config.name.trim() : '';
+  if (!stated) {
+    config = await saveConfig(repository.gitDir, { ...config, name: defaultRepositoryName(repository.root) });
+  } else if (!config.nameSetAt && /-\d+$/.test(stated)) {
+    // A default frozen from a `-N` clone folder by an earlier build: not a
+    // name anyone chose. Only a person's rename (nameSetAt) keeps a suffix.
+    config = await saveConfig(repository.gitDir, { ...config, name: defaultRepositoryName(repository.root) });
   }
   return { repository, config, signature: repositorySessionSignature(config) };
 }
@@ -1326,7 +1343,7 @@ async function commandInit(args, cwd, verbose) {
     // the repository's own name), else the folder this machine created it in.
     // It is stored once and travels with the id — never recomputed from a
     // watcher's folder, so a later clone into a `-2` directory cannot rename it.
-    const defaultName = path.basename(repository.root);
+    const defaultName = defaultRepositoryName(repository.root);
     if (sharedJoin) {
       // Joining a SHARE URL: same repository identity, own local secret. The
       // share key admits this machine as a mirror — it carries the
