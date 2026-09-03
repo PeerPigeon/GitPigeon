@@ -301,7 +301,14 @@ async function ensureShareMirror(repository, config) {
 
 async function prepareRepositorySession(entry) {
   const repository = await GitRepository.discover(entry.repository);
-  const config = await ensureShareMirror(repository, await loadConfig(repository.gitDir));
+  let config = await ensureShareMirror(repository, await loadConfig(repository.gitDir));
+  // A repository from before names were stored freezes its name to the
+  // current folder basename, ONCE. After this the name is the repository's
+  // own: moving the folder or cloning it into a `-2` directory elsewhere
+  // never renames it, on this machine or across the fleet.
+  if (!(typeof config.name === 'string' && config.name.trim())) {
+    config = await saveConfig(repository.gitDir, { ...config, name: path.basename(repository.root) });
+  }
   return { repository, config, signature: repositorySessionSignature(config) };
 }
 
@@ -1314,17 +1321,22 @@ async function commandInit(args, cwd, verbose) {
   }
   const created = !config;
   if (!config) {
+    // The repository's name: adopt what the capability states (so a join keeps
+    // the repository's own name), else the folder this machine created it in.
+    // It is stored once and travels with the id — never recomputed from a
+    // watcher's folder, so a later clone into a `-2` directory cannot rename it.
+    const defaultName = path.basename(repository.root);
     if (sharedJoin) {
       // Joining a SHARE URL: same repository identity, own local secret. The
       // share key admits this machine as a mirror — it carries the
       // repository and keeps it available, but only rostered keys publish.
-      config = createIdentity({ repositoryId: sharedJoin.repositoryId, signalingServer: sharedJoin.signalingServer });
+      config = createIdentity({ repositoryId: sharedJoin.repositoryId, signalingServer: sharedJoin.signalingServer, name: sharedJoin.name ?? defaultName });
       config = await saveConfig(repository.gitDir, {
         ...config,
         share: { key: sharedJoin.shareKey, ownerPublicKey: sharedJoin.ownerPublicKey, role: 'mirror' },
       });
     } else {
-      config = createIdentity(invite ?? { repositoryId, secret, signalingServer });
+      config = createIdentity({ ...(invite ?? { repositoryId, secret, signalingServer }), name: invite?.name ?? defaultName });
       await saveConfig(repository.gitDir, config);
     }
   }
@@ -1933,6 +1945,7 @@ async function commandShare(args, cwd, verbose) {
     ownerPublicKey: share.ownerPublicKey,
     signalingServer: config.signalingServer,
     mirror: share.mirror?.publicBaseUrl,
+    name: config.name,
   };
   console.log(created
     ? 'This repository is now shared. Anyone with this link can read and mirror it;'

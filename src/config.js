@@ -11,8 +11,22 @@ export function createIdentity(overrides = {}) {
     secret: overrides.secret ?? randomBytes(32).toString('base64url'),
     deviceId: overrides.deviceId ?? randomUUID().replaceAll('-', ''),
     signalingServer: overrides.signalingServer,
+    // The repository's display name is a property of the REPOSITORY, decided
+    // once and carried with its id — never recomputed from each watcher's
+    // folder basename, which a clone-target `-2` suffix or a rename on disk
+    // would otherwise turn into a fleet-wide rename. A join adopts the name
+    // the invite / share / clone capability states; a creator names it from
+    // its folder at that one moment.
+    ...(overrides.name != null ? { name: overrides.name } : {}),
+    ...(overrides.nameSetAt != null ? { nameSetAt: overrides.nameSetAt } : {}),
     createdAt: overrides.createdAt ?? new Date().toISOString(),
   });
+}
+
+/** The stored repository name, else the folder basename for a config without one. */
+export function repositoryDisplayName(config, repositoryRoot) {
+  const stated = typeof config?.name === 'string' ? config.name.trim() : '';
+  return (stated || path.basename(String(repositoryRoot ?? ''))).slice(0, 200);
 }
 
 export function validateConfig(input) {
@@ -128,11 +142,22 @@ export function validateConfig(input) {
       }
     }
   }
+  const name = input.name != null && String(input.name).trim()
+    ? String(input.name).trim().slice(0, 200)
+    : undefined;
+  // When the name was last set by a person (an explicit rename), so a rename
+  // wins over every folder-derived default fleet-wide and the newest rename
+  // wins over an older one. Absent for a name that is only the folder default.
+  const nameSetAt = name && Number.isFinite(Date.parse(String(input.nameSetAt ?? "")))
+    ? new Date(input.nameSetAt).toISOString()
+    : undefined;
   return {
     version: CONFIG_VERSION,
     repositoryId: validateRepositoryId(input.repositoryId),
     secret: validateSecret(input.secret),
     deviceId,
+    ...(name ? { name } : {}),
+    ...(nameSetAt ? { nameSetAt } : {}),
     ...(signalingServer ? { signalingServer } : {}),
     ...(share ? { share } : {}),
     ...(shareDormant ? { shareDormant } : {}),

@@ -19,11 +19,16 @@ export function validateSecret(value) {
   return secret;
 }
 
-export function createInvite({ repositoryId, secret, signalingServer }) {
+export function createInvite({ repositoryId, secret, signalingServer, name }) {
   const id = validateRepositoryId(repositoryId);
   const key = validateSecret(secret);
   const url = new URL(`gitpigeon://sync/${encodeURIComponent(id)}`);
   if (signalingServer) url.searchParams.set('signal', String(signalingServer));
+  // The repository's name travels with the capability so a machine joining
+  // by this invite adopts it, rather than naming the repository after the
+  // folder it happens to clone into.
+  const trimmed = typeof name === 'string' ? name.trim().slice(0, 200) : '';
+  if (trimmed) url.searchParams.set('n', trimmed);
   url.hash = key;
   return url.toString();
 }
@@ -44,7 +49,8 @@ export function parseInvite(value) {
   if (signalingServer && !/^wss?:\/\//i.test(signalingServer)) {
     throw new Error('Invite signaling server must use ws:// or wss://');
   }
-  return { repositoryId, secret, signalingServer };
+  const name = (url.searchParams.get('n') || '').trim().slice(0, 200) || undefined;
+  return { repositoryId, secret, signalingServer, ...(name ? { name } : {}) };
 }
 
 export function secretsEqual(left, right) {

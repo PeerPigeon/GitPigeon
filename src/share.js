@@ -74,7 +74,7 @@ function validPublicKey(value) {
  * owner's public key in the FRAGMENT, which browsers never send to any
  * server — the page host cannot read the repository, only the link holder.
  */
-export function createShareUrl({ repositoryId, shareKey, ownerPublicKey, signalingServer, mirror, origin = 'https://gitpigeon.dev' }) {
+export function createShareUrl({ repositoryId, shareKey, ownerPublicKey, signalingServer, mirror, name, origin = 'https://gitpigeon.dev' }) {
   const id = validateRepositoryId(repositoryId);
   const fragment = new URLSearchParams();
   fragment.set('s', validateSecret(shareKey));
@@ -84,6 +84,11 @@ export function createShareUrl({ repositoryId, shareKey, ownerPublicKey, signali
   // fetch room-ciphertext records from this base URL and decrypt them with
   // the share key they already hold.
   if (mirror) fragment.set('m', validateMirrorUrl(mirror));
+  // The repository's name rides the link (in the fragment, never sent to a
+  // server) so a visitor or adopting watcher shows the repository's own name
+  // rather than the folder a clone lands in.
+  const trimmedName = typeof name === 'string' ? name.trim().slice(0, 200) : '';
+  if (trimmedName) fragment.set('n', trimmedName);
   const url = new URL(`${origin.replace(/\/$/, '')}/r/${encodeURIComponent(id)}`);
   url.hash = fragment.toString();
   return url.toString();
@@ -114,7 +119,8 @@ export function parseShareUrl(value) {
     throw new Error('Share signaling server must use ws:// or wss://');
   }
   const mirror = fragment.get('m') ? validateMirrorUrl(fragment.get('m')) : undefined;
-  return { repositoryId, shareKey, ownerPublicKey, signalingServer, mirror };
+  const name = (fragment.get('n') || '').trim().slice(0, 200) || undefined;
+  return { repositoryId, shareKey, ownerPublicKey, signalingServer, mirror, ...(name ? { name } : {}) };
 }
 
 export function validateMirrorUrl(value) {

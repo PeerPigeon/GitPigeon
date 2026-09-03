@@ -265,6 +265,32 @@ export class ControlServer {
       }, 0).unref?.();
       return { mirror: mirror ? mirror.publicBaseUrl : null };
     }
+    if (frame.kind === 'rename-repository') {
+      // The repository's display name is a UI label, configurable by the
+      // person and shared by every device that has the repository. The
+      // dashboard sends this to every connected watcher; each one that has
+      // the repository stores the new name in its config with the set time,
+      // so the newest rename wins fleet-wide and no watcher's folder basename
+      // can rename it back. Repositories this machine does not have are a
+      // no-op success, since the same broadcast reaches every watcher.
+      const repositoryId = String(frame.targetRepositoryId ?? '');
+      if (!REPOSITORY_ID.test(repositoryId)) throw new Error('Invalid repository ID');
+      const name = String(frame.name ?? '').trim().slice(0, 200);
+      if (!name) throw new Error('A repository name is required');
+      const entries = await listMachinePigeons({ root: this.root, activeOnly: false });
+      const entry = entries.find((candidate) => candidate.repositoryId === repositoryId);
+      if (!entry) return { name, applied: false };
+      const { GitRepository } = await import('./git.js');
+      const { loadConfig, saveConfig } = await import('./config.js');
+      const repository = await GitRepository.discover(entry.repository);
+      const config = await loadConfig(repository.gitDir);
+      if (config.name === name) return { name, applied: false };
+      const next = await saveConfig(repository.gitDir, { ...config, name, nameSetAt: new Date().toISOString() });
+      await registerMachinePigeon(repository, next, { root: this.root, pid: entry.pid ?? null });
+      await this.onChanged();
+      this.logger.info?.(`Renamed ${repositoryId.slice(0, 8)} to "${name}" from a paired browser`);
+      return { name, applied: true };
+    }
     if (frame.kind === 'commit-repository') {
       // Retries are how a commit outlives a flapping channel, and a retry
       // whose predecessor actually landed must not commit twice or report

@@ -126,7 +126,9 @@ export class RepositorySynchronizer {
         getMetadata: async () => ({
             protocol: PROTOCOL,
             repositoryId: config.repositoryId,
-            repositoryName: path.basename(repository.root).slice(0, 200),
+            repositoryName: (typeof config.name === 'string' && config.name.trim())
+              ? config.name.trim().slice(0, 200)
+              : path.basename(repository.root).slice(0, 200),
             deviceId: config.deviceId,
             serviceInstanceId: this.serviceInstanceId,
             machineIndexId: this.machineIndexId,
@@ -826,7 +828,9 @@ export class RepositorySynchronizer {
       protocol: PROTOCOL,
       repositoryId: this.config.repositoryId,
       deviceId: this.config.deviceId,
-      name: path.basename(this.repository.root).slice(0, 200),
+      name: (typeof this.config.name === 'string' && this.config.name.trim())
+        ? this.config.name.trim().slice(0, 200)
+        : path.basename(this.repository.root).slice(0, 200),
       // `snapshotId` stays absent until this device has content to offer, so a
       // reader can tell "watcher online, nothing published yet" from "offline".
       ...(snapshotId ? { snapshotId } : {}),

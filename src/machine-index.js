@@ -104,6 +104,9 @@ function validEntry(value) {
   if (pid !== null && (!Number.isSafeInteger(pid) || pid < 1)) return null;
   if (signalingServer && !/^wss?:\/\//i.test(signalingServer)) return null;
   const registeredAt = Date.parse(String(value.registeredAt ?? ''));
+  const nameSetAt = Number.isFinite(Date.parse(String(value.nameSetAt ?? '')))
+    ? new Date(value.nameSetAt).toISOString()
+    : undefined;
   let share;
   if (value.share && typeof value.share === 'object') {
     const key = String(value.share.key ?? '');
@@ -125,6 +128,7 @@ function validEntry(value) {
   return {
     repository, repositoryId, secret, deviceId, name, pid,
     ...(Number.isFinite(registeredAt) ? { registeredAt: new Date(registeredAt).toISOString() } : {}),
+    ...(nameSetAt ? { nameSetAt } : {}),
     ...(signalingServer ? { signalingServer } : {}),
     ...(share ? { share } : {}),
   };
@@ -301,7 +305,14 @@ export async function registerMachinePigeon(repository, config, {
       repositoryId: config.repositoryId,
       secret: config.secret,
       deviceId: config.deviceId,
-      name: path.basename(repository.root),
+      // The repository's own stored name, carried with its id; the folder
+      // basename is only the fallback for a config that predates the name.
+      name: (typeof config.name === 'string' && config.name.trim())
+        ? config.name.trim().slice(0, 200)
+        : path.basename(repository.root),
+      // When a person last renamed it — carried so an explicit rename wins
+      // over every folder default and the newest rename wins over an older.
+      ...(config.nameSetAt ? { nameSetAt: config.nameSetAt } : {}),
       pid,
       registeredAt: fresh || !previous?.registeredAt ? new Date().toISOString() : previous.registeredAt,
       signalingServer: config.signalingServer,
@@ -491,12 +502,18 @@ export function directoryValue(index, entries, now = Date.now(), serviceInstance
         ...(entry.snapshot ? { snapshot: entry.snapshot } : {}),
         ...(entry.empty ? { empty: true } : {}),
         ...(entry.registeredAt ? { registeredAt: entry.registeredAt } : {}),
+        ...(entry.nameSetAt ? { nameSetAt: entry.nameSetAt } : {}),
         ...(entry.share ? { share: entry.share } : {}),
       });
     } else {
       current.watcherCount += active;
       if (!current.snapshot && entry.snapshot) current.snapshot = entry.snapshot;
       if (entry.snapshot || !entry.empty) delete current.empty;
+      // Two clone paths of one repository on this machine: the newest rename
+      // owns the name so a stale path cannot revert it.
+      const currentNameAt = Date.parse(String(current.nameSetAt ?? '')) || 0;
+      const entryNameAt = Date.parse(String(entry.nameSetAt ?? '')) || 0;
+      if (entryNameAt > currentNameAt) { current.name = entry.name; current.nameSetAt = entry.nameSetAt; }
     }
   }
   const removed = (index.removed ?? [])

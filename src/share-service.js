@@ -189,6 +189,9 @@ export async function startShareService({
   signalingServer = null,
   node: injectedNode = null,
   logger = {},
+  // The repository's own name, carried into the signed head so a share
+  // reader adopts it instead of one owner's folder basename.
+  name = null,
 }) {
   const role = share.role === 'owner' ? 'owner' : 'mirror';
   let node = injectedNode;
@@ -352,7 +355,7 @@ export async function startShareService({
         sequence: (currentHead?.sequence ?? 0) + 1,
         keyPair,
         files,
-        name: path.basename(repository.root),
+        name: (typeof name === 'string' && name.trim()) ? name.trim().slice(0, 200) : path.basename(repository.root),
       });
       await node.storage?.put?.('public', shareHeadKey(repositoryId), head);
       lastHeadRecord = head;
