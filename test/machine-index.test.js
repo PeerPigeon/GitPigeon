@@ -96,11 +96,17 @@ test('machine index securely groups active repositories for PeerPigeon publicati
     1_700_000_000_000,
     watcherServiceId,
     publisherPeerId,
+    'Daniels-Mini',
+    'pairing-pub-key',
   );
   assert.equal(publisher.kind, 'publisher-directory');
   assert.equal(publisher.publisherId, state.publisherId);
   assert.equal(publisher.serviceInstanceId, watcherServiceId);
   assert.equal(publisher.peerId, publisherPeerId);
+  assert.equal(publisher.deviceName, 'Daniels-Mini');
+  // Browsers derive this machine's six-digit pairing code from this key, so
+  // the Watchers panel can show the same digits the CLI prints.
+  assert.equal(publisher.pairingPublicKey, 'pairing-pub-key');
 
   assert.equal((await unregisterMachinePigeon(firstRepository, { root: stateRoot })).removed, true);
   assert.deepEqual((await listMachinePigeons({ root: stateRoot })).map(({ repositoryId }) => repositoryId), ['beta-pigeon']);

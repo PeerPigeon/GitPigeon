@@ -1665,6 +1665,7 @@ async function commandPair(args, verbose) {
   const index = await loadMachineIndex({ root });
   const identity = await loadOrCreateNativeDeviceIdentity({ root });
 
+  console.log(`This machine's pairing code: ${await localPairingCode(root)}`);
   console.log('Looking for a device or browser asking to pair…');
 
   // Both routes run at once: local discovery for anything on this network, and
@@ -2660,8 +2661,10 @@ async function commandStatus(args, cwd) {
       repository: repository.root,
       watching: watcher.running && watchServiceHasRepository(watcher, repository.root),
     }));
+    const pairingCode = await localPairingCode(machineIndexRoot()).catch(() => null);
     const value = {
       version: GITPIGEON_VERSION,
+      pairingCode,
       repository: null,
       service: watcher.running ? 'running' : 'stopped',
       watcherPid: watcher.running ? watcher.pid : null,
@@ -2673,6 +2676,7 @@ async function commandStatus(args, cwd) {
     }
     console.log('This directory is not a GitPigeon repository.');
     console.log(`GitPigeon:        ${GITPIGEON_VERSION}`);
+    console.log(`Pairing code:     ${pairingCode ?? 'unavailable'}`);
     console.log(`Watcher service:  ${watcher.running ? `running (PID ${watcher.pid})` : 'stopped'}`);
     console.log(`Clone directory:  ${await cloneDirectory()}`);
     console.log(`Repositories:     ${repositories.length}`);
@@ -2688,8 +2692,10 @@ async function commandStatus(args, cwd) {
   const state = await cache.loadState();
   const watcher = await watchServiceStatus(machineIndexRoot());
   const registered = watchServiceHasRepository(watcher, repository.root);
+  const pairingCode = await localPairingCode(machineIndexRoot()).catch(() => null);
   const value = {
     version: GITPIGEON_VERSION,
+    pairingCode,
     repository: repository.root,
     repositoryId: config.repositoryId,
     deviceId: config.deviceId,
@@ -2704,6 +2710,7 @@ async function commandStatus(args, cwd) {
   if (json) console.log(JSON.stringify(value, null, 2));
   else {
     console.log(`GitPigeon:        ${GITPIGEON_VERSION}`);
+    console.log(`Pairing code:     ${pairingCode ?? 'unavailable'}`);
     console.log(`Repository:       ${value.repository}`);
     console.log(`Pigeon ID:        ${value.repositoryId}`);
     console.log(`Device:           ${value.deviceId}`);
@@ -2730,6 +2737,7 @@ async function commandDoctor(args, cwd) {
   console.log('Pinned SHA:  ee07a5934bda5d05cf9b0f364a13456ba3438a1c');
   console.log(`Repository:  ${repository.root}`);
   console.log(`Build:       ${GITPIGEON_VERSION}`);
+  console.log(`Pairing code: ${await localPairingCode(machineIndexRoot()).catch(() => 'unavailable')}`);
   const found = await reportCommandOnPath();
   if (found?.path && !found.frozen) console.log(`Command:     ${found.path}`);
 }

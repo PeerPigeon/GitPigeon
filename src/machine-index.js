@@ -10,6 +10,7 @@ const execFileAsync = promisify(execFile);
 import process from 'node:process';
 import { GITPIGEON_VERSION } from './version.js';
 import { deviceHostName } from './device-name.js';
+import { loadPairingKeyPair } from './pairing-identity.js';
 import { installNativeStorage } from './native-storage.js';
 import { mergeShareDeclarations, preferredShare } from './share-precedence.js';
 import { installNativeWebRTC } from './webrtc.js';
@@ -577,10 +578,15 @@ export function publisherDirectoryValue(
   serviceInstanceId = null,
   peerId = null,
   deviceName = null,
+  pairingPublicKey = null,
 ) {
   return {
     ...directoryValue(index, entries, now, serviceInstanceId),
     kind: 'publisher-directory',
+    // The key this machine's six-digit pairing code derives from. Browsers
+    // show the code beside the machine, so a person can match what the CLI
+    // prints without a pairing request being in flight.
+    ...(pairingPublicKey ? { pairingPublicKey: String(pairingPublicKey).slice(0, 200) } : {}),
     publisherId: index.publisherId,
     // Which build this machine runs, so browsers can show it beside the
     // machine instead of leaving versions a mystery.
@@ -673,6 +679,7 @@ async function connectMachineDirectory(index, logger = {}, {
 } = {}) {
   await installNativeWebRTC();
   await installNativeStorage(root);
+  const pairingPublicKey = (await loadPairingKeyPair(root).catch(() => null))?.pub ?? null;
   const { PeerPigeonNode } = await import('peerpigeon');
   const prefix = `gitpigeon/index/v1/${index.indexId}/`;
   const repositoryPrefix = 'gitpigeon/v1/';
@@ -915,6 +922,7 @@ async function connectMachineDirectory(index, logger = {}, {
         serviceInstanceId,
         node.getClientId(),
         deviceHostName(),
+        pairingPublicKey,
       );
       const fingerprint = JSON.stringify(value.pigeons);
       const directoryChanged = fingerprint !== lastDirectoryFingerprint;
@@ -1028,6 +1036,8 @@ async function connectMachineDirectory(index, logger = {}, {
             Date.now(),
             serviceInstanceId,
             node.getClientId(),
+            deviceHostName(),
+            pairingPublicKey,
           ));
         }
       } catch (error) {
