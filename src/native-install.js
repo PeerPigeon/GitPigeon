@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, constants, mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -235,6 +235,55 @@ export async function removeServiceWatchdog({
   try { await run('launchctl', ['bootout', `gui/${uid}/${WATCHDOG_LABEL}`]); } catch { /* not loaded */ }
   await rm(plist, { force: true });
   return { plist };
+}
+
+// Reports which `git-pigeon` the shell's PATH resolves and whether it is a
+// frozen copy: a raw binary at a stable path (the pre-launcher pkg put one in
+// /usr/local/bin as root) never changes again, because the auto-updater only
+// writes the state directory. Such a machine keeps answering `git pigeon`
+// with an old build no matter how many updates the service installs, which
+// looked exactly like an update that had not happened. Scripts are fine —
+// the shim and the pkg launcher chase current.json, and a source checkout
+// runs whatever is checked out — and so is the update executable itself.
+export async function inspectCommandOnPath({
+  platform = process.platform,
+  environment = process.env,
+  home = os.homedir(),
+  updatesDirectory = null,
+  name = platform === 'win32' ? 'git-pigeon.exe' : 'git-pigeon',
+} = {}) {
+  const shim = path.join(home, '.local', 'bin', 'git-pigeon');
+  const directories = String(environment.PATH ?? '').split(path.delimiter).filter(Boolean);
+  for (const directory of directories) {
+    const candidate = path.join(directory, name);
+    let head;
+    try {
+      await access(candidate, constants.X_OK);
+      const handle = await open(candidate, 'r');
+      try {
+        const buffer = Buffer.alloc(4096);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        head = buffer.subarray(0, bytesRead);
+      } finally {
+        await handle.close();
+      }
+    } catch {
+      continue;
+    }
+    const text = head.toString('latin1');
+    const script = text.startsWith('#!');
+    const resolved = path.resolve(candidate);
+    const update = Boolean(updatesDirectory)
+      && resolved.startsWith(`${path.resolve(updatesDirectory)}${path.sep}`);
+    return {
+      path: resolved,
+      shim,
+      script,
+      chases: script && text.includes('updates/current.json'),
+      frozen: !script && !update && platform !== 'win32',
+    };
+  }
+  return { path: null, shim, script: false, chases: false, frozen: false };
 }
 
 // Rewrites just the `git pigeon` command shim. The service calls this on

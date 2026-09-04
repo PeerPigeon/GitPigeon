@@ -51,7 +51,7 @@ import {
 import { startDeviceApprovalResponder } from './device-approval-mesh.js';
 import { loadPairingKeyPair, localPairingCode } from './pairing-identity.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
-import { ensureServiceWatchdog, installNativeIntegration, refreshNativeCommandShim, removeServiceWatchdog } from './native-install.js';
+import { ensureServiceWatchdog, inspectCommandOnPath, installNativeIntegration, refreshNativeCommandShim, removeServiceWatchdog } from './native-install.js';
 import { ControlServer } from './control-server.js';
 import { RepositorySynchronizer } from './protocol.js';
 import { TerminalServer } from './terminal-server.js';
@@ -125,7 +125,7 @@ Checking on things
   git pigeon status [--json]            Show this repository's sync state
   git pigeon doctor                     Check this machine's setup
   git pigeon version                    Print the installed version
-                                        (also --version, -V)
+                                        (also --version, -version, -v)
 
 Durations accept ms, s, or m (for example: 500ms, 10s, 2m).
 Because the executable is named git-pigeon, both \`git pigeon\` and
@@ -1499,6 +1499,7 @@ async function commandInstall(args, verbose) {
   const installed = await installNativeIntegration();
   console.log(`Installed the native git pigeon command at ${installed.commandPath}.`);
   console.log('Registered gitpigeon:// clone links with this operating system.');
+  await reportCommandOnPath();
   let existing = null;
   try { existing = await loadMachineIndex({ create: false }); } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
@@ -2333,6 +2334,40 @@ async function commandUnwatch(args, cwd) {
   console.log(`Removed ${match.name} from the encrypted PeerPigeon index. The machine-wide service is still running.`);
 }
 
+/**
+ * Says which `git-pigeon` this shell will actually run, and how to fix it
+ * when that is a frozen copy no update can reach. The service already keeps
+ * ~/.local/bin/git-pigeon chasing the newest build; a root-owned raw binary
+ * earlier on PATH still wins, so the one-time fix is to put the chasing shim
+ * at that path. Printed after update, install and doctor — the moments a
+ * person is staring at a version that refuses to move.
+ */
+export async function reportCommandOnPath({
+  inspect = inspectCommandOnPath,
+  refreshShim = refreshNativeCommandShim,
+  standalone = IS_STANDALONE,
+  root = machineIndexRoot(),
+  print = console.log,
+} = {}) {
+  let found;
+  try {
+    if (standalone) await refreshShim().catch(() => {});
+    found = await inspect({ updatesDirectory: path.join(root, 'updates') });
+  } catch {
+    return null;
+  }
+  if (found.frozen) {
+    print(`\n\`git pigeon\` in this shell runs ${found.path}, a frozen copy installed`);
+    print('before updates could reach it, so it keeps answering as an old build.');
+    print('Replace it once with the shim that follows every update:');
+    print(`  sudo install -m 0755 '${found.shim}' '${found.path}'`);
+  } else if (!found.path) {
+    print(`\n\`git pigeon\` is not on this shell's PATH. Add ${path.dirname(found.shim)} to PATH,`);
+    print('then open a new terminal.');
+  }
+  return found;
+}
+
 async function commandUpdate(args, verbose) {
   const local = takeFlag(args, '--local');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
@@ -2346,6 +2381,7 @@ async function commandUpdate(args, verbose) {
     if (result.unsupported) throw new Error('No release build exists for this platform');
     if (!result.updated) {
       console.log(`GitPigeon ${GITPIGEON_VERSION} is already the newest release.`);
+      await reportCommandOnPath();
       return;
     }
   } else {
@@ -2387,6 +2423,7 @@ async function commandUpdate(args, verbose) {
   console.log(`Installed GitPigeon ${result.version}; restarting the watcher.`);
   await stopWatchService(root);
   await startWatchService({ root, verbose });
+  await reportCommandOnPath();
 }
 
 export async function commandStop(args, {
@@ -2692,6 +2729,9 @@ async function commandDoctor(args, cwd) {
   console.log(`PeerPigeon:  ${dependency}`);
   console.log('Pinned SHA:  ee07a5934bda5d05cf9b0f364a13456ba3438a1c');
   console.log(`Repository:  ${repository.root}`);
+  console.log(`Build:       ${GITPIGEON_VERSION}`);
+  const found = await reportCommandOnPath();
+  if (found?.path && !found.frozen) console.log(`Command:     ${found.path}`);
 }
 
 /**
@@ -2739,7 +2779,7 @@ export async function main(argv = process.argv.slice(2), options = {}) {
     console.log(HELP);
     return;
   }
-  if (command === 'version' || command === '--version' || command === '-V') {
+  if (['version', '--version', '-version', '-V', '-v'].includes(command)) {
     console.log(GITPIGEON_VERSION);
     return;
   }

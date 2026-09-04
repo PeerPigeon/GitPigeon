@@ -212,7 +212,7 @@ test('the version command prints the running build and nothing else', async () =
   const original = console.log;
   console.log = (value) => lines.push(String(value));
   try {
-    for (const spelling of ['version', '--version', '-V']) {
+    for (const spelling of ['version', '--version', '-version', '-V', '-v']) {
       lines.length = 0;
       await main([spelling]);
       assert.deepEqual(lines, [GITPIGEON_VERSION]);
@@ -248,4 +248,37 @@ test("two different repositories with one name never get a -2 folder: the second
   }
   const entries = await listMachinePigeons({ root: stateRoot, activeOnly: false });
   assert.deepEqual(entries.map((entry) => entry.name), ["test", "test"]);
+});
+
+test('update, install and doctor say when the git-pigeon on PATH is a frozen copy', async () => {
+  const { reportCommandOnPath } = await import('../src/cli.js');
+  const lines = [];
+  const print = (value) => lines.push(String(value));
+  const frozen = await reportCommandOnPath({
+    print,
+    standalone: false,
+    root: '/state',
+    inspect: async () => ({ path: '/usr/local/bin/git-pigeon', shim: '/home/me/.local/bin/git-pigeon', script: false, chases: false, frozen: true }),
+  });
+  assert.equal(frozen.frozen, true);
+  assert.match(lines.join('\n'), /runs \/usr\/local\/bin\/git-pigeon, a frozen copy/);
+  assert.match(lines.join('\n'), /sudo install -m 0755 '\/home\/me\/.local\/bin\/git-pigeon' '\/usr\/local\/bin\/git-pigeon'/);
+
+  lines.length = 0;
+  await reportCommandOnPath({
+    print,
+    standalone: false,
+    root: '/state',
+    inspect: async () => ({ path: null, shim: '/home/me/.local/bin/git-pigeon', script: false, chases: false, frozen: false }),
+  });
+  assert.match(lines.join('\n'), /not on this shell's PATH\. Add \/home\/me\/.local\/bin to PATH/);
+
+  lines.length = 0;
+  await reportCommandOnPath({
+    print,
+    standalone: false,
+    root: '/state',
+    inspect: async () => ({ path: '/home/me/.local/bin/git-pigeon', shim: '/home/me/.local/bin/git-pigeon', script: true, chases: true, frozen: false }),
+  });
+  assert.deepEqual(lines, []);
 });

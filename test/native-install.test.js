@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { ensureServiceWatchdog, installNativeIntegration, refreshNativeCommandShim, removeServiceWatchdog, watchdogPlist } from '../src/native-install.js';
+import { ensureServiceWatchdog, inspectCommandOnPath, installNativeIntegration, refreshNativeCommandShim, removeServiceWatchdog, watchdogPlist } from '../src/native-install.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -102,6 +102,44 @@ test('the launchd watchdog installs once, reloads only on change, and stop remov
 
     // Non-macOS platforms are untouched.
     assert.equal(await ensureServiceWatchdog({ platform: 'linux', home, uid: 501, run }), null);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('a raw binary earlier on PATH than the chasing shim is reported as frozen', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX PATH lookup');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'gitpigeon-path-inspect-'));
+  try {
+    const frozenDir = path.join(home, 'usr-local-bin');
+    const stateDir = path.join(home, 'state');
+    await mkdir(frozenDir, { recursive: true });
+    // A Mach-O/ELF style header, not a script: this is the August pkg binary.
+    await writeFile(path.join(frozenDir, 'git-pigeon'), Buffer.from([0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0]), { mode: 0o755 });
+    const { commandPath } = await refreshNativeCommandShim({ platform: 'linux', home, invocation: ['/nowhere/git-pigeon'] });
+    const localBin = path.dirname(commandPath);
+    const options = { platform: 'linux', home, updatesDirectory: path.join(stateDir, 'updates') };
+
+    const frozenFirst = await inspectCommandOnPath({ ...options, environment: { PATH: `${frozenDir}:${localBin}` } });
+    assert.equal(frozenFirst.path, path.join(frozenDir, 'git-pigeon'));
+    assert.equal(frozenFirst.frozen, true);
+    assert.equal(frozenFirst.shim, commandPath);
+
+    const shimFirst = await inspectCommandOnPath({ ...options, environment: { PATH: `${localBin}:${frozenDir}` } });
+    assert.equal(shimFirst.path, commandPath);
+    assert.equal(shimFirst.chases, true);
+    assert.equal(shimFirst.frozen, false);
+
+    // The update executable itself is never frozen: it is what updates write.
+    const updateDir = path.join(stateDir, 'updates', '9.9.9');
+    await mkdir(updateDir, { recursive: true });
+    await writeFile(path.join(updateDir, 'git-pigeon'), Buffer.from([0x7f, 0x45, 0x4c, 0x46]), { mode: 0o755 });
+    const updateFirst = await inspectCommandOnPath({ ...options, environment: { PATH: `${updateDir}:${frozenDir}` } });
+    assert.equal(updateFirst.frozen, false);
+
+    const missing = await inspectCommandOnPath({ ...options, environment: { PATH: path.join(home, 'empty') } });
+    assert.equal(missing.path, null);
+    assert.equal(missing.frozen, false);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
