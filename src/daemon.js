@@ -430,6 +430,13 @@ export async function createWatchServiceControl(root, token, stop) {
         repositoryErrors,
       });
     },
+    // The index half's own verdict — peers reached, last publish, last
+    // error — so `git pigeon status` can say online or offline instead of
+    // merely that a process exists. A process can run for hours while no
+    // browser can reach it; "running" said nothing about that.
+    async setMeshState(mesh) {
+      await updateState({ mesh: { ...mesh, updatedAt: new Date().toISOString() } });
+    },
     async close() {
       if (closed) return;
       closed = true;

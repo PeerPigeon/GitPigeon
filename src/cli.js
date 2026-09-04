@@ -875,6 +875,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let lanApprovals;
   let reconciliationTimer;
   let vanishedTimer = null;
+  let meshStateTimer = null;
   let indexWatcher;
   let reconciling = false;
   let peerUpdates;
@@ -1013,6 +1014,14 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
 
   try {
     control = await createWatchServiceControl(root, token, stop);
+    // Every five seconds the service states whether its index half can reach
+    // anyone, so `git pigeon status` can say online or offline.
+    const publishMeshState = () => {
+      if (!machineIndex || !control) return;
+      control.setMeshState(machineIndex.diagnostics()).catch(() => {});
+    };
+    meshStateTimer = setInterval(publishMeshState, 5_000);
+    meshStateTimer.unref?.();
     machineIndex = await connectMachineIndexService(log, {
       root,
       serviceInstanceId,
@@ -1270,6 +1279,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);
     if (vanishedTimer) clearInterval(vanishedTimer);
+    if (meshStateTimer) clearInterval(meshStateTimer);
     if (reconciliationTimer) clearTimeout(reconciliationTimer);
     indexWatcher?.close();
     while (reconciling) await sleep(10);
@@ -2691,6 +2701,33 @@ async function commandCloneDir(args) {
   console.log(`New clones on this machine land in ${stated}. The dashboard's Clone button, share links and \`git pigeon clone\` all use it; repositories already cloned stay where they are.`);
 }
 
+const MESH_STATE_FRESH_MS = 30_000;
+
+/**
+ * Started or stopped is the process; online or offline is whether its index
+ * half reaches anyone. Both are stated, because a watcher can run for hours
+ * while no browser can reach it, and "running" hid exactly that.
+ */
+function describeWatcherService(watcher) {
+  if (!watcher?.running) return { service: 'stopped', online: false, mesh: null, text: 'stopped' };
+  const mesh = watcher.mesh && typeof watcher.mesh === 'object' ? watcher.mesh : null;
+  const updatedAt = mesh ? Date.parse(String(mesh.updatedAt ?? '')) : NaN;
+  const fresh = Number.isFinite(updatedAt) && Date.now() - updatedAt <= MESH_STATE_FRESH_MS;
+  const peers = Number.isSafeInteger(mesh?.indexPeers) ? mesh.indexPeers : null;
+  const online = fresh && peers !== null && peers > 0;
+  const publishedAgo = Number.isSafeInteger(mesh?.publishedAgoMs) ? Math.round(mesh.publishedAgoMs / 1000) : null;
+  let detail;
+  if (!mesh || !fresh) detail = 'offline — the service has not reported its mesh state yet';
+  else if (online) detail = `online — ${peers} index peer${peers === 1 ? '' : 's'}${publishedAgo !== null ? `, published ${publishedAgo}s ago` : ''}`;
+  else detail = `offline — no index peers${mesh.indexError ? `; ${String(mesh.indexError).slice(0, 160)}` : ''}`;
+  return {
+    service: 'started',
+    online,
+    mesh,
+    text: `started (PID ${watcher.pid}) · ${detail}`,
+  };
+}
+
 async function commandStatus(args, cwd) {
   const json = takeFlag(args, '--json');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
@@ -2714,7 +2751,9 @@ async function commandStatus(args, cwd) {
       version: GITPIGEON_VERSION,
       pairingCode,
       repository: null,
-      service: watcher.running ? 'running' : 'stopped',
+      service: describeWatcherService(watcher).service,
+      online: describeWatcherService(watcher).online,
+      mesh: describeWatcherService(watcher).mesh,
       watcherPid: watcher.running ? watcher.pid : null,
       repositories,
     };
@@ -2725,7 +2764,7 @@ async function commandStatus(args, cwd) {
     console.log('This directory is not a GitPigeon repository.');
     console.log(`GitPigeon:        ${GITPIGEON_VERSION}`);
     console.log(`Pairing code:     ${pairingCode ?? 'unavailable'}`);
-    console.log(`Watcher service:  ${watcher.running ? `running (PID ${watcher.pid})` : 'stopped'}`);
+    console.log(`Watcher service:  ${describeWatcherService(watcher).text}`);
     console.log(`Clone directory:  ${await cloneDirectory()}`);
     console.log(`Repositories:     ${repositories.length}`);
     for (const entry of repositories) {
@@ -2754,6 +2793,9 @@ async function commandStatus(args, cwd) {
     trackedFiles,
     watching: watcher.running && registered,
     watcherPid: watcher.running && registered ? watcher.pid : null,
+    service: describeWatcherService(watcher).service,
+    online: describeWatcherService(watcher).online,
+    mesh: describeWatcherService(watcher).mesh,
   };
   if (json) console.log(JSON.stringify(value, null, 2));
   else {
@@ -2768,6 +2810,7 @@ async function commandStatus(args, cwd) {
     console.log(`Private files:     ${value.trackedFiles.length}`);
     for (const file of value.trackedFiles) console.log(`  ${file}`);
     console.log(`Watching:          ${value.watching ? `yes (PID ${value.watcherPid})` : 'no'}`);
+    console.log(`Watcher:           ${describeWatcherService(watcher).text}`);
   }
 }
 
