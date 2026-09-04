@@ -1,6 +1,6 @@
 import { watch as watchFilesystem } from "node:fs";
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, readdir, rm } from 'node:fs/promises';
+import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -926,6 +926,14 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     try {
       prepared = await prepareRepositorySession(entry);
     } catch (error) {
+      // A clone deleted from disk is not a failure to report forever; it is
+      // a registration to drop. No tombstone: other machines keep the repo.
+      const gone = await dropVanishedRegistrations(root, (message) => log.info(message)).catch(() => []);
+      if (gone.some((repository) => repository.root === entry.repository)) {
+        repositoryErrors.delete(entry.repository);
+        await publishServiceRepositoryState();
+        return;
+      }
       repositoryErrors.set(entry.repository, error.message);
       await publishServiceRepositoryState();
       log.error(new Error(`Could not watch ${entry.repository}: ${error.message}`));
@@ -2237,6 +2245,33 @@ function watchedRepositories(registrations) {
   ));
 }
 
+/**
+ * A registered clone that no longer exists on disk is dropped from THIS
+ * machine's index, with no tombstone: the person deleted a folder, not the
+ * repository, and every other machine keeps serving it. Leaving the
+ * registration behind made the service refuse to start over a folder
+ * that was gone ("Not a Git repository"), and the only way out — unwatch —
+ * would have tombstoned the repository fleet-wide when the deleted folder
+ * was this machine's only copy.
+ */
+export async function dropVanishedRegistrations(root, report = (message) => console.log(message)) {
+  const registrations = await listMachinePigeons({ root, activeOnly: false });
+  const dropped = [];
+  for (const repository of watchedRepositories(registrations)) {
+    let vanished = false;
+    try {
+      await stat(path.join(repository.root, '.git'));
+    } catch (error) {
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') vanished = true;
+    }
+    if (!vanished) continue;
+    await unregisterMachinePigeon({ root: repository.root }, { root, tombstone: false });
+    dropped.push(repository);
+    report(`${repository.root} no longer exists; dropped it from this machine's index. Other machines keep ${repository.name}.`);
+  }
+  return dropped;
+}
+
 export async function commandStart(args, {
   verbose = false,
   indexRoot,
@@ -2249,6 +2284,7 @@ export async function commandStart(args, {
   if (pollMs < 100) throw new Error('Poll interval must be at least 100ms');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const root = indexRoot ?? machineIndexRoot();
+  await dropVanishedRegistrations(root);
   const repositories = watchedRepositories(
     await listMachinePigeons({ root, activeOnly: false }),
   );

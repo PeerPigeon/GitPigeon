@@ -382,3 +382,27 @@ test('shares travel with every holder, carry their creation time, and end as a s
   assert.equal(record.pigeons[0].share.adopted, undefined);
   assert.equal(record.sharesEnded, undefined);
 });
+
+test('unregistering with tombstone:false drops the path but states no removal', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-unregister-no-tombstone-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateRoot = path.join(root, 'state');
+  const repository = await createRepository(path.join(root, 'only-copy'));
+  await registerMachinePigeon(repository, createIdentity({
+    repositoryId: 'only-copy-id',
+    secret: 'c'.repeat(64),
+    deviceId: 'only-copy-device',
+  }), { root: stateRoot, pid: null });
+  const result = await unregisterMachinePigeon({ root: repository.root }, { root: stateRoot, tombstone: false });
+  assert.equal(result.removed, true);
+  assert.deepEqual(result.state.entries, []);
+  assert.deepEqual(result.state.removed ?? [], []);
+  // The default still tombstones a sole registration: that is what unwatch means.
+  await registerMachinePigeon(repository, createIdentity({
+    repositoryId: 'only-copy-id',
+    secret: 'c'.repeat(64),
+    deviceId: 'only-copy-device',
+  }), { root: stateRoot, pid: null });
+  const stated = await unregisterMachinePigeon({ root: repository.root }, { root: stateRoot });
+  assert.deepEqual(stated.state.removed.map((item) => item.repositoryId), ['only-copy-id']);
+});

@@ -216,7 +216,9 @@ test('the watcher offers itself to browsers that are already paired', async (t) 
   // of one fixed object made a machine visible only for its first few minutes.
   const first = announced[0];
   node.broadcasts.length = 0;
-  await new Promise((resolve) => setTimeout(resolve, 1));
+  // The fresh request differs by its issue time, so wait past one millisecond;
+  // a 1ms sleep landed in the same millisecond under load and failed.
+  await new Promise((resolve) => setTimeout(resolve, 10));
   node.emit('peerConnected', { peerId: 'browser' });
   const again = node.broadcasts.filter((value) => value?.kind === 'request');
   assert.ok(again.length, 'the watcher should keep announcing');

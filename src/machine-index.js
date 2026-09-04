@@ -351,7 +351,14 @@ export async function registerMachinePigeon(repository, config, {
   });
 }
 
-export async function unregisterMachinePigeon(repository, { root = machineIndexRoot(), now = Date.now() } = {}) {
+export async function unregisterMachinePigeon(repository, {
+  root = machineIndexRoot(),
+  now = Date.now(),
+  // `git pigeon unwatch` states a removal the whole fleet acts on. A clone
+  // that simply vanished from disk is not that: this machine stops serving
+  // it, and every other machine keeps its copy.
+  tombstone = true,
+} = {}) {
   return await withLock(root, async () => {
     const value = await readState(root);
     const previous = value.entries.length;
@@ -369,7 +376,7 @@ export async function unregisterMachinePigeon(repository, { root = machineIndexR
       // repository, so dropping this path does not remove the repository.
       // Tombstoning it anyway outdated the surviving registration and the
       // fleet converged on deleting a repository every machine still wanted.
-      if (remaining.has(item.repositoryId)) continue;
+      if (!tombstone || remaining.has(item.repositoryId)) continue;
       tombstones.set(item.repositoryId, { repositoryId: item.repositoryId, removedAt: new Date(now).toISOString() });
     }
     value.removed = [...tombstones.values()]

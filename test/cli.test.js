@@ -7,7 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { commandStart, commandStop, materializeGrantedRepositories } from '../src/cli.js';
 import { createIdentity } from '../src/config.js';
-import { listMachinePigeons, registerMachinePigeon } from '../src/machine-index.js';
+import { listMachinePigeons, loadMachineIndex, registerMachinePigeon } from '../src/machine-index.js';
 import { createRepository } from './helpers.js';
 
 function startFixtureProcess() {
@@ -281,4 +281,45 @@ test('update, install and doctor say when the git-pigeon on PATH is a frozen cop
     inspect: async () => ({ path: '/home/me/.local/bin/git-pigeon', shim: '/home/me/.local/bin/git-pigeon', script: true, chases: true, frozen: false }),
   });
   assert.deepEqual(lines, []);
+});
+
+test('start drops a registration whose clone vanished from disk, without tombstoning the repository', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-start-vanished-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const kept = await createRepository(path.join(root, 'kept'));
+  const deleted = await createRepository(path.join(root, 'GitPigeon-2'));
+  const stateRoot = path.join(root, 'state');
+  await registerMachinePigeon(kept, createIdentity({
+    repositoryId: 'vanished-kept',
+    secret: 'a'.repeat(64),
+    deviceId: 'vanished-device-kept',
+  }), { root: stateRoot, pid: null });
+  await registerMachinePigeon(deleted, createIdentity({
+    repositoryId: 'vanished-deleted',
+    secret: 'b'.repeat(64),
+    deviceId: 'vanished-device-deleted',
+  }), { root: stateRoot, pid: null });
+  // The person removed the folder — rm -rf — and never ran unwatch.
+  await rm(deleted.root, { recursive: true, force: true });
+  const loaded = [];
+  const printed = [];
+  const original = console.log;
+  console.log = (value) => printed.push(String(value));
+  try {
+    await commandStart([], {
+      indexRoot: stateRoot,
+      startService: async () => ({ started: true }),
+      waitForRepository: async (_indexRoot, repository) => { loaded.push(repository); },
+    });
+  } finally {
+    console.log = original;
+  }
+  // Only the surviving clone is waited on; the vanished one is no longer registered.
+  assert.deepEqual(loaded, [kept.root]);
+  const remaining = await listMachinePigeons({ root: stateRoot, activeOnly: false });
+  assert.deepEqual(remaining.map((entry) => entry.repositoryId), ['vanished-kept']);
+  // A deleted folder is not a fleet-wide removal: no tombstone, other machines keep it.
+  const index = await loadMachineIndex({ root: stateRoot, create: false });
+  assert.deepEqual(index.removed ?? [], []);
+  assert.ok(printed.some((line) => /no longer exists; dropped it from this machine's index/.test(line)), printed.join('\n'));
 });
