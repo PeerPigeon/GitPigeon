@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import * as Y from 'yjs';
 import {
@@ -39,9 +39,14 @@ const PRESENCE_FRESH_MS = 30_000;
 const SEED_RETRY_MS = 2_000;
 const SEED_FALLBACK_MS = 12_000;
 const SEED_ELECTED_FALLBACK_MS = 6_000;
+// How long a version this watcher wrote counts as a possible echo (an
+// overlay straggler bouncing the file back). Beyond it, the same bytes
+// reappearing are a person's act — git checkout, stash, a branch switch —
+// and are taken as an edit, never overwritten by the live document.
+const ECHO_WINDOW_MS = 15_000;
 
 export class RealtimeWorkspaceServer {
-  constructor({ node, repository, secret, repositoryId, deviceId = null, logger = {}, onFileWritten = null, seedFallbackMs = SEED_FALLBACK_MS, seedElectedFallbackMs = SEED_ELECTED_FALLBACK_MS, seedRetryMs = SEED_RETRY_MS }) {
+  constructor({ node, repository, secret, repositoryId, deviceId = null, logger = {}, onFileWritten = null, seedFallbackMs = SEED_FALLBACK_MS, seedElectedFallbackMs = SEED_ELECTED_FALLBACK_MS, seedRetryMs = SEED_RETRY_MS, echoWindowMs = ECHO_WINDOW_MS }) {
     this.node = node;
     this.repository = repository;
     this.deviceId = deviceId ? String(deviceId) : null;
@@ -56,6 +61,7 @@ export class RealtimeWorkspaceServer {
     this.seedFallbackMs = seedFallbackMs;
     this.seedElectedFallbackMs = seedElectedFallbackMs;
     this.seedRetryMs = seedRetryMs;
+    this.echoWindowMs = echoWindowMs;
     this.assemblies = new Map();
     this.started = false;
     this.unsubscribe = null;
@@ -226,23 +232,64 @@ export class RealtimeWorkspaceServer {
   async filesystemChanged(input) {
     let file;
     try { file = this.liveWorkspace.normalize(input); } catch { return; }
-    for (const state of this.documents.values()) {
+    // The clone itself is gone (rm -rf of the folder while this watcher
+    // ran). Nothing that follows is an edit: every file "vanishing" was
+    // once diffed against the live document and broadcast as an edit that
+    // deleted every line, and every other machine wrote that empty file
+    // into its own working tree. Forget the documents and say nothing.
+    try {
+      await stat(path.join(this.repository.root, '.git'));
+    } catch (error) {
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') {
+        if (this.documents.size) this.logger.info?.(`${this.repository.root} is gone; live documents dropped, nothing propagated`);
+        this.documents.clear();
+        return;
+      }
+      throw error;
+    }
+    for (const [documentId, state] of this.documents) {
       if (state.path !== file || state.writing || !state.seeded) continue;
       let content = '';
+      let missing = false;
       try { content = await readFile(path.join(this.repository.root, ...file.split('/')), 'utf8'); }
-      catch (error) { if (error?.code !== 'ENOENT') throw error; }
+      catch (error) {
+        if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') throw error;
+        missing = true;
+      }
+      // A deleted file is not an empty file. Streaming the deletion as an
+      // edit blanked the file on every other machine; forget the document
+      // instead — it is rebuilt from a peer, or from disk, when next opened.
+      if (missing) {
+        this.logger.info?.(`${file} was removed from disk; live document dropped, nothing propagated`);
+        this.documents.delete(documentId);
+        continue;
+      }
       // The filesystem event for our own write arrives after `writing` has
       // already cleared. Treating it as an external edit pumped the file back
       // into the document, indefinitely.
       if (content === state.lastWritten) continue;
       const current = state.text.toString();
       if (content === current) { state.lastWritten = content; continue; }
+      // Zero bytes where there was content is almost never a person's edit:
+      // most editors truncate the file and then write it, and the write's
+      // event follows in a moment. Taking the truncation as an edit blanked
+      // the file fleet-wide in between. Wait for the content.
+      if (content === '' && current.length > 0) {
+        this.logger.debug?.(`${file} is momentarily empty on disk; waiting for its content`);
+        continue;
+      }
       // The file bounced back to an OLDER version this watcher itself wrote —
       // an overlay straggler or a slow copy, not a person's edit. Treating
       // those echoes as edits deleted whatever had been typed since that
       // version, live, keystroke by keystroke. A watcher never mistakes its
-      // own past for someone else's present.
-      if (state.writeHistory.includes(createHash('sha256').update(content).digest('hex'))) {
+      // own past for someone else's present — but only its RECENT past: the
+      // same bytes coming back later are a checkout or a stash, a person's
+      // act, and an empty document never wins over a file with content.
+      const contentHash = createHash('sha256').update(content).digest('hex');
+      const echo = current.length > 0 && state.writeHistory.some((entry) => (
+        entry.hash === contentHash && Date.now() - entry.at <= this.echoWindowMs
+      ));
+      if (echo) {
         state.lastWritten = null;
         await this.#write(state);
         continue;
@@ -394,7 +441,7 @@ export class RealtimeWorkspaceServer {
       state.lastWritten = content;
       // The content this document was born from is a known file state: its
       // echo must be recognized like any other.
-      state.writeHistory.push(createHash('sha256').update(content).digest('hex'));
+      state.writeHistory.push({ hash: createHash('sha256').update(content).digest('hex'), at: Date.now() });
       state.seeded = true;
       this.#flushPendingSyncs(state);
     };
@@ -487,7 +534,13 @@ export class RealtimeWorkspaceServer {
     // update to everyone and fire a full-state response back at the sender
     // after every keystroke batch: gossip already delivers broadcasts to the
     // room, so all of it was amplification that raced the next keystroke.
+    const hadContent = state.text.length > 0;
     Y.applyUpdate(state.doc, frame.payload, 'remote');
+    if (hadContent && state.text.length === 0) {
+      // Allowed — a person can select everything and delete — but never
+      // silent: a zero-byte write is the one a person asks about later.
+      this.logger.info?.(`${state.path} emptied by a live edit from ${String(peerId).slice(0, 12)}; writing 0 bytes`);
+    }
     if (!state.seeded && state.text.length > 0) {
       // The elected seeder answered; its content is this document's base.
       state.seeded = true;
@@ -528,7 +581,7 @@ export class RealtimeWorkspaceServer {
       }
       this.lastWriteError = null;
       state.lastWritten = data.toString('utf8');
-      state.writeHistory.push(createHash('sha256').update(state.lastWritten).digest('hex'));
+      state.writeHistory.push({ hash: createHash('sha256').update(state.lastWritten).digest('hex'), at: Date.now() });
       if (state.writeHistory.length > 30) state.writeHistory.shift();
       this.onFileWritten?.(state.path);
     } finally {

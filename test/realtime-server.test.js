@@ -319,3 +319,106 @@ test('an external file edit never deletes concurrent typing', async (t) => {
   assert.ok(text.includes('typed while busy'), `typing survived the edit: ${JSON.stringify(text)}`);
   assert.ok(text.includes('external line'), `external edit landed: ${JSON.stringify(text)}`);
 });
+
+async function openSeededDocument(t, { name, content, serverOptions = {} }) {
+  const root = await mkdtemp(path.join(tmpdir(), `gitpigeon-${name}-`));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await GitRepository.init(root);
+  const node = new FakeNode();
+  const repositoryId = 'a'.repeat(64);
+  const server = new RealtimeWorkspaceServer({ node, repository, repositoryId, secret: 's', deviceId: 'solo', seedElectedFallbackMs: 120, seedFallbackMs: 240, seedRetryMs: 40, ...serverOptions });
+  await server.start();
+  t.after(() => server.stop());
+  await writeFile(path.join(root, 'notes.md'), content);
+  const documentId = createHash('sha256').update([
+    'gitpigeon-realtime-v2', repositoryId, 'refs/heads/main', 'notes.md',
+  ].join('\0')).digest('hex');
+  const frame = (kind, payload) => ({
+    documentId, path: 'notes.md', revision: 'refs/heads/main', baseHash: 'c'.repeat(64),
+    messageId: randomBytes(16).toString('hex'), kind, part: 0, total: 1,
+    payload: Buffer.from(payload).toString('base64'),
+  });
+  const browser = new Y.Doc();
+  node.receive('browser', repositoryId, REALTIME_CHANNEL, frame('sync-request', Y.encodeStateVector(browser)));
+  await settleSeed();
+  const response = node.directFrames(REALTIME_CHANNEL).find((f) => f.kind === 'sync-response');
+  Y.applyUpdate(browser, Buffer.from(response.payload, 'base64'));
+  assert.equal(browser.getText('content').toString(), content);
+  const seen = new Set();
+  const applyOutbound = () => {
+    for (const update of node.broadcastFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'update')) {
+      if (seen.has(update.messageId)) continue;
+      seen.add(update.messageId);
+      Y.applyUpdate(browser, Buffer.from(update.payload, 'base64'));
+    }
+    return browser.getText('content').toString();
+  };
+  const sendUpdate = (mutate) => {
+    const before = Y.encodeStateAsUpdate(browser);
+    mutate(browser.getText('content'));
+    node.receive('browser', repositoryId, REALTIME_CHANNEL, frame('update', Y.encodeStateAsUpdate(browser, Y.encodeStateVectorFromUpdate(before))));
+  };
+  return { root, server, node, browser, documentId, file: path.join(root, 'notes.md'), applyOutbound, sendUpdate };
+}
+
+test('a file deleted from disk is never streamed to other machines as a delete-all edit', async (t) => {
+  const { root, server, browser, documentId, file, applyOutbound } = await openSeededDocument(t, { name: 'rm-file', content: 'keep me\n' });
+  // rm README.md — or rm -rf of the whole clone — while the watcher runs.
+  // Diffing "everything" against "nothing" used to broadcast an edit that
+  // deleted every line, and every other machine wrote the empty file.
+  await rm(file, { force: true });
+  await server.filesystemChanged('notes.md');
+  await settle();
+  assert.equal(applyOutbound(), 'keep me\n');
+  assert.equal(server.documents.has(documentId), false, 'the live document is forgotten, not emptied');
+
+  // The whole clone gone: nothing is propagated either.
+  await rm(path.join(root, '.git'), { recursive: true, force: true });
+  await server.filesystemChanged('notes.md');
+  await settle();
+  assert.equal(browser.getText('content').toString(), 'keep me\n');
+});
+
+test('a file truncated to zero bytes waits for its content instead of blanking the fleet', async (t) => {
+  const { server, file, applyOutbound } = await openSeededDocument(t, { name: 'truncate', content: 'first line\n' });
+  // Most editors truncate, then write. The truncation is not an edit.
+  await writeFile(file, '');
+  await server.filesystemChanged('notes.md');
+  await settle();
+  assert.equal(applyOutbound(), 'first line\n');
+  // The write that follows is.
+  await writeFile(file, 'first line\nsecond line\n');
+  await server.filesystemChanged('notes.md');
+  await settle();
+  assert.equal(applyOutbound(), 'first line\nsecond line\n');
+});
+
+test('a version written long ago coming back (git checkout) is an edit, not an echo to overwrite', async (t) => {
+  const { server, file, applyOutbound, sendUpdate } = await openSeededDocument(t, { name: 'checkout', content: 'v1\n', serverOptions: { echoWindowMs: 60 } });
+  sendUpdate((text) => text.insert(text.length, 'v2 typed\n'));
+  await settle();
+  assert.equal(await readFile(file, 'utf8'), 'v1\nv2 typed\n');
+  // Well past the echo window, a person checks v1 out again.
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  await writeFile(file, 'v1\n');
+  await server.filesystemChanged('notes.md');
+  await settle();
+  assert.equal(await readFile(file, 'utf8'), 'v1\n', 'the checkout stands on disk');
+  assert.equal(applyOutbound(), 'v1\n', 'and the live document follows it');
+});
+
+test('an empty live document never wins over a file that has content', async (t) => {
+  const { server, file, applyOutbound, sendUpdate } = await openSeededDocument(t, { name: 'restore', content: 'original\n' });
+  // A live edit emptied the document; the watcher wrote 0 bytes.
+  sendUpdate((text) => text.delete(0, text.length));
+  await settle();
+  assert.equal(await readFile(file, 'utf8'), '');
+  // Seconds later the person restores the file. Its hash is in the write
+  // history (the seed), which used to make the restore an "echo" that the
+  // empty document immediately overwrote — again and again.
+  await writeFile(file, 'original\n');
+  await server.filesystemChanged('notes.md');
+  await settle();
+  assert.equal(await readFile(file, 'utf8'), 'original\n');
+  assert.equal(applyOutbound(), 'original\n');
+});

@@ -874,6 +874,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let machineIndex;
   let lanApprovals;
   let reconciliationTimer;
+  let vanishedTimer = null;
   let indexWatcher;
   let reconciling = false;
   let peerUpdates;
@@ -981,6 +982,10 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     if (reconciling || stopping || !machineIndex) return;
     reconciling = true;
     try {
+      // A clone deleted while this service ran is dropped here (no
+      // tombstone) so its session stops instead of streaming the deletion
+      // of every file to the other machines as live edits.
+      await dropVanishedRegistrations(root, (message) => log.info(message));
       const entries = await listMachinePigeons({ root, activeOnly: false });
       const desired = new Set(entries.map((entry) => entry.repository));
       for (const [repositoryRoot, record] of sessions) {
@@ -1207,6 +1212,10 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       if (String(filename ?? "") === "index.json") scheduleReconcile();
     });
     indexWatcher.on("error", (error) => log.error(error));
+    // index.json only changes when a command changes it; a folder deleted
+    // out from under a session changes nothing there. Look on a clock too.
+    vanishedTimer = setInterval(scheduleReconcile, VANISHED_CLONE_CHECK_MS);
+    vanishedTimer.unref?.();
     await control.ready();
     log.info(`GitPigeon service is watching ${sessions.size} ${sessions.size === 1 ? 'repository' : 'repositories'} as PID ${process.pid}`);
     if (IS_STANDALONE) {
@@ -1260,6 +1269,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     await peerUpdates?.stop()?.catch?.(() => {});
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);
+    if (vanishedTimer) clearInterval(vanishedTimer);
     if (reconciliationTimer) clearTimeout(reconciliationTimer);
     indexWatcher?.close();
     while (reconciling) await sleep(10);
@@ -2244,6 +2254,8 @@ function watchedRepositories(registrations) {
     left.name.localeCompare(right.name) || left.root.localeCompare(right.root)
   ));
 }
+
+const VANISHED_CLONE_CHECK_MS = 30_000;
 
 /**
  * A registered clone that no longer exists on disk is dropped from THIS
