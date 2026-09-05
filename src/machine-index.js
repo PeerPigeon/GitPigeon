@@ -493,6 +493,10 @@ export function publisherDirectoryKey(indexId, publisherId) {
 // A month of remembering what was removed is plenty: any browser that has
 // not connected in that long refreshes its whole cache anyway.
 export const REMOVED_MEMORY_MS = 30 * 24 * 60 * 60_000;
+// How often an UNCHANGED publisher record is re-put as a liveness heartbeat.
+// Browsers mark a watcher offline 45s after its last record; this stays well
+// inside that while cutting the full-record traffic by an order of magnitude.
+export const PUBLISH_HEARTBEAT_MS = 20_000;
 
 export function directoryValue(index, entries, now = Date.now(), serviceInstanceId = null) {
   const grouped = new Map();
@@ -947,6 +951,17 @@ async function connectMachineDirectory(index, logger = {}, {
       // Keep the per-device heartbeat current even while PeerPigeon is
       // renegotiating. Storage will carry the newest record to every browser
       // as soon as the mesh reconnects instead of exposing a stale watcher.
+      //
+      // But not on every tick. This record is a megabyte with a dozen
+      // repositories (each pigeon carries its snapshot manifest), and every
+      // put is a full copy to every connected peer. Writing it unchanged
+      // every few seconds pushed two megabytes a second through werift on
+      // both machines, starved their keepalives, and dropped the very peers
+      // it was heartbeating to (record version 45,570 on the mini by
+      // evening). An unchanged directory is re-put only when the heartbeat
+      // is due — inside the dashboard's 45-second liveness window.
+      const heartbeatDue = lastPublishedAt === null || Date.now() - lastPublishedAt >= PUBLISH_HEARTBEAT_MS;
+      if (!directoryChanged && !heartbeatDue) return;
       const record = await storage.put('public', publisherKey, value);
       selfPutVersion = record?.version ?? null;
       lastPublishedAt = Date.now();
