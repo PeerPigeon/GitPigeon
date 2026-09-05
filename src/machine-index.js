@@ -512,6 +512,8 @@ export const REMOVED_MEMORY_MS = 30 * 24 * 60 * 60_000;
 // Browsers mark a watcher offline 45s after its last record; this stays well
 // inside that while cutting the full-record traffic by an order of magnitude.
 export const PUBLISH_HEARTBEAT_MS = 20_000;
+// How often the watcher pulls the other publishers' records regardless of events.
+export const REMOTE_PULL_INTERVAL_MS = 30_000;
 
 export function directoryValue(index, entries, now = Date.now(), serviceInstanceId = null) {
   const grouped = new Map();
@@ -1050,6 +1052,16 @@ async function connectMachineDirectory(index, logger = {}, {
   const timer = setInterval(() => {
     publish().catch((error) => logger.error?.(error));
   }, heartbeatMs);
+  // Pull, not only push. Gossip forwards each write to a fan-out budget of
+  // peers, not to all of them; a watcher that is not adjacent to another
+  // watcher could hold that machine's record for minutes after it changed
+  // and repeat the stale view to every browser near it. The remote sync
+  // already retrieves every publisher record from whoever holds a newer
+  // one; run it on a clock as well as on events.
+  const remotePullTimer = setInterval(() => {
+    scheduleRemoteRepositorySync();
+  }, REMOTE_PULL_INTERVAL_MS);
+  remotePullTimer.unref?.();
   return {
     index,
     node,
@@ -1073,6 +1085,7 @@ async function connectMachineDirectory(index, logger = {}, {
     async close() {
       if (closed) return;
       clearInterval(timer);
+      clearInterval(remotePullTimer);
       if (remoteSyncTimer) clearTimeout(remoteSyncTimer);
       remoteSyncTimer = null;
       rosterSubscription();
