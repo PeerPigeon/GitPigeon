@@ -485,6 +485,17 @@ export function liveDirectoryKey(indexId, bucket) {
   return `gitpigeon/index/v1/${indexId}/live/${bucket}`;
 }
 
+/**
+ * Where a repository's snapshot record lives. The publisher record is a
+ * heartbeat: every put is gossiped in full to every peer, so it must stay
+ * small. The manifest (chunk lists, pack index, live files — tens to
+ * hundreds of kilobytes per repository) is written here instead, once per
+ * snapshot, and browsers fetch it when they open the repository.
+ */
+export function snapshotRecordKey(indexId, repositoryId, deviceId) {
+  return `gitpigeon/index/v1/${indexId}/snapshot/${repositoryId}/${deviceId}`;
+}
+
 export function indexPublishersKey(indexId) {
   return `gitpigeon/index/v1/${indexId}/publishers`;
 }
@@ -515,7 +526,8 @@ export function directoryValue(index, entries, now = Date.now(), serviceInstance
         watcherCount: active,
         ...(active && serviceInstanceId ? { watcherServiceId: serviceInstanceId } : {}),
         ...(entry.signalingServer ? { signalingServer: entry.signalingServer } : {}),
-        ...(entry.snapshot ? { snapshot: entry.snapshot } : {}),
+        ...(entry.snapshotKey ? { snapshotKey: entry.snapshotKey, snapshotId: entry.snapshotId } : {}),
+        ...(entry.snapshot && !entry.snapshotKey ? { snapshot: entry.snapshot } : {}),
         ...(entry.empty ? { empty: true } : {}),
         ...(entry.registeredAt ? { registeredAt: entry.registeredAt } : {}),
         ...(entry.nameSetAt ? { nameSetAt: entry.nameSetAt } : {}),
@@ -523,8 +535,13 @@ export function directoryValue(index, entries, now = Date.now(), serviceInstance
       });
     } else {
       current.watcherCount += active;
-      if (!current.snapshot && entry.snapshot) current.snapshot = entry.snapshot;
-      if (entry.snapshot || !entry.empty) delete current.empty;
+      if (!current.snapshotKey && entry.snapshotKey) {
+        current.snapshotKey = entry.snapshotKey;
+        current.snapshotId = entry.snapshotId;
+        delete current.snapshot;
+      }
+      if (!current.snapshot && !current.snapshotKey && entry.snapshot) current.snapshot = entry.snapshot;
+      if (entry.snapshot || entry.snapshotKey || !entry.empty) delete current.empty;
       // Two clone paths of one repository on this machine: the newest rename
       // owns the name so a stale path cannot revert it.
       const currentNameAt = Date.parse(String(current.nameSetAt ?? '')) || 0;
@@ -744,6 +761,7 @@ async function connectMachineDirectory(index, logger = {}, {
   let needsReconcile = true;
   let publishQueue = Promise.resolve();
   let lastDirectoryFingerprint = null;
+  const snapshotFingerprints = new Map();
   let lastPublishedAt = null;
   let lastIndexError = null;
   // What this machine's own key looks like from its own store, captured each
@@ -922,9 +940,23 @@ async function connectMachineDirectory(index, logger = {}, {
       const current = await loadMachineIndex({ root });
       const entries = await Promise.all(current.entries.map(async (entry) => {
         const snapshot = await repositorySnapshotHint(entry, serviceInstanceId, current.indexId);
+        let snapshotKey = null;
+        let snapshotId = null;
+        if (snapshot && connected) {
+          // The snapshot goes in its own record, put only when it changes.
+          // The publisher record below then carries a reference and stays a
+          // few kilobytes however many repositories this machine watches.
+          snapshotKey = snapshotRecordKey(current.indexId, entry.repositoryId, entry.deviceId);
+          snapshotId = snapshot.selectedHead?.snapshotId ?? null;
+          const snapshotFingerprint = JSON.stringify(snapshot);
+          if (snapshotFingerprints.get(snapshotKey) !== snapshotFingerprint) {
+            await storage.put('public', snapshotKey, snapshot);
+            snapshotFingerprints.set(snapshotKey, snapshotFingerprint);
+          }
+        }
         return {
           ...entry,
-          snapshot,
+          ...(snapshotKey ? { snapshotKey, snapshotId } : { snapshot }),
           // Only checked while there is no snapshot: that is the window in
           // which the browser would otherwise wait forever.
           empty: snapshot ? false : await repositoryIsEmpty(entry.repository),
