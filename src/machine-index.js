@@ -59,10 +59,14 @@ async function repositorySnapshotHint(entry, serviceInstanceId, machineIndexId) 
     const manifest = JSON.parse(await readFile(path.join(root, 'manifests', `${head.snapshotId}.json`), 'utf8'));
     if (manifest?.protocol !== 'gitpigeon/1' || manifest.repositoryId !== entry.repositoryId
       || manifest.snapshotId !== head.snapshotId || manifest.deviceId !== entry.deviceId) return null;
+    // The manifest appears once. It used to be embedded twice (in
+    // `manifests` and as `selectedManifest`), which doubled a record that
+    // is gossiped in full to every peer whenever it changes; nothing reads
+    // the array (the dashboard and the watcher take `selectedManifest`).
     return {
       devices: [entry.deviceId],
       heads: [head],
-      manifests: [manifest],
+      manifests: [],
       selectedHead: head,
       selectedManifest: manifest,
       repositoryName: entry.name,
