@@ -1,6 +1,6 @@
 {
   "name": "gitpigeon",
-  "version": "0.13.100",
+  "version": "0.13.101",
   "description": "Real-time, peer-to-peer synchronization for native Git repositories",
   "type": "module",
   "bin": {
