@@ -112,13 +112,28 @@ async function downloadExecutable(fetchImpl, asset, destination, expected, signa
   return actual;
 }
 
+// The first launch of a freshly written standalone binary pages in over a
+// hundred megabytes and loads native modules; an older Intel machine took
+// longer than the twenty seconds this used to allow, and the update was
+// refused with a bare "Command failed" that said nothing about why.
+const VERIFY_TIMEOUT_MS = 90_000;
+
 async function defaultVerifyExecutable(executable) {
-  await execFileAsync(executable, ['--help'], {
-    encoding: 'utf8',
-    timeout: 20_000,
-    windowsHide: true,
-    maxBuffer: 2 * 1024 * 1024,
-  });
+  try {
+    await execFileAsync(executable, ['--help'], {
+      encoding: 'utf8',
+      timeout: VERIFY_TIMEOUT_MS,
+      windowsHide: true,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+  } catch (error) {
+    const detail = error?.killed || error?.signal === 'SIGTERM'
+      ? `did not finish within ${VERIFY_TIMEOUT_MS / 1000}s`
+      : error?.signal
+        ? `was killed by ${error.signal}`
+        : `exited with ${error?.code ?? 'an error'}${String(error?.stderr ?? '').trim() ? `: ${String(error.stderr).trim().split('\n').slice(-3).join(' ')}` : ''}`;
+    throw new Error(`The downloaded GitPigeon executable ${detail}`);
+  }
 }
 
 async function writeCurrentUpdate(root, value) {
