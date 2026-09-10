@@ -9,7 +9,12 @@ import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const RELEASE_URL = 'https://api.github.com/repos/PeerPigeon/GitPigeon/releases/latest';
+// The list, not /releases/latest. GitHub's "latest" is the release object
+// created most recently, and a release whose installers finished building
+// later than a newer version's is created later: v0.13.109 was marked latest
+// after v0.13.110 had shipped, and every machine that updated in that window
+// installed the older build. The updater picks the highest complete version.
+const RELEASE_URL = 'https://api.github.com/repos/PeerPigeon/GitPigeon/releases?per_page=10';
 const RELEASE_DOWNLOAD_PREFIX = 'https://github.com/PeerPigeon/GitPigeon/releases/download/';
 const UPDATE_INTERVAL_MS = 15 * 60_000;
 const INITIAL_UPDATE_DELAY_MS = 15_000;
@@ -71,8 +76,24 @@ async function releaseRequest(fetchImpl, { etag, signal } = {}) {
   const response = await fetchImpl(RELEASE_URL, { headers, redirect: 'follow', signal: requestSignal(signal) });
   if (response.status === 304) return { unchanged: true, etag };
   if (!response.ok) throw new Error(`GitHub release check failed with HTTP ${response.status}`);
-  const release = JSON.parse(await responseText(response, MAX_METADATA_BYTES));
-  return { release, etag: response.headers.get('etag') ?? null };
+  const body = JSON.parse(await responseText(response, MAX_METADATA_BYTES));
+  return { release: highestCompleteRelease(body), etag: response.headers.get('etag') ?? null };
+}
+
+// A single release object (older tests, a pinned URL) is taken as is; a list
+// is reduced to the highest published version that carries its checksums.
+export function highestCompleteRelease(body) {
+  if (!Array.isArray(body)) return body;
+  let best = null;
+  for (const release of body) {
+    if (!release || release.draft || release.prerelease) continue;
+    const version = safeVersion(release.tag_name);
+    if (!version) continue;
+    const assets = Array.isArray(release.assets) ? release.assets : [];
+    if (!assets.some((asset) => asset?.name === 'SHA256SUMS')) continue;
+    if (!best || isNewerVersion(version.value, safeVersion(best.tag_name).value)) best = release;
+  }
+  return best;
 }
 
 function releaseAsset(release, name) {

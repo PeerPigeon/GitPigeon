@@ -45,7 +45,7 @@ test('downloads, verifies, and atomically selects a newer watcher executable', a
   const requests = [];
   const fetchImpl = async (url) => {
     requests.push(url);
-    if (url.includes('/releases/latest')) return new Response(JSON.stringify(release), { headers: { etag: '"release-11"' } });
+    if (url.includes('api.github.com/repos/PeerPigeon/GitPigeon/releases')) return new Response(JSON.stringify([release]), { headers: { etag: '"release-11"' } });
     if (url.endsWith('/SHA256SUMS')) return new Response(`${digest}  ${name}\n`);
     if (url.endsWith(`/${name}`)) return new Response(binary);
     return new Response('missing', { status: 404 });
