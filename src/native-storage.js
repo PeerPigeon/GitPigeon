@@ -13,7 +13,11 @@ import path from 'node:path';
 // GitPigeon already keeps in `.git/gitpigeon/chunks` and re-seeds on start, so
 // they stay in memory here instead of being written to disk a second time.
 const EPHEMERAL_SPACES = new Set(['frozen']);
-const FLUSH_DEBOUNCE_MS = 200;
+// Two seconds, not two hundred milliseconds. Every flush rewrites the whole
+// file — four megabytes with a few thousand records — and presence records
+// alone arrive more than once a second, so the watcher spent a measurable
+// share of an idle core serialising the same file over and over.
+const FLUSH_DEBOUNCE_MS = 2_000;
 
 function fireAsync(callback, ...args) {
   if (typeof callback !== 'function') return;

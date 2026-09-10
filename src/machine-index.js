@@ -514,6 +514,40 @@ export const REMOVED_MEMORY_MS = 30 * 24 * 60 * 60_000;
 export const PUBLISH_HEARTBEAT_MS = 20_000;
 // How often the watcher pulls the other publishers' records regardless of events.
 export const REMOTE_PULL_INTERVAL_MS = 30_000;
+// Stale index records are pruned on start and then this often. Device-request
+// buckets are 5 s wide and read for 15 s; a superseded snapshot head is history
+// nothing reads. Left alone they were 3,808 and 1,054 records — 3 MB of a
+// 4 MB storage file rewritten on every flush.
+export const RECORD_PRUNE_INTERVAL_MS = 60 * 60_000;
+export const DEVICE_REQUEST_MAX_AGE_MS = 60 * 60_000;
+const DEVICE_REQUEST_BUCKET_MS = 5_000;
+
+export async function pruneStaleIndexRecords(storage, now = Date.now()) {
+  const records = await storage.list('public');
+  const currentHeads = new Map();
+  for (const record of records) {
+    const head = /^gitpigeon\/v1\/([a-f0-9]{32})\/head\/([a-f0-9]{32})$/.exec(String(record.key ?? ''));
+    const snapshotId = record.value?.snapshotId;
+    if (head && typeof snapshotId === 'string') currentHeads.set(`${head[1]}/${head[2]}`, snapshotId);
+  }
+  let removed = 0;
+  for (const record of records) {
+    const key = String(record.key ?? '');
+    let stale = false;
+    const request = /^gitpigeon\/index\/v1\/[a-f0-9]{32}\/device-requests\/(\d+)$/.exec(key);
+    if (request) stale = Number(request[1]) * DEVICE_REQUEST_BUCKET_MS < now - DEVICE_REQUEST_MAX_AGE_MS;
+    const snapshotHead = /^gitpigeon\/v1\/([a-f0-9]{32})\/head\/([a-f0-9]{32})\/([a-f0-9]{64})$/.exec(key);
+    if (snapshotHead) {
+      const current = currentHeads.get(`${snapshotHead[1]}/${snapshotHead[2]}`);
+      stale = Boolean(current) && current !== snapshotHead[3];
+    }
+    if (!stale) continue;
+    try {
+      if (await (storage.deleteSystem ? storage.deleteSystem('public', key) : storage.delete('public', key))) removed += 1;
+    } catch { /* another peer may own it; the next pass retries */ }
+  }
+  return removed;
+}
 
 export function directoryValue(index, entries, now = Date.now(), serviceInstanceId = null) {
   const grouped = new Map();
@@ -1045,6 +1079,18 @@ async function connectMachineDirectory(index, logger = {}, {
     }
   });
   ready = true;
+  const pruneRecords = async () => {
+    if (closed || !node.storage) return;
+    try {
+      const removed = await pruneStaleIndexRecords(node.storage);
+      if (removed > 0) logger.info?.(`Pruned ${removed} stale index records`);
+    } catch (error) {
+      logger.debug?.(`Index record prune failed: ${error?.message ?? error}`);
+    }
+  };
+  pruneRecords().catch(() => {});
+  const pruneTimer = setInterval(() => { pruneRecords().catch(() => {}); }, RECORD_PRUNE_INTERVAL_MS);
+  pruneTimer.unref?.();
   if (node.getConnectedPeers().length > 0) {
     publish({ reconcile: true }).catch((error) => logger.error?.(error));
     syncRemoteRepositories().catch((error) => logger.error?.(error));
@@ -1086,6 +1132,7 @@ async function connectMachineDirectory(index, logger = {}, {
       if (closed) return;
       clearInterval(timer);
       clearInterval(remotePullTimer);
+      clearInterval(pruneTimer);
       if (remoteSyncTimer) clearTimeout(remoteSyncTimer);
       remoteSyncTimer = null;
       rosterSubscription();
