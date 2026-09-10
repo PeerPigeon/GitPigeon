@@ -60,7 +60,7 @@ import { createTerminalHistory, terminalHistoryKey } from './terminal-history.js
 import { RealtimeWorkspaceServer } from './realtime-server.js';
 import { WorkspaceFiles, workspaceDigest } from './workspace.js';
 import { liveWorkspaceDigest } from './live-workspace.js';
-import { clearInstalledUpdate, isNewerVersion, readInstalledUpdate, startAutomaticUpdates } from './auto-update.js';
+import { clearInstalledUpdate, downloadReleaseUpdate, isNewerVersion, readInstalledUpdate, startAutomaticUpdates } from './auto-update.js';
 import { pullPeerUpdateOnce, startPeerUpdates } from './peer-update.js';
 import { GITPIGEON_VERSION, IS_STANDALONE } from './version.js';
 
@@ -1180,6 +1180,14 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     });
     // Paired peers can remove a repository or rotate the index secret.
     controlServer = new ControlServer({
+      onUpdateRequested: IS_STANDALONE ? async () => {
+        const result = await downloadReleaseUpdate({ root, currentVersion: GITPIGEON_VERSION });
+        if (!result.updated) return { updated: false, current: true, version: GITPIGEON_VERSION };
+        installedUpdate = result;
+        // Answer first; the restart follows once the reply is on the wire.
+        setTimeout(() => stop(), 750);
+        return { updated: true, version: result.version ?? null };
+      } : null,
       node: machineIndex.node,
       indexId: machineIndex.index.indexId,
       root,

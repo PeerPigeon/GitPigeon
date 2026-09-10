@@ -17,7 +17,9 @@ const execFileAsync = promisify(execFile);
 const RELEASE_URL = 'https://api.github.com/repos/PeerPigeon/GitPigeon/releases?per_page=10';
 const RELEASE_DOWNLOAD_PREFIX = 'https://github.com/PeerPigeon/GitPigeon/releases/download/';
 const UPDATE_INTERVAL_MS = 15 * 60_000;
-const INITIAL_UPDATE_DELAY_MS = 15_000;
+// Almost at once: a machine that comes up out of date should be current
+// before anyone notices, not a quarter of a minute later.
+const INITIAL_UPDATE_DELAY_MS = 3_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_METADATA_BYTES = 2 * 1024 * 1024;
 const MAX_CHECKSUM_BYTES = 256 * 1024;

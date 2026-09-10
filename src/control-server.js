@@ -18,7 +18,8 @@ export const CONTROL_PROTOCOL = 'gitpigeon/control/1';
 const REPOSITORY_ID = /^[a-zA-Z0-9_-]{8,128}$/;
 
 export class ControlServer {
-  constructor({ node, indexId, root, logger = {}, onChanged = async () => {}, onRotated = () => {}, onShareToggled = async () => {} }) {
+  constructor({ node, indexId, root, logger = {}, onChanged = async () => {}, onRotated = () => {}, onShareToggled = async () => {}, onUpdateRequested = null }) {
+    this.onUpdateRequested = onUpdateRequested;
     this.node = node;
     this.indexId = indexId;
     this.root = root;
@@ -264,6 +265,18 @@ export class ControlServer {
           .catch((error) => this.logger.debug?.(`Mirror reload: ${error.message}`));
       }, 0).unref?.();
       return { mirror: mirror ? mirror.publicBaseUrl : null };
+    }
+    if (frame.kind === 'update-watcher') {
+      // A paired browser asks this machine to install the newest release now,
+      // instead of waiting for the next fifteen-minute check. The reply says
+      // what happened; a machine that found a newer build restarts a moment
+      // after answering, so the browser sees it come back on the new version.
+      if (!this.onUpdateRequested) return { updated: false, current: true, message: 'This watcher runs from source and does not self-update' };
+      const result = await this.onUpdateRequested();
+      this.logger.info?.(result.updated
+        ? `A paired browser requested an update: installed ${result.version}, restarting`
+        : 'A paired browser requested an update: already on the newest release');
+      return result;
     }
     if (frame.kind === 'rename-repository') {
       // The repository's display name is a UI label, configurable by the
