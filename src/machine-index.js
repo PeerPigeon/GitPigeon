@@ -492,6 +492,16 @@ export function liveDirectoryKey(indexId, bucket) {
  * hundreds of kilobytes per repository) is written here instead, once per
  * snapshot, and browsers fetch it when they open the repository.
  */
+/**
+ * The fleet's update policy, written by the dashboard: `autoUpdate` makes
+ * every watcher check for a newer release the moment it connects, and
+ * `requestedAt` is a one-shot "update now" that a watcher which was offline
+ * honours on its next connection.
+ */
+export function fleetUpdateKey(indexId) {
+  return `gitpigeon/index/v1/${indexId}/fleet-update`;
+}
+
 export function snapshotRecordKey(indexId, repositoryId, deviceId) {
   return `gitpigeon/index/v1/${indexId}/snapshot/${repositoryId}/${deviceId}`;
 }
@@ -745,6 +755,7 @@ async function connectMachineDirectory(index, logger = {}, {
   serviceInstanceId = null,
   onClose = async () => {},
   onRemoteRepositories = async () => {},
+  onFleetUpdate = null,
   onRemoteShares = async () => {},
 } = {}) {
   await installNativeWebRTC();
@@ -1047,6 +1058,7 @@ async function connectMachineDirectory(index, logger = {}, {
   };
   node.on('peerConnected', (peerId) => {
     logger.debug?.(`[${roomLabel}] peer connected: ${peerId}`);
+    setTimeout(() => considerFleetUpdate('connected').catch(() => {}), 3_000).unref?.();
     // A service that reconciled while it had no peers anchored its version
     // chain on nothing: every publish afterwards carried a version below the
     // cluster's and was rejected as stale — the watcher ran, published every
@@ -1074,13 +1086,47 @@ async function connectMachineDirectory(index, logger = {}, {
   }
   const rosterSubscription = node.storage.subscribeKey('public', rosterKey);
   const publisherSubscription = node.storage.subscribeKey('public', publisherKey);
+  const fleetKey = fleetUpdateKey(index.indexId);
+  const fleetSubscription = node.storage.subscribeKey('public', fleetKey);
+  let fleetCheckAt = 0;
+  let fleetHandledRequestedAt = 0;
+  let fleetChecking = false;
+  const considerFleetUpdate = async (reason) => {
+    if (closed || !onFleetUpdate || !node.storage || fleetChecking) return;
+    const record = await node.storage.get('public', fleetKey).catch(() => null);
+    const policy = record?.value;
+    if (policy?.protocol !== INDEX_PROTOCOL || policy.kind !== 'fleet-update') return;
+    const requestedAt = Date.parse(String(policy.requestedAt ?? '')) || 0;
+    const oneShot = requestedAt > fleetHandledRequestedAt;
+    const wanted = oneShot || policy.autoUpdate === true;
+    if (!wanted) return;
+    // One check per minute at most; a fleet that all connects at once must
+    // not become a fleet that all polls GitHub at once, forever.
+    if (!oneShot && Date.now() - fleetCheckAt < 60_000) return;
+    fleetChecking = true;
+    fleetCheckAt = Date.now();
+    try {
+      const result = await onFleetUpdate({ reason, oneShot });
+      if (oneShot) fleetHandledRequestedAt = requestedAt;
+      logger.info?.(result?.updated
+        ? `Fleet update (${reason}): installed ${result.version}, restarting`
+        : `Fleet update (${reason}): already on the newest release`);
+    } catch (error) {
+      logger.warn?.(`Fleet update check failed: ${error?.message ?? error}`);
+    } finally {
+      fleetChecking = false;
+    }
+  };
   const storageSubscription = node.storage.subscribe((event) => {
     if (event?.origin !== 'remote' || event.op !== 'upsert' || event.space !== 'public') return;
     if (event.key === rosterKey || publisherSubscriptions.has(event.key)) {
       scheduleRemoteRepositorySync();
     }
+    if (event.key === fleetKey) considerFleetUpdate('policy changed').catch(() => {});
   });
   ready = true;
+  // The record may already be here, or arrive with the first peer.
+  considerFleetUpdate('start').catch(() => {});
   const pruneRecords = async () => {
     if (closed || !node.storage) return;
     try {
@@ -1135,6 +1181,7 @@ async function connectMachineDirectory(index, logger = {}, {
       clearInterval(timer);
       clearInterval(remotePullTimer);
       clearInterval(pruneTimer);
+      try { fleetSubscription?.(); } catch { /* already closed */ }
       if (remoteSyncTimer) clearTimeout(remoteSyncTimer);
       remoteSyncTimer = null;
       rosterSubscription();

@@ -1025,6 +1025,13 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     machineIndex = await connectMachineIndexService(log, {
       root,
       serviceInstanceId,
+      onFleetUpdate: IS_STANDALONE ? async () => {
+        const result = await downloadReleaseUpdate({ root, currentVersion: GITPIGEON_VERSION });
+        if (!result.updated) return { updated: false, version: GITPIGEON_VERSION };
+        installedUpdate = result;
+        setTimeout(() => stop(), 750);
+        return { updated: true, version: result.version ?? null };
+      } : null,
       onRemoteRepositories: async (repositories) => {
         const added = await materializeGrantedRepositories(repositories, { root });
         if (!added.length) return;
