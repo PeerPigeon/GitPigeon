@@ -18,7 +18,7 @@ test('stale device-request buckets and superseded snapshot heads are pruned, cur
   ]);
   const storage = {
     async list() { return [...records].map(([key, value]) => ({ key, value })); },
-    async deleteSystem(_space, key) { return records.delete(key); },
+    async delete(_space, key) { return records.delete(key); },
   };
   const removed = await pruneStaleIndexRecords(storage, now);
   assert.equal(removed, 2);

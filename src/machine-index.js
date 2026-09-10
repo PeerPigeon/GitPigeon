@@ -542,9 +542,11 @@ export async function pruneStaleIndexRecords(storage, now = Date.now()) {
       stale = Boolean(current) && current !== snapshotHead[3];
     }
     if (!stale) continue;
+    // Public records are deletable by any writer; deleteSystem is reserved
+    // for the epublic space and throws here.
     try {
-      if (await (storage.deleteSystem ? storage.deleteSystem('public', key) : storage.delete('public', key))) removed += 1;
-    } catch { /* another peer may own it; the next pass retries */ }
+      if (await storage.delete('public', key)) removed += 1;
+    } catch { /* the next pass retries */ }
   }
   return removed;
 }
