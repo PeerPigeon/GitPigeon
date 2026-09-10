@@ -169,6 +169,7 @@ export async function installNativeIntegration({
 // healthy and revives it when it is not. Worst-case downtime becomes one
 // minute instead of forever, with no change to how the service itself runs.
 const WATCHDOG_LABEL = 'dev.gitpigeon.watchdog';
+const WATCHDOG_LAUNCHCTL_TIMEOUT_MS = 5_000;
 
 export function watchdogPlist(commandPath) {
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -232,7 +233,19 @@ export async function removeServiceWatchdog({
 } = {}) {
   if (platform !== 'darwin' || uid === undefined) return null;
   const plist = path.join(home, 'Library', 'LaunchAgents', `${WATCHDOG_LABEL}.plist`);
-  try { await run('launchctl', ['bootout', `gui/${uid}/${WATCHDOG_LABEL}`]); } catch { /* not loaded */ }
+  const target = `gui/${uid}/${WATCHDOG_LABEL}`;
+  // bootout blocks until the agent's job has exited. With the job wedged —
+  // a `git-pigeon start` stuck behind a hung watcher — `git pigeon stop`
+  // hung forever before it had even signalled the service. Give bootout a
+  // few seconds, kill the job outright if it needs it, and try once more;
+  // the plist goes either way, so the agent cannot come back at login.
+  const attempt = async (args) => {
+    try { await run('launchctl', args, { timeout: WATCHDOG_LAUNCHCTL_TIMEOUT_MS }); return true; } catch { return false; }
+  };
+  if (!await attempt(['bootout', target])) {
+    await attempt(['kill', 'SIGKILL', target]);
+    await attempt(['bootout', target]);
+  }
   await rm(plist, { force: true });
   return { plist };
 }
