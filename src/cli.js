@@ -355,27 +355,53 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   // edits flowing, terminal open); an already-connected path must be enough
   // to commit. Same intent-token replay contract as the index-room op.
   const sessionCommitOutcomes = new Map();
+  const answeredProbes = new Map();
   const unsubscribeSessionCommit = onChannelMessage(node, config.repositoryId, CONTROL_CHANNEL, (frame, { peerId, kind }) => {
     // Direct AND broadcast are both accepted: a half-dead channel can eat
     // direct frames while room gossip still routes — the same reason live
     // edits keep flowing when clicks appear to hang.
     if (frame.kind === 'ping' && frame.requestId) {
-      // The browser's round-trip probe, gossip-shaped like everything
-      // else. The pong travels every path; its arrival IS the proof — and
-      // it carries the current head pointer, because storage replication
+      // The browser's round-trip probe. Its arrival IS the proof, and the
+      // pong carries the current head pointer, because storage replication
       // can stand off (vector ties across restarts) while the channel is
       // demonstrably alive. Proof and truth in one small frame.
+      //
+      // One answer per probe. A ping can reach this session twice (direct
+      // and broadcast), and answering every copy both ways sent four frames
+      // per watcher per probe, most of them fanned out through gossip to
+      // every peer in the room — with a dozen rooms and several dashboards
+      // that alone pinned the watcher's core. The answer goes direct to the
+      // asker; it is broadcast as well only when the ping never arrived
+      // direct (so the direct path is the one in doubt) or when the browser
+      // marks the probe as a retry of one that went unanswered.
+      const requestId = String(frame.requestId);
+      const arrivedDirect = kind !== 'broadcast';
+      const known = answeredProbes.get(requestId);
+      if (known) {
+        if (arrivedDirect) known.directSeen = true;
+        return;
+      }
+      const entry = { directSeen: arrivedDirect };
+      answeredProbes.set(requestId, entry);
+      while (answeredProbes.size > 128) answeredProbes.delete(answeredProbes.keys().next().value);
       (async () => {
         let head = null;
         try {
           const record = await node.storage?.get('public', `gitpigeon/v1/${config.repositoryId}/head/${config.deviceId}`);
           head = record?.value ?? null;
         } catch { /* the pong is proof enough without it */ }
-        const pong = { kind: 'pong', requestId: String(frame.requestId), ...(head ? { head } : {}) };
-        await Promise.allSettled([
-          sendChannelDirect(node, peerId, config.repositoryId, CONTROL_CHANNEL, pong),
-          broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, pong),
-        ]);
+        const pong = { kind: 'pong', requestId, ...(head ? { head } : {}) };
+        await sendChannelDirect(node, peerId, config.repositoryId, CONTROL_CHANNEL, pong).catch(() => {});
+        if (frame.retry === true) {
+          await broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, pong).catch(() => {});
+          return;
+        }
+        if (arrivedDirect) return;
+        const timer = setTimeout(() => {
+          if (stopped || entry.directSeen) return;
+          broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, pong).catch(() => {});
+        }, 1_000);
+        timer.unref?.();
       })().catch(() => {});
       return;
     }
