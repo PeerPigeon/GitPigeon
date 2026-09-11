@@ -455,7 +455,8 @@ export class TerminalServer {
 
   #listen(room) {
     if (this.subscriptions.has(room)) return;
-    this.subscriptions.set(room, onChannelMessage(this.node, room, TERMINAL_CHANNEL, (frame, { peerId }) => {
+    this.subscriptions.set(room, onChannelMessage(this.node, room, TERMINAL_CHANNEL, (frame, { peerId: relayPeerId, origin }) => {
+      const peerId = origin || relayPeerId;
       // A relayed broadcast's envelope names the LAST HOP, not the browser
       // that asked — replying there sent "opened" to a bystander that
       // dropped it. The frame's replyTo is the requester's own address; the

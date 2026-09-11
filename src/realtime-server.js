@@ -75,7 +75,10 @@ export class RealtimeWorkspaceServer {
     if (this.started) return;
     this.started = true;
     await this.liveWorkspace.init();
-    this.unsubscribe = onChannelMessage(this.node, this.repositoryId, REALTIME_CHANNEL, (frame, { peerId }) => {
+    this.unsubscribe = onChannelMessage(this.node, this.repositoryId, REALTIME_CHANNEL, (frame, { peerId: relayPeerId, origin }) => {
+      // Replies (sync responses, move and restore results) go to the sender,
+      // never to the hop a broadcast came through.
+      const peerId = origin || relayPeerId;
       if (frame?.kind === 'presence') {
         if (typeof frame.deviceId === 'string' && frame.deviceId && frame.deviceId.length <= 128) {
           this.peerWatchers.set(frame.deviceId, Date.now());

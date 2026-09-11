@@ -83,13 +83,20 @@ export async function broadcastChannel(node, repositoryId, channel, frame) {
 
 /**
  * Subscribe to one repository channel. The handler receives
- * `(frame, { peerId, kind })` and returns an unsubscribe function.
+ * `(frame, { peerId, kind, origin })` and returns an unsubscribe function.
+ *
+ * `peerId` is the peer the frame arrived FROM; for a broadcast that is the
+ * hop that relayed it, not the peer that sent it. `origin` is the sender —
+ * the address a reply must go to. Answering `peerId` sent every reply to a
+ * relayed broadcast to the wrong machine, which is how a browser's ping
+ * went unanswered and every following probe became a retry broadcast.
  */
 export function onChannelMessage(node, repositoryId, channel, handler) {
   const listener = (message) => {
     const frame = decodeChannelFrame(repositoryId, channel, message);
     if (!frame || !message.fromPeerId) return;
-    handler(frame, { peerId: String(message.fromPeerId), kind: message.kind });
+    const origin = String(message.message?.sender ?? message.message?.from ?? message.fromPeerId);
+    handler(frame, { peerId: String(message.fromPeerId), kind: message.kind, origin });
   };
   node.on('message', listener);
   return () => node.off('message', listener);

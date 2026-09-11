@@ -357,7 +357,9 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   // to commit. Same intent-token replay contract as the index-room op.
   const sessionCommitOutcomes = new Map();
   const answeredProbes = new Map();
-  const unsubscribeSessionCommit = onChannelMessage(node, config.repositoryId, CONTROL_CHANNEL, (frame, { peerId, kind }) => {
+  const unsubscribeSessionCommit = onChannelMessage(node, config.repositoryId, CONTROL_CHANNEL, (frame, { peerId: relayPeerId, kind, origin }) => {
+    // Replies go to the sender, never to the hop a broadcast came through.
+    const peerId = origin || relayPeerId;
     // Direct AND broadcast are both accepted: a half-dead channel can eat
     // direct frames while room gossip still routes — the same reason live
     // edits keep flowing when clicks appear to hang.

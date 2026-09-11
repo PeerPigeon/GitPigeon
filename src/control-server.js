@@ -32,7 +32,9 @@ export class ControlServer {
 
   start() {
     if (this.unsubscribe || !this.node) return;
-    this.unsubscribe = onChannelMessage(this.node, this.indexId, CONTROL_CHANNEL, (frame, { peerId, kind }) => {
+    this.unsubscribe = onChannelMessage(this.node, this.indexId, CONTROL_CHANNEL, (frame, { peerId: relayPeerId, kind, origin }) => {
+      // Replies go to the sender, never to the hop a broadcast came through.
+      const peerId = origin || relayPeerId;
       if (kind !== 'direct') return;
       this.#handle(peerId, frame).catch((error) => this.logger.debug?.(`Control command: ${error.message}`));
     });

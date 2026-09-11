@@ -54,7 +54,9 @@ export class SnapshotStreamServer {
       this.node,
       this.repositoryId,
       SNAPSHOT_CHANNEL,
-      (frame, { peerId }) => {
+      (frame, { peerId: relayPeerId, origin }) => {
+        // Chunks and metadata go back to the sender, never to a relaying hop.
+        const peerId = origin || relayPeerId;
         this.#handle(peerId, frame).catch((error) => this.logger.debug?.(`Snapshot request: ${error.message}`));
       },
     );
