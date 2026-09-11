@@ -1069,10 +1069,12 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
         if (!oneShot) return { updated: false, skipped: true };
         const offer = peerUpdates?.newestOffer?.() ?? null;
         if (offer && isNewerVersion(offer.version, GITPIGEON_VERSION)) {
-          peerUpdates?.fetchNewest?.();
+          const outcome = await (peerUpdates?.fetchNewest?.() ?? 'none');
+          if (outcome === 'started' || outcome === 'in-progress') return { updated: false, skipped: true };
+          // Offered only by unreachable peers: GitHub is necessary.
+        } else if (peerUpdates?.peersOffering?.()) {
           return { updated: false, skipped: true };
         }
-        if (peerUpdates?.peersOffering?.()) return { updated: false, skipped: true };
         const result = await downloadReleaseUpdate({ root, currentVersion: GITPIGEON_VERSION });
         if (!result.updated) return { updated: false, version: GITPIGEON_VERSION };
         installedUpdate = result;
@@ -1242,11 +1244,14 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
         const offer = peerUpdates?.newestOffer?.() ?? null;
         const target = version && isNewerVersion(String(version), GITPIGEON_VERSION) ? String(version) : null;
         if (offer && isNewerVersion(offer.version, GITPIGEON_VERSION) && (!target || !isNewerVersion(target, offer.version))) {
-          const started = peerUpdates?.fetchNewest?.() ?? false;
-          log.info(`A paired browser requested an update: fetching ${offer.version} from a peer${started ? '' : ' (already in progress)'}`);
-          return { accepted: true, viaPeer: true, updated: false, version: GITPIGEON_VERSION };
-        }
-        if (!target && peerUpdates?.peersOffering?.()) {
+          const outcome = await (peerUpdates?.fetchNewest?.() ?? 'none');
+          if (outcome === 'started' || outcome === 'in-progress') {
+            log.info(`A paired browser requested an update: fetching ${offer.version} from a peer${outcome === 'in-progress' ? ' (already in progress)' : ''}`);
+            return { accepted: true, viaPeer: true, updated: false, version: GITPIGEON_VERSION };
+          }
+          // Offered, but by no peer this machine can reach: GitHub it is.
+          log.info(`A paired browser requested an update: ${offer.version} is offered by peers this machine cannot reach; downloading from GitHub`);
+        } else if (!target && peerUpdates?.peersOffering?.()) {
           // Nothing newer anywhere on the mesh and no specific release asked
           // for: nothing to do without asking GitHub, which the daily check
           // will do.

@@ -26,6 +26,8 @@ export const PEER_UPDATE_PROTOCOL = 'gitpigeon-peer-update/1';
 const OFFER_INTERVAL_MS = 10 * 60_000;
 // An offer older than this no longer says its peer is online.
 const OFFER_FRESH_MS = 5 * 60_000;
+// How long a peer with no route is left alone before its offer is tried again.
+const UNROUTABLE_MEMORY_MS = 2 * 60_000;
 // Measured on the real mesh: encrypted direct messages deliver up to 32 KiB,
 // silently vanish from 48 KiB, and overflow the crypto layer's stack from
 // 128 KiB. 192 KiB slices meant every serve attempt died and every fetch
@@ -211,11 +213,36 @@ export function startPeerUpdates({
   // Offers heard recently, by the peer that made them: what the mesh can
   // hand us without GitHub.
   const offers = new Map();
-  const startFetch = (peerId, offer) => {
-    beginFetch(peerId, offer).catch((error) => {
-      logger.info?.(`Peer update failed to start: ${error.message}`);
-      abandonFetch(error.message).catch(() => {});
-    });
+  // Try the newest offered build from every peer that offers it, newest
+  // version first, skipping peers with no route; a peer that cannot be
+  // reached is remembered as such so the next offer from it is not tried
+  // again for a while. Resolves 'started', 'in-progress', 'none' (nothing
+  // newer offered) or 'no-route' (offered, but by nobody reachable) — the
+  // last is what makes a GitHub download necessary.
+  const fetchNewestOffered = async () => {
+    if (fetching) return 'in-progress';
+    const candidates = freshOffers()
+      .filter((offer) => isNewerVersion(offer.version, currentVersion) && !(offer.unroutableUntil > Date.now()))
+      .sort((a, b) => (isNewerVersion(a.version, b.version) ? -1 : isNewerVersion(b.version, a.version) ? 1 : 0));
+    if (candidates.length === 0) return freshOffers().some((offer) => isNewerVersion(offer.version, currentVersion)) ? 'no-route' : 'none';
+    for (const offer of candidates) {
+      try {
+        await beginFetch(offer.peerId, offer);
+        return 'started';
+      } catch (error) {
+        await abandonFetch(error.message).catch(() => {});
+        if (!/No route to peer/i.test(String(error?.message ?? error))) {
+          logger.info?.(`Peer update failed to start: ${error.message}`);
+          continue;
+        }
+        offer.unroutableUntil = Date.now() + UNROUTABLE_MEMORY_MS;
+        logger.debug?.(`Peer update: no route to ${String(offer.peerId).slice(0, 12)} offering ${offer.version}; trying the next peer`);
+      }
+    }
+    return 'no-route';
+  };
+  const startFetch = () => {
+    fetchNewestOffered().catch((error) => logger.debug?.(`Peer update: ${error?.message ?? error}`));
   };
   const receive = (message) => {
     if (closed || message?.local) return;
@@ -230,10 +257,11 @@ export function startPeerUpdates({
       if (!VERSION.test(String(value.version ?? '')) || !DIGEST.test(String(value.sha256 ?? ''))) return;
       if (value.platform !== platform || value.arch !== arch) return;
       if (!Number.isSafeInteger(value.size) || value.size <= 0 || value.size > MAX_EXECUTABLE_BYTES) return;
-      offers.set(peerId, { ...value, peerId, at: Date.now() });
+      const previous = offers.get(peerId);
+      offers.set(peerId, { ...value, peerId, at: Date.now(), unroutableUntil: previous?.unroutableUntil ?? 0 });
       if (!isNewerVersion(value.version, currentVersion)) return;
       if (fetching) return;
-      startFetch(peerId, value);
+      startFetch();
       return;
     }
     if (value.kind === 'fetch') {
@@ -330,12 +358,9 @@ export function startPeerUpdates({
       for (const offer of freshOffers()) if (!best || isNewerVersion(offer.version, best.version)) best = offer;
       return best;
     },
-    /** Fetch the newest offered build now, if it is newer than ours. */
-    fetchNewest() {
-      const best = this.newestOffer();
-      if (!best || !isNewerVersion(best.version, currentVersion) || fetching) return false;
-      startFetch(best.peerId, best);
-      return true;
+    /** Fetch the newest offered build now from any reachable peer offering it. */
+    async fetchNewest() {
+      return await fetchNewestOffered();
     },
     async stop() {
       if (closed) return;
