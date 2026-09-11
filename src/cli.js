@@ -1,3 +1,4 @@
+import { shouldScanRepository } from './repository-change.js';
 import { watch as watchFilesystem } from "node:fs";
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
@@ -591,8 +592,8 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     try {
       const nextDigest = await synchronizer.localDigest();
       if (nextDigest !== previousDigest) {
-        previousDigest = nextDigest;
         await synchronizer.publishLocal();
+        previousDigest = nextDigest;
         // Committed changes flow to the share room through the same call.
         await shareSync?.publishLocal()?.catch?.(() => {});
       }
@@ -667,7 +668,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     try {
       filesystemWatcher = watchFilesystem(repository.root, { recursive: true }, (_event, filename) => {
         const changed = String(filename ?? "").replaceAll("\\", "/");
-        if (changed === ".git/gitpigeon" || changed.startsWith(".git/gitpigeon/")) return;
+        if (!shouldScanRepository(changed)) return;
         realtimeServer.filesystemChanged(changed).catch((error) => log.error(error));
         schedulePublish();
       });

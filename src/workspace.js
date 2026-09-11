@@ -264,7 +264,10 @@ export class WorkspaceFiles {
       ? ['', BEGIN_EXCLUDE, ...tracked.map((file) => `/${file}`), END_EXCLUDE]
       : [];
     const next = [...without, ...managed].join('\n');
-    await this.#writeReplace(this.excludeFile, Buffer.from(next ? `${next}\n` : ''));
+    const contents = next ? `${next}\n` : '';
+    // Rewriting identical bytes wakes the repository watcher and schedules
+    // another full snapshot scan, even though no workspace file changed.
+    if (contents !== current) await this.#writeReplace(this.excludeFile, Buffer.from(contents));
   }
 
   async #assertRegularFile(file) {

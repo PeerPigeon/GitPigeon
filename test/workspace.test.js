@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -108,4 +108,20 @@ test('live synchronization excludes generated build artifacts', async (t) => {
 
   const snapshot = await new LiveWorkspace(repository).snapshot();
   assert.deepEqual(snapshot.files.map(({ path: file }) => file), ['app.js']);
+});
+
+
+test('unchanged private-file discovery does not rewrite Git exclude metadata', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-exclude-idle-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await createRepository(path.join(root, 'repository'));
+  const workspace = new WorkspaceFiles(repository);
+  await workspace.syncExclude(['.env']);
+  const before = await stat(workspace.excludeFile, { bigint: true });
+  for (let i = 0; i < 10; i += 1) await workspace.syncExclude(['.env']);
+  const after = await stat(workspace.excludeFile, { bigint: true });
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.mtimeNs, before.mtimeNs);
+  await workspace.syncExclude(['.env', 'private.json']);
+  assert.match(await readFile(workspace.excludeFile, 'utf8'), /private\.json/);
 });
