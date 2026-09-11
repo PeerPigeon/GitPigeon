@@ -24,7 +24,8 @@ const RELEASE_DOWNLOAD_PREFIX = 'https://github.com/PeerPigeon/GitPigeon/release
 const UPDATE_INTERVAL_MS = 24 * 60 * 60_000;
 // Almost at once: a machine that comes up out of date should be current
 // before anyone notices, not a quarter of a minute later.
-const INITIAL_UPDATE_DELAY_MS = 10 * 60_000;
+// Long enough for other watchers to have offered their build first.
+const INITIAL_UPDATE_DELAY_MS = 90_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_METADATA_BYTES = 2 * 1024 * 1024;
 const MAX_CHECKSUM_BYTES = 256 * 1024;
@@ -279,6 +280,9 @@ export function startAutomaticUpdates({
   initialDelayMs = INITIAL_UPDATE_DELAY_MS,
   intervalMs = UPDATE_INTERVAL_MS,
   fetchImpl = fetch,
+  // Asked before each GitHub check. Other watchers online hand their build
+  // over the mesh, so GitHub is for a machine that is alone.
+  shouldCheck = () => true,
 } = {}) {
   if (!enabled) return { stop() {} };
   let stopped = false;
@@ -293,6 +297,7 @@ export function startAutomaticUpdates({
   };
   const run = async () => {
     if (stopped || checking) return;
+    if (!shouldCheck()) { schedule(intervalMs); return; }
     checking = true;
     try {
       const result = await downloadReleaseUpdate({ root, currentVersion, fetchImpl, etag, signal: controller.signal });

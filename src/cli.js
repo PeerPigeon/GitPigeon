@@ -1067,6 +1067,12 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
         // watcher that has a newer build offers it over the mesh and this
         // one fetches it from there within a minute.
         if (!oneShot) return { updated: false, skipped: true };
+        const offer = peerUpdates?.newestOffer?.() ?? null;
+        if (offer && isNewerVersion(offer.version, GITPIGEON_VERSION)) {
+          peerUpdates?.fetchNewest?.();
+          return { updated: false, skipped: true };
+        }
+        if (peerUpdates?.peersOffering?.()) return { updated: false, skipped: true };
         const result = await downloadReleaseUpdate({ root, currentVersion: GITPIGEON_VERSION });
         if (!result.updated) return { updated: false, version: GITPIGEON_VERSION };
         installedUpdate = result;
@@ -1228,7 +1234,24 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     });
     // Paired peers can remove a repository or rotate the index secret.
     controlServer = new ControlServer({
-      onUpdateRequested: IS_STANDALONE ? async () => {
+      onUpdateRequested: IS_STANDALONE ? async ({ version } = {}) => {
+        // Peers first. If another watcher already offers a build at least as
+        // new as the one asked for (or any newer build when none was
+        // named), fetch it from there; GitHub only when nobody on the mesh
+        // has it — which is what makes that download necessary.
+        const offer = peerUpdates?.newestOffer?.() ?? null;
+        const target = version && isNewerVersion(String(version), GITPIGEON_VERSION) ? String(version) : null;
+        if (offer && isNewerVersion(offer.version, GITPIGEON_VERSION) && (!target || !isNewerVersion(target, offer.version))) {
+          const started = peerUpdates?.fetchNewest?.() ?? false;
+          log.info(`A paired browser requested an update: fetching ${offer.version} from a peer${started ? '' : ' (already in progress)'}`);
+          return { accepted: true, viaPeer: true, updated: false, version: GITPIGEON_VERSION };
+        }
+        if (!target && peerUpdates?.peersOffering?.()) {
+          // Nothing newer anywhere on the mesh and no specific release asked
+          // for: nothing to do without asking GitHub, which the daily check
+          // will do.
+          return { accepted: false, updated: false, current: true, version: GITPIGEON_VERSION };
+        }
         // Acknowledge at once and download in the background. The release
         // is a hundred-megabyte binary; answering only after it was
         // downloaded and verified outran the browser's reply timeout on a
@@ -1325,6 +1348,8 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       root,
       currentVersion: GITPIGEON_VERSION,
       logger: log,
+      // A machine with other watchers around gets its builds from them.
+      shouldCheck: () => !(peerUpdates?.peersOffering?.() ?? false),
       onUpdate: async (update) => {
         installedUpdate = update;
         stop();

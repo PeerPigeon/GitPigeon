@@ -21,7 +21,11 @@ const execFileAsync = promisify(execFile);
  * build that never left the LAN.
  */
 export const PEER_UPDATE_PROTOCOL = 'gitpigeon-peer-update/1';
-const OFFER_INTERVAL_MS = 60_000;
+// Offers are events: on start and on every peer connect. This re-offer is a
+// backstop for a peer that missed both, not the mechanism.
+const OFFER_INTERVAL_MS = 10 * 60_000;
+// An offer older than this no longer says its peer is online.
+const OFFER_FRESH_MS = 5 * 60_000;
 // Measured on the real mesh: encrypted direct messages deliver up to 32 KiB,
 // silently vanish from 48 KiB, and overflow the crypto layer's stack from
 // 128 KiB. 192 KiB slices meant every serve attempt died and every fetch
@@ -204,21 +208,32 @@ export function startPeerUpdates({
     await onUpdate({ version: job.version, executable: job.target, sha256: job.sha256 });
   };
 
+  // Offers heard recently, by the peer that made them: what the mesh can
+  // hand us without GitHub.
+  const offers = new Map();
+  const startFetch = (peerId, offer) => {
+    beginFetch(peerId, offer).catch((error) => {
+      logger.info?.(`Peer update failed to start: ${error.message}`);
+      abandonFetch(error.message).catch(() => {});
+    });
+  };
   const receive = (message) => {
     if (closed || message?.local) return;
     const value = decode(message.data);
     if (!value || value.protocol !== PEER_UPDATE_PROTOCOL) return;
-    const peerId = String(message.fromPeerId ?? '');
+    // A broadcast's fromPeerId is the hop that relayed it; the offer came
+    // from the envelope's sender, and that is the peer to fetch from.
+    // Fetching from the hop was "No route to peer" and an abandoned update.
+    const origin = String(message.message?.sender ?? message.message?.from ?? '');
+    const peerId = value.kind === 'offer' && origin ? origin : String(message.fromPeerId ?? '');
     if (value.kind === 'offer') {
       if (!VERSION.test(String(value.version ?? '')) || !DIGEST.test(String(value.sha256 ?? ''))) return;
       if (value.platform !== platform || value.arch !== arch) return;
       if (!Number.isSafeInteger(value.size) || value.size <= 0 || value.size > MAX_EXECUTABLE_BYTES) return;
+      offers.set(peerId, { ...value, peerId, at: Date.now() });
       if (!isNewerVersion(value.version, currentVersion)) return;
       if (fetching) return;
-      beginFetch(peerId, value).catch((error) => {
-        logger.info?.(`Peer update failed to start: ${error.message}`);
-        abandonFetch(error.message).catch(() => {});
-      });
+      startFetch(peerId, value);
       return;
     }
     if (value.kind === 'fetch') {
@@ -296,9 +311,31 @@ export function startPeerUpdates({
     })
     .catch((error) => logger.debug?.(`Peer update describe: ${error?.message ?? error}`));
 
+  const freshOffers = () => {
+    const now = Date.now();
+    for (const [peerId, offer] of offers) if (now - offer.at > OFFER_FRESH_MS) offers.delete(peerId);
+    return [...offers.values()];
+  };
   return {
     isFetching() {
       return fetching !== null;
+    },
+    /** Whether any other watcher has offered a build lately — other watchers are online. */
+    peersOffering() {
+      return freshOffers().length > 0;
+    },
+    /** The newest build a peer has offered lately, or null. */
+    newestOffer() {
+      let best = null;
+      for (const offer of freshOffers()) if (!best || isNewerVersion(offer.version, best.version)) best = offer;
+      return best;
+    },
+    /** Fetch the newest offered build now, if it is newer than ours. */
+    fetchNewest() {
+      const best = this.newestOffer();
+      if (!best || !isNewerVersion(best.version, currentVersion) || fetching) return false;
+      startFetch(best.peerId, best);
+      return true;
     },
     async stop() {
       if (closed) return;

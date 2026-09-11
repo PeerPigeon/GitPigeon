@@ -277,7 +277,7 @@ export class ControlServer {
       // The handler acknowledges at once and downloads in the background;
       // it logs the outcome itself. The browser watches the build in this
       // machine's index record change.
-      return await this.onUpdateRequested();
+      return await this.onUpdateRequested({ version: typeof frame.version === 'string' ? frame.version : null });
     }
     if (frame.kind === 'rename-repository') {
       // The repository's display name is a UI label, configurable by the
