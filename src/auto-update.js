@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { Readable, Transform } from 'node:stream';
@@ -241,7 +241,28 @@ export async function downloadReleaseUpdate({
     await rm(temporary, { force: true });
     throw error;
   }
+  await pruneOldUpdates(root, [version.value, currentVersion]).catch(() => { /* disk space, not correctness */ });
   return { updated: true, version: version.value, executable, sha256: expected, etag: latest.etag };
+}
+
+/**
+ * Every installed release stayed on disk forever: a hundred-megabyte binary
+ * per version, sixty-five versions and seven gigabytes on one machine. Only
+ * the release just installed and the one still running are kept; the
+ * running one goes on the next install.
+ */
+export async function pruneOldUpdates(root, keepVersions) {
+  const { updates } = updatePaths(root);
+  const keep = new Set(keepVersions.map((value) => String(value ?? '')).filter(Boolean));
+  let entries;
+  try { entries = await readdir(updates, { withFileTypes: true }); } catch { return []; }
+  const removed = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || keep.has(entry.name) || !/^\d+\.\d+\.\d+/.test(entry.name)) continue;
+    await rm(path.join(updates, entry.name), { recursive: true, force: true });
+    removed.push(entry.name);
+  }
+  return removed;
 }
 
 export function startAutomaticUpdates({
