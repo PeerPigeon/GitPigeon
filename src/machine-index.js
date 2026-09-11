@@ -1123,6 +1123,7 @@ async function connectMachineDirectory(index, logger = {}, {
     try {
       const result = await onFleetUpdate({ reason, oneShot });
       if (oneShot) fleetHandledRequestedAt = requestedAt;
+      if (result?.skipped) return;
       logger.info?.(result?.updated
         ? `Fleet update (${reason}): installed ${result.version}, restarting`
         : `Fleet update (${reason}): already on the newest release`);

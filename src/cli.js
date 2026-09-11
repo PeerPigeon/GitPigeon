@@ -1061,7 +1061,12 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     machineIndex = await connectMachineIndexService(log, {
       root,
       serviceInstanceId,
-      onFleetUpdate: IS_STANDALONE ? async () => {
+      onFleetUpdate: IS_STANDALONE ? async ({ oneShot } = {}) => {
+        // Only an explicit request (someone pressed Update fleet) goes to
+        // GitHub. The standing auto-update policy is served without it: a
+        // watcher that has a newer build offers it over the mesh and this
+        // one fetches it from there within a minute.
+        if (!oneShot) return { updated: false, skipped: true };
         const result = await downloadReleaseUpdate({ root, currentVersion: GITPIGEON_VERSION });
         if (!result.updated) return { updated: false, version: GITPIGEON_VERSION };
         installedUpdate = result;

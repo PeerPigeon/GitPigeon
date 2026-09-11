@@ -38,6 +38,7 @@ function validFrame(frame, repositoryId) {
 // every peer in the room: on a machine watching a dozen repositories the
 // 10 s cadence was a steady ~80 encrypted frames a minute for nothing.
 const PRESENCE_INTERVAL_MS = 30_000;
+const SYNC_ANSWER_MIN_INTERVAL_MS = 30_000;
 const PRESENCE_FRESH_MS = 90_000;
 const SEED_RETRY_MS = 2_000;
 const SEED_FALLBACK_MS = 12_000;
@@ -409,6 +410,7 @@ export class RealtimeWorkspaceServer {
       writeHistory: [],
       lastActivityAt: Date.now(),
       pendingSyncs: [],
+      syncAnsweredAt: new Map(),
     };
     // Exactly one watcher seeds a new document: the smallest live device id
     // on this room. Every watcher seeding from its own file copy was the
@@ -515,7 +517,11 @@ export class RealtimeWorkspaceServer {
    */
   async #answerSync(state, peerId, frame) {
     const response = { ...frame, kind: 'sync-response', payload: Y.encodeStateAsUpdate(state.doc, frame.payload) };
-    await Promise.allSettled([this.#send(response, peerId), this.#send(response)]);
+    // Direct to the asker only. The broadcast copy went to every peer in the
+    // room, and with the document history behind a busy file it was the
+    // single largest flow on every watcher. Replies now go to the true
+    // sender (not a relaying hop), so the direct path is dependable.
+    await this.#send(response, peerId);
   }
 
   async #receive(peerId, frame) {
@@ -523,16 +529,32 @@ export class RealtimeWorkspaceServer {
     if (!state) return;
     state.lastActivityAt = Date.now();
     if (frame.kind === 'sync-request') {
+      // One watcher answers, not every watcher that has the repository: the
+      // elected seeder (smallest live device id). Four machines each sending
+      // the full document history, direct and broadcast, for every browser
+      // that opened a file was a hundred-plus frames per ask, and every
+      // watcher decrypted all of them. If the seeder is gone its presence
+      // ages out within PRESENCE_FRESH_MS and the next device takes over.
+      // At most once per asker per half minute per document. A browser
+      // that reconnects in a loop asked in a loop; one answer is enough.
+      const answeredAt = state.syncAnsweredAt.get(peerId) ?? 0;
+      if (Date.now() - answeredAt < SYNC_ANSWER_MIN_INTERVAL_MS) return;
+      const matchesBase = await state.matchesFile(frame.baseHash);
+      // A watcher whose file is byte-for-byte the asker's base is as good an
+      // answer as the seeder's; only a watcher that cannot vouch for the
+      // base leaves the answer to the elected one.
+      if (!matchesBase && this.#deferToPeerSeeder()) return;
       // A document still waiting to adopt the seeder's content has nothing
       // authoritative to answer with yet — but the asker must not be left
       // hanging: answer as soon as a seed lands.
-      if (!state.seeded && await state.matchesFile(frame.baseHash)) {
+      if (!state.seeded && matchesBase) {
         await state.seedFromFile();
       }
       if (!state.seeded) {
         state.pendingSyncs.push({ peerId, frame });
         return;
       }
+      state.syncAnsweredAt.set(peerId, Date.now());
       await this.#answerSync(state, peerId, frame);
       return;
     }
