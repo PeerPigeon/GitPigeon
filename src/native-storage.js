@@ -17,7 +17,12 @@ const EPHEMERAL_SPACES = new Set(['frozen']);
 // file — four megabytes with a few thousand records — and presence records
 // alone arrive more than once a second, so the watcher spent a measurable
 // share of an idle core serialising the same file over and over.
-const FLUSH_DEBOUNCE_MS = 2_000;
+// The whole replica is rewritten on every flush — a megabyte once the
+// snapshot manifests are in it — and presence heartbeats alone dirty it
+// every few seconds. Everything in it is also held in memory and re-put by
+// its publisher on a heartbeat, so a longer debounce costs nothing but
+// spares the disk (and the CPU serialising it) all day long.
+const FLUSH_DEBOUNCE_MS = 20_000;
 
 function fireAsync(callback, ...args) {
   if (typeof callback !== 'function') return;

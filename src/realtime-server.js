@@ -34,8 +34,11 @@ function validFrame(frame, repositoryId) {
     && typeof frame.payload === 'string' && frame.payload.length <= Math.ceil(CHUNK_BYTES * 4 / 3) + 8;
 }
 
-const PRESENCE_INTERVAL_MS = 10_000;
-const PRESENCE_FRESH_MS = 30_000;
+// One broadcast per repository per interval, fanned out through gossip to
+// every peer in the room: on a machine watching a dozen repositories the
+// 10 s cadence was a steady ~80 encrypted frames a minute for nothing.
+const PRESENCE_INTERVAL_MS = 30_000;
+const PRESENCE_FRESH_MS = 90_000;
 const SEED_RETRY_MS = 2_000;
 const SEED_FALLBACK_MS = 12_000;
 const SEED_ELECTED_FALLBACK_MS = 6_000;

@@ -827,6 +827,12 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
 
   const tick = async () => {
     if (closed) return;
+    // Nothing to answer, nothing to load: this runs every second for the
+    // life of the service, and reading the index and identity files each
+    // time was a steady trickle of disk work on an idle machine.
+    const waiting = responder.pending()
+      .filter((request) => request.requesterKind === 'browser' && !offered.has(request.requestId));
+    if (waiting.length === 0) return;
     const index = await loadMachineIndex({ root });
     // Every watcher offers to every browser that is not yet approved. Gating
     // this on a stored "already paired" flag was worse than useless: the flag
@@ -834,8 +840,8 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
     // refuse to pair with any browser ever again. The person confirming the
     // code in the browser is the check that matters.
     const identity = await loadOrCreateNativeDeviceIdentity({ root });
-    for (const request of responder.pending()) {
-      if (request.requesterKind !== 'browser' || offered.has(request.requestId)) continue;
+    for (const request of waiting) {
+      if (offered.has(request.requestId)) continue;
       offered.add(request.requestId);
       const code = await responder.codeFor(request.requestId).catch(() => null);
       if (!code) continue;

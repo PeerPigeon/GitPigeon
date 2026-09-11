@@ -218,11 +218,15 @@ async function readState(root, { create = true } = {}) {
   }
 }
 
+function renderState(value) {
+  return `${JSON.stringify(validateState(value), null, 2)}\n`;
+}
+
 async function writeState(root, value) {
   const { state } = statePaths(root);
   const temporary = `${state}.${process.pid}-${randomBytes(5).toString('hex')}.tmp`;
   await mkdir(root, { recursive: true, mode: 0o700 });
-  await writeFile(temporary, `${JSON.stringify(validateState(value), null, 2)}\n`, { mode: 0o600 });
+  await writeFile(temporary, renderState(value), { mode: 0o600 });
   await rename(temporary, state);
 }
 
@@ -260,6 +264,17 @@ async function withLock(root, operation) {
 
 export async function loadMachineIndex({ root = machineIndexRoot(), create = true } = {}) {
   if (!create) return await readState(root, { create: false });
+  // Only write when the file does not already say exactly this. The pairing
+  // loop loads the index every second, and rewriting index.json each time
+  // (lock, temp file, rename) also woke the state-directory watcher, which
+  // reconciled the repository list and rewrote service.json — a cascade of
+  // disk writes every second on an idle machine.
+  const { state } = statePaths(root);
+  try {
+    const raw = await readFile(state, 'utf8');
+    const value = validateState(JSON.parse(raw));
+    if (raw === renderState(value)) return value;
+  } catch { /* missing or malformed: take the lock and repair below */ }
   return await withLock(root, async () => {
     const value = await readState(root);
     await writeState(root, value);
