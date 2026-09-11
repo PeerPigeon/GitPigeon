@@ -306,7 +306,7 @@ export async function startShareService({
       const { sha256, bytes, chunks } = chunkBundle(bundle.data);
       for (let index = 0; index < chunks.length; index += 1) {
         const key = shareBundleChunkKey(repositoryId, sha256, index);
-        if (!(await storedLocally(key))) await node.storage?.put?.('public', key, { data: chunks[index] });
+        if (!(await storedLocally(key))) await node.storage?.put?.('public', key, { data: chunks[index] }, { silent: true });
         subscribe(key);
       }
       // The browsable snapshot: each committed file, content-addressed, so a
@@ -328,7 +328,8 @@ export async function startShareService({
         subscribe(firstChunkKey);
         if (!(await storedLocally(firstChunkKey))) {
           for (let index = 0; index < blob.chunks.length; index += 1) {
-            await node.storage?.put?.('public', shareBlobChunkKey(repositoryId, blob.sha256, index), { data: blob.chunks[index] });
+            // Silent: content-addressed, fetched on request — never gossiped.
+            await node.storage?.put?.('public', shareBlobChunkKey(repositoryId, blob.sha256, index), { data: blob.chunks[index] }, { silent: true });
           }
         }
         files.push({ path: filePath, size: blob.bytes, sha256: blob.sha256, chunkCount: blob.chunks.length });

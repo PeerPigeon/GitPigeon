@@ -802,6 +802,10 @@ export class RepositorySynchronizer {
       const key = chunkKey(this.config.repositoryId, chunk.sha256);
       if (!await this.storage.get("frozen", key)) {
         const data = await this.cache.readChunk(chunk.sha256);
+        // Silent: a chunk is content-addressed and fetched on request. Every
+        // seed used to be gossiped as a mutation to the whole room — at every
+        // start, every chunk of every snapshot, hundreds of megabytes that
+        // every other watcher decrypted and relayed.
         await this.#put("frozen", key, {
           protocol: PROTOCOL,
           kind: "chunk",
@@ -809,12 +813,12 @@ export class RepositorySynchronizer {
           size: chunk.size,
           encoding: "base64",
           data: data.toString("base64"),
-        });
+        }, { silent: true });
       }
     });
     const key = manifestKey(this.config.repositoryId, manifest.snapshotId);
     if (!await this.storage.get('frozen', key)) {
-      await this.#put('frozen', key, manifest);
+      await this.#put('frozen', key, manifest, { silent: true });
     }
     this.availableSnapshots.add(manifest.snapshotId);
   }
@@ -977,8 +981,8 @@ export class RepositorySynchronizer {
     return await this.storage.get('public', key) ?? retrieved;
   }
 
-  async #put(space, key, value) {
-    const record = await this.storage.put(space, key, value);
+  async #put(space, key, value, options = undefined) {
+    const record = options ? await this.storage.put(space, key, value, options) : await this.storage.put(space, key, value);
     if (this.storageWritePauseMs > 0) await sleep(this.storageWritePauseMs);
     return record;
   }
