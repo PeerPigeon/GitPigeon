@@ -21,6 +21,8 @@ import { SnapshotStreamServer } from './snapshot-stream.js';
 import { WorkspaceFiles, workspaceDigest } from './workspace.js';
 
 const DIGEST = /^[a-f0-9]{64}$/;
+const IMPORT_RETRY_MIN_MS = 60_000;
+const IMPORT_RETRY_MAX_MS = 30 * 60_000;
 const DEVICE = /^[a-zA-Z0-9_-]{8,128}$/;
 const MACHINE_INDEX = /^[a-f0-9]{32}$/;
 const noop = () => {};
@@ -151,6 +153,9 @@ export class RepositorySynchronizer {
     this.devices = new Set([config.deviceId]);
     this.registryDevices = [];
     this.state = { heads: {}, imported: {}, fileBaselines: {}, liveBaselines: {}, importedRefs: {} };
+    // Snapshot imports that failed, by device:snapshot, with the time before
+    // which they are not tried again. See #acceptHead.
+    this.importBackoff = new Map();
     this.unsubscribe = [];
     this.subscribedHeads = new Set();
     this.acceptingHeads = new Map();
@@ -546,9 +551,28 @@ export class RepositorySynchronizer {
     await this.cache.saveState(this.state);
     if (head.deviceId === this.config.deviceId) return;
     if (this.state.imported[head.deviceId] === head.snapshotId) return;
+    // An import that failed is not tried again on the very next head
+    // refresh. A snapshot with one chunk nobody online holds, or a bundle
+    // that cannot land on a dirty working tree, was re-downloaded in full
+    // and failed the same way every few seconds, on every machine, for
+    // every other machine — the standing load on the whole fleet. The
+    // wait doubles from a minute to half an hour and resets the moment the
+    // source publishes a different snapshot.
+    const attemptKey = `${head.deviceId}:${head.snapshotId}`;
+    const backoff = this.importBackoff.get(attemptKey);
+    if (backoff && Date.now() < backoff.until) return;
+    const deferImport = (why) => {
+      const wait = Math.min((backoff?.wait ?? IMPORT_RETRY_MIN_MS / 2) * 2, IMPORT_RETRY_MAX_MS);
+      for (const key of this.importBackoff.keys()) {
+        if (key.startsWith(`${head.deviceId}:`) && key !== attemptKey) this.importBackoff.delete(key);
+      }
+      this.importBackoff.set(attemptKey, { until: Date.now() + wait, wait });
+      this.logger.debug?.(`Import of ${head.snapshotId.slice(0, 12)} from ${head.deviceId.slice(0, 8)} deferred ${Math.round(wait / 1000)}s: ${why}`);
+    };
 
     const manifest = await this.#retrieveManifest(head.snapshotId);
     if (!manifest) {
+      deferImport('manifest unavailable');
       this.logger.warn(`Snapshot ${head.snapshotId.slice(0, 12)} is not currently available; a source device must be online`);
       return;
     }
@@ -616,7 +640,12 @@ export class RepositorySynchronizer {
       const retryableGitConflict = gitResult.conflicts.some(
         (conflict) => conflict.reason === 'working-tree-not-clean',
       );
-      if (!retryableGitConflict) this.state.imported[head.deviceId] = head.snapshotId;
+      if (!retryableGitConflict) {
+        this.state.imported[head.deviceId] = head.snapshotId;
+        this.importBackoff.delete(attemptKey);
+      } else {
+        deferImport('working tree not clean');
+      }
       if (gitResult.conflicts.length === 0) this.state.importedRefs[head.deviceId] = head.refsDigest;
       await this.cache.saveState(this.state);
       this.lastResult = result;
@@ -642,6 +671,9 @@ export class RepositorySynchronizer {
           this.logger.warn(`Live file ${conflict.path} ${conflict.reason}; local copy was left unchanged`);
         }
       }
+    } catch (error) {
+      deferImport(error?.message ?? String(error));
+      throw error;
     } finally {
       if (temporary) await rm(temporary, { recursive: true, force: true });
     }
