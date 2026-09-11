@@ -538,7 +538,9 @@ export const REMOVED_MEMORY_MS = 30 * 24 * 60 * 60_000;
 // inside that while cutting the full-record traffic by an order of magnitude.
 export const PUBLISH_HEARTBEAT_MS = 20_000;
 // How often the watcher pulls the other publishers' records regardless of events.
-export const REMOTE_PULL_INTERVAL_MS = 30_000;
+/** How long after an unanswered ask for a never-held record the next ask waits; doubles per miss. */
+export const MISSING_RECORD_ASK_MIN_MS = 30_000;
+export const MISSING_RECORD_ASK_MAX_MS = 10 * 60_000;
 // Stale index records are pruned on start and then this often. Device-request
 // buckets are 5 s wide and read for 15 s; a superseded snapshot head is history
 // nothing reads. Left alone they were 3,808 and 1,054 records — 3 MB of a
@@ -844,10 +846,23 @@ async function connectMachineDirectory(index, logger = {}, {
   const publisherSubscriptions = new Map();
   let remoteSyncTimer = null;
   let remoteQueue = Promise.resolve();
+  // Records arrive through their subscriptions, and a peer that links up
+  // pushes anything newer in its connect-time digest. The room is asked
+  // only for a record this machine has never held, with a doubling back-off
+  // so a record nobody holds is not a broadcast every few seconds.
+  const missingAskedAt = new Map();
+  const heldOrRetrieved = async (key) => {
+    const held = await node.storage.get('public', key);
+    if (held) return held;
+    const entry = missingAskedAt.get(key) ?? { at: 0, wait: MISSING_RECORD_ASK_MIN_MS };
+    if (Date.now() - entry.at < entry.wait) return null;
+    missingAskedAt.set(key, { at: Date.now(), wait: Math.min(entry.wait * 2, MISSING_RECORD_ASK_MAX_MS) });
+    return await node.storage.retrieve('public', key, { timeoutMs: 2_000 });
+  };
   const syncRemoteRepositories = () => {
     const operation = remoteQueue.then(async () => {
       if (closed || !ready || !node.storage || node.getConnectedPeers().length === 0) return;
-      const roster = await node.storage.retrieve("public", rosterKey, { timeoutMs: 2_000 });
+      const roster = await heldOrRetrieved(rosterKey);
       for (const publisherId of rosterPublisherIds(roster?.value, index.indexId)) {
         knownRosterIds.add(publisherId);
       }
@@ -867,7 +882,7 @@ async function connectMachineDirectory(index, logger = {}, {
         if (!publisherSubscriptions.has(key)) {
           publisherSubscriptions.set(key, node.storage.subscribeKey("public", key));
         }
-        const record = await node.storage.retrieve("public", key, { timeoutMs: 2_000 });
+        const record = await heldOrRetrieved(key);
         const value = record?.value;
         if (value?.protocol !== INDEX_PROTOCOL || value.kind !== "publisher-directory"
           || value.indexId !== index.indexId || value.publisherId !== publisherId
@@ -975,7 +990,10 @@ async function connectMachineDirectory(index, logger = {}, {
       const storage = node.storage;
       if (!storage) return;
       const connected = node.getConnectedPeers().length > 0;
-      if (connected && (reconcile || needsReconcile || Date.now() - lastRosterReconcileAt >= 10_000)) {
+      // On start and on every peer connect — never on a clock. The records
+      // this reconcile pulls are subscribed, so they change here as they
+      // change anywhere.
+      if (connected && (reconcile || needsReconcile)) {
         // Node storage is memory-backed while the browser keeps its IndexedDB
         // record across native process restarts. Import that higher version
         // before the first write or the browser will reject the live update as
@@ -1162,16 +1180,11 @@ async function connectMachineDirectory(index, logger = {}, {
   const timer = setInterval(() => {
     publish().catch((error) => logger.error?.(error));
   }, heartbeatMs);
-  // Pull, not only push. Gossip forwards each write to a fan-out budget of
-  // peers, not to all of them; a watcher that is not adjacent to another
-  // watcher could hold that machine's record for minutes after it changed
-  // and repeat the stale view to every browser near it. The remote sync
-  // already retrieves every publisher record from whoever holds a newer
-  // one; run it on a clock as well as on events.
-  const remotePullTimer = setInterval(() => {
-    scheduleRemoteRepositorySync();
-  }, REMOTE_PULL_INTERVAL_MS);
-  remotePullTimer.unref?.();
+  // No pull on a clock. Every publisher record is subscribed, so a change
+  // arrives as it is made; a peer that links up exchanges a digest of
+  // versions with this node and pushes whatever it holds newer. Pulling
+  // every record every half minute "in case gossip missed one" was a
+  // broadcast per publisher per watcher that every peer decrypted.
   return {
     index,
     node,
@@ -1195,7 +1208,6 @@ async function connectMachineDirectory(index, logger = {}, {
     async close() {
       if (closed) return;
       clearInterval(timer);
-      clearInterval(remotePullTimer);
       clearInterval(pruneTimer);
       try { fleetSubscription?.(); } catch { /* already closed */ }
       if (remoteSyncTimer) clearTimeout(remoteSyncTimer);

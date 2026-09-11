@@ -220,7 +220,10 @@ class CommittedOnlyWorkspace {
   // the browser's validateManifest and this synchronizer's own manifest
   // acceptance — recompute it from the (empty) list and reject a mismatch.
   async snapshot() { return { files: [], digest: workspaceDigest([]) }; }
-  async apply() { return { written: [], removed: [] }; }
+  // The same shape the real workspace returns: an import reads `conflicts`
+  // off every result, and a share room whose owner published a head died on
+  // `undefined.map` before it ever served anyone.
+  async apply() { return { written: [], removed: [], updated: [], conflicts: [] }; }
 }
 
 class CommittedOnlyLiveWorkspace {
@@ -229,8 +232,8 @@ class CommittedOnlyLiveWorkspace {
   async snapshot() { return { files: [], digest: liveWorkspaceDigest([]) }; }
   async trashSnapshot() { return []; }
   async mirrorTrash() { return []; }
-  async prepare() { return { written: [], removed: [] }; }
-  async apply() { return { written: [], removed: [] }; }
+  async prepare() { return { written: [], removed: [], restored: [], conflicts: [] }; }
+  async apply() { return { written: [], removed: [], updated: [], conflicts: [] }; }
 }
 
 function openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node, ownership = { owns: () => false }, deviceClaim = null, { committedOnly = false, cacheDir = null } = {}) {

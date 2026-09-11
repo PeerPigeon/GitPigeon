@@ -158,6 +158,8 @@ export class RepositorySynchronizer {
     // which they are not tried again. See #acceptHead.
     this.importBackoff = new Map();
     this.mutableAskedAt = new Map();
+    this.mutableSubscribed = new Set();
+    this.unseedableSnapshots = new Set();
     this.unsubscribe = [];
     this.subscribedHeads = new Set();
     this.acceptingHeads = new Map();
@@ -627,16 +629,16 @@ export class RepositorySynchronizer {
       const liveResult = await this.liveWorkspace.apply(liveFiles, liveBaselines, head.deviceId);
       await this.#mirrorTrashFiles(manifest).catch((error) => this.logger.error(error));
       const liveConflicts = [
-        ...prepared.conflicts.map((conflict) => ({ ...conflict, kind: 'live' })),
-        ...liveResult.conflicts.map((conflict) => ({ ...conflict, kind: 'live' })),
+        ...(prepared.conflicts ?? []).map((conflict) => ({ ...conflict, kind: 'live' })),
+        ...(liveResult.conflicts ?? []).map((conflict) => ({ ...conflict, kind: 'live' })),
       ];
-      const privateConflicts = fileResult.conflicts.map((conflict) => ({ ...conflict, kind: 'private' }));
+      const privateConflicts = (fileResult.conflicts ?? []).map((conflict) => ({ ...conflict, kind: 'private' }));
       const result = {
         ...gitResult,
         conflicts: [...gitResult.conflicts, ...privateConflicts, ...liveConflicts],
-        updatedFiles: fileResult.updated,
+        updatedFiles: fileResult.updated ?? [],
         fileConflicts: privateConflicts,
-        updatedLiveFiles: [...new Set([...prepared.restored, ...liveResult.updated])].sort(),
+        updatedLiveFiles: [...new Set([...(prepared.restored ?? []), ...(liveResult.updated ?? [])])].sort(),
         liveConflicts,
       };
       const retryableGitConflict = gitResult.conflicts.some(
@@ -820,6 +822,9 @@ export class RepositorySynchronizer {
   async #rehydrateCurrentSnapshots() {
     const snapshots = sortedUnique(Object.values(this.state.heads).map((head) => head?.snapshotId).filter(Boolean));
     for (const snapshotId of snapshots) {
+      // A manifest whose chunks are not on disk (an import that never
+      // finished) fails the same way on every refresh; once is enough.
+      if (this.unseedableSnapshots.has(snapshotId)) continue;
       const manifest = await this.cache.readManifest(snapshotId);
       if (!manifest) continue;
       try {
@@ -835,6 +840,7 @@ export class RepositorySynchronizer {
           );
         }
       } catch (error) {
+        this.unseedableSnapshots.add(snapshotId);
         this.logger.warn(`Could not re-seed cached snapshot ${snapshotId.slice(0, 12)}: ${error.message}`);
       }
     }
@@ -946,19 +952,21 @@ export class RepositorySynchronizer {
   }
 
   async #retrieveMutable(key) {
-    // Native storage is durable now, so a restarted watcher already holds the
-    // version it last wrote and this is an ordinary merge of whatever the mesh
-    // knows rather than a race that has to be waited out.
-    //
-    // Once a minute per key. A refresh runs in every session on every peer
-    // connect, and each ask is a broadcast every peer decrypts and answers;
-    // a dozen sessions times several heads on every connect was a steady
-    // dozen broadcasts a second. Records that change arrive through their
-    // subscriptions in between.
-    const askedAt = this.mutableAskedAt.get(key) ?? 0;
-    if (Date.now() - askedAt < MUTABLE_ASK_MIN_INTERVAL_MS) {
-      return await this.storage.get('public', key);
+    // A record this session holds is never asked for again: changes arrive
+    // through its subscription, and a peer that links up pushes anything
+    // newer in its connect-time digest. Only a record never seen is asked
+    // of the room — once a minute per key at most, since every ask is a
+    // broadcast every peer decrypts and answers, and a dozen sessions
+    // asking for several heads on every connect was a steady dozen
+    // broadcasts a second.
+    if (!this.mutableSubscribed.has(key)) {
+      this.mutableSubscribed.add(key);
+      this.unsubscribe.push(this.storage.subscribeKey('public', key));
     }
+    const held = await this.storage.get('public', key);
+    if (held) return held;
+    const askedAt = this.mutableAskedAt.get(key) ?? 0;
+    if (Date.now() - askedAt < MUTABLE_ASK_MIN_INTERVAL_MS) return null;
     this.mutableAskedAt.set(key, Date.now());
     const retrieved = await this.storage.retrieve(
       'public',
