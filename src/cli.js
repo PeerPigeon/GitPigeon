@@ -1375,6 +1375,13 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     // two machines on one LAN converge on the newest build either of them
     // has, including a build that never went through a release.
     peerUpdates = startPeerUpdates({
+      onUnreachableOffer: IS_STANDALONE ? async (version) => {
+        const result = await downloadReleaseUpdate({ root, currentVersion: GITPIGEON_VERSION });
+        if (!result.updated) return;
+        installedUpdate = result;
+        log.info(`Installed ${result.version} from the release (offered ${version} on the mesh was unreachable); restarting`);
+        setTimeout(() => stop(), 750);
+      } : null,
       node: machineIndex.node,
       root,
       currentVersion: GITPIGEON_VERSION,

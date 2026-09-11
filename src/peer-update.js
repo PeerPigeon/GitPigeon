@@ -28,6 +28,8 @@ const OFFER_INTERVAL_MS = 10 * 60_000;
 const OFFER_FRESH_MS = 5 * 60_000;
 // How long a peer with no route is left alone before its offer is tried again.
 const UNROUTABLE_MEMORY_MS = 2 * 60_000;
+// How long a newer build may sit on unreachable peers before the release is used.
+const UNREACHABLE_OFFER_GRACE_MS = 5 * 60_000;
 // Measured on the real mesh: encrypted direct messages deliver up to 32 KiB,
 // silently vanish from 48 KiB, and overflow the crypto layer's stack from
 // 128 KiB. 192 KiB slices meant every serve attempt died and every fetch
@@ -76,6 +78,11 @@ export function startPeerUpdates({
   standalone,
   logger = {},
   onUpdate = () => {},
+  // Called with a version that peers keep offering but none of them can be
+  // reached for, once that has been so for UNREACHABLE_OFFER_GRACE_MS. The
+  // mesh is partial; when the build cannot cross it, fetching it from the
+  // release is what "necessary" means.
+  onUnreachableOffer = null,
   platform = process.platform,
   arch = process.arch,
 } = {}) {
@@ -224,7 +231,12 @@ export function startPeerUpdates({
     const candidates = freshOffers()
       .filter((offer) => isNewerVersion(offer.version, currentVersion) && !(offer.unroutableUntil > Date.now()))
       .sort((a, b) => (isNewerVersion(a.version, b.version) ? -1 : isNewerVersion(b.version, a.version) ? 1 : 0));
-    if (candidates.length === 0) return freshOffers().some((offer) => isNewerVersion(offer.version, currentVersion)) ? 'no-route' : 'none';
+    if (candidates.length === 0) {
+      const newer = freshOffers().filter((offer) => isNewerVersion(offer.version, currentVersion));
+      if (newer.length === 0) return 'none';
+      noteUnreachable(newer);
+      return 'no-route';
+    }
     for (const offer of candidates) {
       try {
         await beginFetch(offer.peerId, offer);
@@ -239,7 +251,24 @@ export function startPeerUpdates({
         logger.debug?.(`Peer update: no route to ${String(offer.peerId).slice(0, 12)} offering ${offer.version}; trying the next peer`);
       }
     }
+    noteUnreachable(candidates);
     return 'no-route';
+  };
+  // The newest version offered only by unreachable peers, and since when.
+  let unreachable = null;
+  const noteUnreachable = (offered) => {
+    let best = null;
+    for (const offer of offered) if (!best || isNewerVersion(offer.version, best.version)) best = offer;
+    if (!best) return;
+    if (!unreachable || unreachable.version !== best.version) {
+      unreachable = { version: best.version, since: Date.now(), reported: false };
+      return;
+    }
+    if (!unreachable.reported && Date.now() - unreachable.since >= UNREACHABLE_OFFER_GRACE_MS && onUnreachableOffer) {
+      unreachable.reported = true;
+      logger.info?.(`GitPigeon ${best.version} is offered on the mesh by peers this machine cannot reach; fetching it from the release instead`);
+      Promise.resolve(onUnreachableOffer(best.version)).catch((error) => logger.warn?.(`Release fallback failed: ${error?.message ?? error}`));
+    }
   };
   const startFetch = () => {
     fetchNewestOffered().catch((error) => logger.debug?.(`Peer update: ${error?.message ?? error}`));
