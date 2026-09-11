@@ -423,3 +423,39 @@ test('an empty live document never wins over a file that has content', async (t)
   assert.equal(await readFile(file, 'utf8'), 'original\n');
   assert.equal(applyOutbound(), 'original\n');
 });
+
+test('a file past the live-editing limit is never a live document and never answered', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-oversized-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await GitRepository.init(root);
+  const repositoryId = 'a'.repeat(64);
+  // A ten-megabyte README (a duplication artifact) as a live document was
+  // four hundred frames per answer, streamed to every tab that opened it and
+  // relayed through every other watcher: the whole fleet pinned by one file.
+  const content = `${'x'.repeat(1023)}\n`.repeat(1025);
+  await writeFile(path.join(root, 'README.md'), content);
+  const node = new FakeNode();
+  const server = new RealtimeWorkspaceServer({ node, repository, repositoryId, secret: 's', deviceId: 'solo', seedElectedFallbackMs: 120, seedFallbackMs: 240, seedRetryMs: 40 });
+  await server.start();
+  t.after(() => server.stop());
+  const documentId = createHash('sha256').update([
+    'gitpigeon-realtime-v2', repositoryId, 'refs/heads/main', 'README.md',
+  ].join('\0')).digest('hex');
+  const browser = new Y.Doc();
+  node.receive('browser', repositoryId, REALTIME_CHANNEL, {
+    documentId,
+    path: 'README.md',
+    revision: 'refs/heads/main',
+    baseHash: createHash('sha256').update(content).digest('hex'),
+    messageId: randomBytes(16).toString('hex'),
+    kind: 'sync-request',
+    part: 0,
+    total: 1,
+    payload: Buffer.from(Y.encodeStateVector(browser)).toString('base64'),
+  });
+  await settleSeed();
+  assert.equal(node.directFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'sync-response').length, 0);
+  assert.equal(node.broadcastFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'sync-response').length, 0);
+  assert.equal(server.documents.size, 0);
+  browser.destroy();
+});

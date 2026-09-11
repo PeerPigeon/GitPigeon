@@ -6,7 +6,9 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { TERMINAL_CHANNEL, deviceTerminalRoom } from '../src/channel.js';
-import { TerminalServer, changeDirectoryLine } from '../src/terminal-server.js';
+import { TerminalServer, changeDirectoryLine, loginShell } from '../src/terminal-server.js';
+import { existsSync } from 'node:fs';
+import { userInfo } from 'node:os';
 import { FakeNode } from './fake-node.js';
 
 const repositoryId = 'repository-terminal';
@@ -366,4 +368,16 @@ test('relayed frames reach the machine terminal whether or not they name a repos
   assert.equal(spawned.length, 1);
   assert.equal(replies[0]?.frame.kind, 'opened');
   assert.equal(replies[0]?.frame.repositoryId, deviceTerminalRoom(serviceInstanceId));
+});
+
+test('the terminal runs the account\'s login shell, whatever the service was started with', () => {
+  // A launchd-started service has no SHELL in its environment; it used to
+  // fall back to /bin/sh — bash on macOS, complete with the zsh-migration
+  // notice — and chsh could never reach a running process's environment.
+  const account = userInfo().shell;
+  const chosen = loginShell({ SHELL: '/nonexistent/fish' });
+  assert.ok(path.isAbsolute(chosen) && existsSync(chosen), `${chosen} must exist`);
+  if (typeof account === 'string' && existsSync(account)) assert.equal(chosen, account);
+  assert.equal(loginShell({}), chosen);
+  assert.notEqual(loginShell({ SHELL: '/nonexistent/fish' }), '/nonexistent/fish');
 });

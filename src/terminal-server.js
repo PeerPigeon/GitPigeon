@@ -1,5 +1,6 @@
 import { chmod, mkdir, stat, writeFile } from 'node:fs/promises';
-import { homedir, hostname } from 'node:os';
+import { existsSync } from 'node:fs';
+import { homedir, hostname, userInfo } from 'node:os';
 import { machineIndexRoot } from './machine-index.js';
 import { terminalHistorySpoolPath } from './terminal-history.js';
 import path from 'node:path';
@@ -198,6 +199,32 @@ const READY_MARKER = '\u001b]777;gitpigeon-ready\u0007';
 const READY_TIMEOUT_MS = 4_000;
 const READY_MAX_BYTES = 65_536;
 
+/**
+ * The account's login shell, from the user database — what `chsh` sets —
+ * never the service's own environment. A service started by launchd has
+ * no SHELL at all and fell back to /bin/sh, which on macOS is bash and
+ * greets every session with the "default interactive shell is now zsh"
+ * notice; chsh could not help because a running process's environment
+ * never changes. Read per terminal open, so a chsh takes effect on the
+ * next one.
+ */
+export function loginShell(env = process.env) {
+  let account = null;
+  try { account = userInfo().shell; } catch { /* no account record */ }
+  const candidates = [
+    account,
+    env.SHELL,
+    process.platform === 'darwin' ? '/bin/zsh' : null,
+    '/bin/bash',
+    '/bin/sh',
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string' || !path.isAbsolute(candidate)) continue;
+    if (existsSync(candidate)) return candidate;
+  }
+  return '/bin/sh';
+}
+
 async function shellCommand(deviceName) {
   // "Daniels-MacBook-Pro [../test/*] $" — a dimmed machine name (context),
   // the live directory in normal weight (the thing you check), and a bold
@@ -238,7 +265,7 @@ async function shellCommand(deviceName) {
       initialize: '',
     };
   }
-  const shell = process.env.SHELL && path.isAbsolute(process.env.SHELL) ? process.env.SHELL : '/bin/sh';
+  const shell = loginShell();
   const zsh = /(?:^|\/)zsh$/.test(shell);
   const bash = /(?:^|\/)bash$/.test(shell);
   // Zero-width escape wrapping (%{...%} / \[...\]) keeps line editing from
@@ -344,7 +371,9 @@ async function shellCommand(deviceName) {
       '[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"',
       posixTail('PS1', bashPrompt, 'bash'),
     ].join('\n'), { mode: 0o600 });
-    return { shell, flavor: 'bash', args: ['--rcfile', rcfile], env: {}, initialize: '' };
+    // macOS bash prints its zsh-migration notice into every interactive
+    // session unless told not to; the shell here is what the account asked for.
+    return { shell, flavor: 'bash', args: ['--rcfile', rcfile], env: { BASH_SILENCE_DEPRECATION_WARNING: '1' }, initialize: '' };
   }
   // An unknown shell falls back to typing the setup; the output gate hides
   // the echo, though the shell's own history may keep the line.
@@ -352,7 +381,7 @@ async function shellCommand(deviceName) {
     shell,
     flavor: 'sh',
     args: [],
-    env: {},
+    env: { BASH_SILENCE_DEPRECATION_WARNING: '1' },
     initialize: `device() { ${deviceCommand} terminal-device "$@"; }; export PS1=$'${bashPrompt}'; export HISTFILE=${quoteShell(spoolPath)}; clear; printf '\\033]777;gitpigeon-ready\\a'\r`,
   };
 }

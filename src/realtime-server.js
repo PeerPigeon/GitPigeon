@@ -41,6 +41,12 @@ const PRESENCE_INTERVAL_MS = 30_000;
 const SYNC_ANSWER_MIN_INTERVAL_MS = 30_000;
 // A live document's Yjs history above this (and many times its text) is rebuilt.
 const DOCUMENT_HISTORY_MAX_BYTES = 1024 * 1024;
+// A file larger than this is never a live document. A ten-megabyte README
+// (a duplication artifact) made every sync answer four hundred frames that
+// streamed for half a minute to each tab that opened it, relayed hop by hop
+// through every other watcher — the whole fleet pinned by one file that no
+// one was editing.
+export const REALTIME_MAX_FILE_BYTES = 1024 * 1024;
 const PRESENCE_FRESH_MS = 90_000;
 const SEED_RETRY_MS = 2_000;
 const SEED_FALLBACK_MS = 12_000;
@@ -397,6 +403,7 @@ export class RealtimeWorkspaceServer {
     if (expectedDocumentId !== frame.documentId) return null;
     const existing = this.documents.get(frame.documentId);
     if (existing) return existing.path === normalized ? existing : null;
+    if (await this.#tooLargeForLiveEditing(normalized)) return null;
     const doc = new Y.Doc();
     const state = {
       doc,
@@ -526,6 +533,22 @@ export class RealtimeWorkspaceServer {
   }
 
 
+  async #tooLargeForLiveEditing(file) {
+    let size = 0;
+    try {
+      size = (await stat(path.join(this.repository.root, ...file.split('/')))).size;
+    } catch {
+      return false;
+    }
+    if (size <= REALTIME_MAX_FILE_BYTES) return false;
+    this.oversized ??= new Set();
+    if (!this.oversized.has(file)) {
+      this.oversized.add(file);
+      this.logger.info?.(`${file} is ${size} bytes; files over ${REALTIME_MAX_FILE_BYTES} bytes are read-only, not live documents`);
+    }
+    return true;
+  }
+
   #flushPendingSyncs(state) {
     const pending = state.pendingSyncs.splice(0);
     for (const { peerId, frame } of pending) this.#answerSync(state, peerId, frame).catch(() => {});
@@ -539,6 +562,16 @@ export class RealtimeWorkspaceServer {
    * the same rule the control channel's pong already follows.
    */
   async #answerSync(state, peerId, frame) {
+    // A document whose text has outgrown the live-editing limit is not
+    // served: the answer would be hundreds of frames to every asker.
+    if (state.text.length > REALTIME_MAX_FILE_BYTES) {
+      this.oversized ??= new Set();
+      if (!this.oversized.has(state.path)) {
+        this.oversized.add(state.path);
+        this.logger.info?.(`${state.path} has grown past ${REALTIME_MAX_FILE_BYTES} bytes; its live document is no longer served`);
+      }
+      return;
+    }
     const historyBytes = Y.encodeStateAsUpdate(state.doc).length;
     if (historyBytes > DOCUMENT_HISTORY_MAX_BYTES && historyBytes > state.text.length * 8) {
       // Serving a history of megabytes for a file of kilobytes, to every
