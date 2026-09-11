@@ -272,11 +272,10 @@ export class ControlServer {
       // what happened; a machine that found a newer build restarts a moment
       // after answering, so the browser sees it come back on the new version.
       if (!this.onUpdateRequested) return { updated: false, current: true, message: 'This watcher runs from source and does not self-update' };
-      const result = await this.onUpdateRequested();
-      this.logger.info?.(result.updated
-        ? `A paired browser requested an update: installed ${result.version}, restarting`
-        : 'A paired browser requested an update: already on the newest release');
-      return result;
+      // The handler acknowledges at once and downloads in the background;
+      // it logs the outcome itself. The browser watches the build in this
+      // machine's index record change.
+      return await this.onUpdateRequested();
     }
     if (frame.kind === 'rename-repository') {
       // The repository's display name is a UI label, configurable by the

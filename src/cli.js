@@ -913,6 +913,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let peerUpdates;
   let automaticUpdates;
   let installedUpdate;
+  let requestedUpdate = null;
   let controlServer;
   let pairingService;
   let terminalHistory = null;
@@ -1220,12 +1221,32 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     // Paired peers can remove a repository or rotate the index secret.
     controlServer = new ControlServer({
       onUpdateRequested: IS_STANDALONE ? async () => {
-        const result = await downloadReleaseUpdate({ root, currentVersion: GITPIGEON_VERSION });
-        if (!result.updated) return { updated: false, current: true, version: GITPIGEON_VERSION };
-        installedUpdate = result;
-        // Answer first; the restart follows once the reply is on the wire.
-        setTimeout(() => stop(), 750);
-        return { updated: true, version: result.version ?? null };
+        // Acknowledge at once and download in the background. The release
+        // is a hundred-megabyte binary; answering only after it was
+        // downloaded and verified outran the browser's reply timeout on a
+        // slow link, and the dashboard reported "did not answer" for an
+        // update that was in fact under way. The browser sees the outcome
+        // the way it sees everything else about this machine: the build in
+        // the index record changes when the watcher comes back.
+        if (!requestedUpdate) {
+          requestedUpdate = downloadReleaseUpdate({ root, currentVersion: GITPIGEON_VERSION })
+            .then((result) => {
+              if (!result.updated) {
+                log.info(`A paired browser requested an update: already on the newest release (${GITPIGEON_VERSION})`);
+                return result;
+              }
+              installedUpdate = result;
+              log.info(`A paired browser requested an update: installed ${result.version}, restarting`);
+              setTimeout(() => stop(), 750);
+              return result;
+            })
+            .catch((error) => {
+              log.error(new Error(`A paired browser requested an update, which failed: ${error.message}`));
+              return { updated: false };
+            })
+            .finally(() => { requestedUpdate = null; });
+        }
+        return { accepted: true, updated: false, version: GITPIGEON_VERSION };
       } : null,
       node: machineIndex.node,
       indexId: machineIndex.index.indexId,
