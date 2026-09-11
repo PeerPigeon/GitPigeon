@@ -606,12 +606,23 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     }
   };
 
+  // A snapshot is a fleet-wide event: a manifest of every file, new chunks,
+  // and an import on every other machine. Publishing 250 ms after any file
+  // change meant a live document being edited produced a snapshot a second,
+  // and other watchers spent their time importing each one — and failing,
+  // because the chunks were pruned four snapshots later, faster than a
+  // slow link could fetch them. Changes are coalesced for a few seconds of
+  // quiet and published at most once per PUBLISH_MIN_INTERVAL_MS.
+  let lastPublishAt = 0;
   const schedulePublish = () => {
     if (changeTimer) clearTimeout(changeTimer);
+    const quiet = Math.max(pollMs, PUBLISH_QUIET_MS);
+    const untilAllowed = Math.max(0, lastPublishAt + PUBLISH_MIN_INTERVAL_MS - Date.now());
     changeTimer = setTimeout(() => {
       changeTimer = null;
+      lastPublishAt = Date.now();
       publishChanges().catch((error) => log.error(error));
-    }, pollMs);
+    }, Math.max(quiet, untilAllowed));
   };
 
   const sweepOrphanedTemps = async () => {
@@ -2372,6 +2383,8 @@ function watchedRepositories(registrations) {
 }
 
 const VANISHED_CLONE_CHECK_MS = 30_000;
+const PUBLISH_QUIET_MS = 5_000;
+const PUBLISH_MIN_INTERVAL_MS = 20_000;
 
 /**
  * A registered clone that no longer exists on disk is dropped from THIS

@@ -8,6 +8,7 @@ const IV_SIZE = 12;
 const TAG_SIZE = 16;
 const CACHE_IO_CONCURRENCY = 16;
 const DEFAULT_RETAINED_SNAPSHOTS = 4;
+const RETAIN_RECENT_SNAPSHOTS_MS = 15 * 60_000;
 
 async function mapConcurrent(values, concurrency, mapper) {
   let cursor = 0;
@@ -183,12 +184,19 @@ export class RepositoryCache {
       };
     }
 
-    const retained = manifests
+    const sorted = manifests
       .filter(({ value }) => value)
       .sort((left, right) => right.createdAt - left.createdAt
-        || right.snapshotId.localeCompare(left.snapshotId))
-      .slice(0, Math.max(0, Number.parseInt(retainSnapshots, 10) || 0));
+        || right.snapshotId.localeCompare(left.snapshotId));
+    const retained = sorted.slice(0, Math.max(0, Number.parseInt(retainSnapshots, 10) || 0));
     for (const { snapshotId } of retained) protectedIds.add(snapshotId);
+    // And every snapshot younger than the retention window, however many:
+    // another machine may still be fetching its chunks over a slow path, and
+    // a chunk removed under it fails that import outright.
+    const now = Date.now();
+    for (const { snapshotId, createdAt } of sorted) {
+      if (now - createdAt < RETAIN_RECENT_SNAPSHOTS_MS) protectedIds.add(snapshotId);
+    }
 
     const keptManifests = manifests.filter(
       ({ snapshotId, value }) => value && protectedIds.has(snapshotId),
