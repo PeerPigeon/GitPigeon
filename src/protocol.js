@@ -22,6 +22,7 @@ import { WorkspaceFiles, workspaceDigest } from './workspace.js';
 
 const DIGEST = /^[a-f0-9]{64}$/;
 const IMPORT_RETRY_MIN_MS = 60_000;
+const MUTABLE_ASK_MIN_INTERVAL_MS = 60_000;
 const IMPORT_RETRY_MAX_MS = 30 * 60_000;
 const DEVICE = /^[a-zA-Z0-9_-]{8,128}$/;
 const MACHINE_INDEX = /^[a-f0-9]{32}$/;
@@ -156,6 +157,7 @@ export class RepositorySynchronizer {
     // Snapshot imports that failed, by device:snapshot, with the time before
     // which they are not tried again. See #acceptHead.
     this.importBackoff = new Map();
+    this.mutableAskedAt = new Map();
     this.unsubscribe = [];
     this.subscribedHeads = new Set();
     this.acceptingHeads = new Map();
@@ -915,6 +917,17 @@ export class RepositorySynchronizer {
     // Native storage is durable now, so a restarted watcher already holds the
     // version it last wrote and this is an ordinary merge of whatever the mesh
     // knows rather than a race that has to be waited out.
+    //
+    // Once a minute per key. A refresh runs in every session on every peer
+    // connect, and each ask is a broadcast every peer decrypts and answers;
+    // a dozen sessions times several heads on every connect was a steady
+    // dozen broadcasts a second. Records that change arrive through their
+    // subscriptions in between.
+    const askedAt = this.mutableAskedAt.get(key) ?? 0;
+    if (Date.now() - askedAt < MUTABLE_ASK_MIN_INTERVAL_MS) {
+      return await this.storage.get('public', key);
+    }
+    this.mutableAskedAt.set(key, Date.now());
     const retrieved = await this.storage.retrieve(
       'public',
       key,

@@ -32,6 +32,10 @@ export function deviceTerminalRoom(serviceInstanceId) {
 // where a frame belongs and are written last so they cannot be overwritten.
 export const RESERVED_FRAME_FIELDS = Object.freeze(['protocol', 'repositoryId', 'channel']);
 
+function selfIdOf(node) {
+  try { return String(node?.getClientId?.() ?? node?.mesh?.getClientId?.() ?? '') || null; } catch { return null; }
+}
+
 // PeerPigeon does not fragment a gossip payload, so a frame has to fit one
 // data-channel message. Snapshot payloads are already split into manifest
 // chunks well below this bound.
@@ -60,7 +64,7 @@ function encode(repositoryId, channel, frame) {
 }
 
 /** Decode a PeerPigeon `message` event into a frame for this repository channel. */
-export function decodeChannelFrame(repositoryId, channel, message) {
+export function decodeChannelFrame(repositoryId, channel, message, selfId = null) {
   if (!message?.encrypted || message.local || typeof message.data !== 'string') return null;
   if (message.data.length > MAX_FRAME_BYTES) return null;
   let frame;
@@ -68,12 +72,26 @@ export function decodeChannelFrame(repositoryId, channel, message) {
   if (!frame || typeof frame !== 'object') return null;
   if (frame.protocol !== CHANNEL_PROTOCOL) return null;
   if (frame.repositoryId !== repositoryId || frame.channel !== channel) return null;
+  // A frame addressed to one peer but carried by gossip (no direct route)
+  // is for that peer alone.
+  if (typeof frame.to === 'string' && frame.to && selfId && frame.to !== selfId) return null;
   return frame;
 }
 
-/** Send one encrypted frame to a single peer through the PeerPigeon router. */
+/**
+ * Send one encrypted frame to a single peer. Direct through the PeerPigeon
+ * router when a route exists; otherwise addressed to that peer and carried
+ * by gossip — this is a partial mesh, and a peer with no direct path is
+ * still a peer. Every other holder of the room key drops an addressed
+ * frame that is not for it.
+ */
 export async function sendChannelDirect(node, peerId, repositoryId, channel, frame) {
-  await node.sendEncryptedDirect(peerId, encode(repositoryId, channel, frame));
+  try {
+    await node.sendEncryptedDirect(peerId, encode(repositoryId, channel, frame));
+  } catch (error) {
+    if (!/No route to peer/i.test(String(error?.message ?? error))) throw error;
+    await node.broadcastEncrypted(encode(repositoryId, channel, { ...frame, to: peerId }));
+  }
 }
 
 /** Broadcast one encrypted frame to every peer holding the repository secret. */
@@ -93,7 +111,7 @@ export async function broadcastChannel(node, repositoryId, channel, frame) {
  */
 export function onChannelMessage(node, repositoryId, channel, handler) {
   const listener = (message) => {
-    const frame = decodeChannelFrame(repositoryId, channel, message);
+    const frame = decodeChannelFrame(repositoryId, channel, message, selfIdOf(node));
     if (!frame || !message.fromPeerId) return;
     const origin = String(message.message?.sender ?? message.message?.from ?? message.fromPeerId);
     handler(frame, { peerId: String(message.fromPeerId), kind: message.kind, origin });
