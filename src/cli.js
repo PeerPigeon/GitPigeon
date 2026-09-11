@@ -579,6 +579,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   let watcherRetryMs = 5_000;
   let watcherFallbackTimer;
   let peerRefreshTimer;
+  let lastPeerRefreshAt = 0;
   let started = false;
   let starting = false;
   let stopped = false;
@@ -704,9 +705,17 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   const onPeerConnected = () => {
     activate().catch((error) => log.error(error));
     if (!started || peerRefreshTimer) return;
+    // A refresh asks the room for this repository's registry, presence and
+    // every device's head — four or five broadcasts that every peer decrypts
+    // and looks up — and it ran in every session for every peer that
+    // connected: a browser tab reloading cost a dozen sessions times five
+    // broadcasts. Once a minute per session is plenty; records that change
+    // in between arrive through their subscriptions.
+    if (Date.now() - lastPeerRefreshAt < PEER_REFRESH_MIN_INTERVAL_MS) return;
     peerRefreshTimer = setTimeout(() => {
       peerRefreshTimer = null;
       if (!stopped && node.getConnectedPeers().length > 0) {
+        lastPeerRefreshAt = Date.now();
         synchronizer.refresh().catch((error) => log.error(error));
       }
     }, 250);
@@ -2313,6 +2322,7 @@ function watchedRepositories(registrations) {
 }
 
 const VANISHED_CLONE_CHECK_MS = 30_000;
+const PEER_REFRESH_MIN_INTERVAL_MS = 60_000;
 
 /**
  * A registered clone that no longer exists on disk is dropped from THIS
