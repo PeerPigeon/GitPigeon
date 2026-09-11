@@ -462,11 +462,17 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   // fires into a room nobody has rejoined yet and an announcement nobody
   // hears never happened. Throttled so a reconnect storm is one hello.
   let lastHelloAt = 0;
+  let lastHelloBroadcastAt = 0;
   const sayHello = (peerId = null) => {
     if (Date.now() - lastHelloAt < 5_000) return;
     lastHelloAt = Date.now();
     const hello = { kind: 'hello' };
-    broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, hello).catch(() => {});
+    // The newcomer gets its hello direct; the room hears one at most every
+    // thirty seconds — it is the same announcement for everyone else.
+    if (Date.now() - lastHelloBroadcastAt >= 30_000) {
+      lastHelloBroadcastAt = Date.now();
+      broadcastChannel(node, config.repositoryId, CONTROL_CHANNEL, hello).catch(() => {});
+    }
     if (peerId) sendChannelDirect(node, peerId, config.repositoryId, CONTROL_CHANNEL, hello).catch(() => {});
   };
   sayHello();
@@ -477,7 +483,10 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
   const helloTimers = new Set();
   const onHelloPeer = (peerId) => {
     sayHello(String(peerId ?? '') || null);
-    for (const delay of [6_000, 12_000]) {
+    // One repeat, not two: every hello a browser hears triggers a probe,
+    // and thirteen sessions times three hellos per peer connect was most
+    // of the ping traffic on the fleet.
+    for (const delay of [8_000]) {
       const timer = setTimeout(() => {
         helloTimers.delete(timer);
         if (!stopped) sayHello(String(peerId ?? '') || null);

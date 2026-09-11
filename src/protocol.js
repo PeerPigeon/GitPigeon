@@ -907,6 +907,38 @@ export class RepositorySynchronizer {
           + result.removedChunks + ' unreferenced cache chunks',
       );
     }
+    await this.#evictFrozenChunks().catch((error) => this.logger.debug?.(`Frozen chunk eviction: ${error.message}`));
+  }
+
+  /**
+   * Every chunk of every snapshot was put into the in-memory frozen store as
+   * base64 when it was seeded, and nothing ever took it out: a watcher with a
+   * dozen repositories carried hundreds of megabytes of superseded chunks in
+   * its heap. Chunks no retained manifest references are dropped; the disk
+   * cache is the durable copy and a later retrieve re-seeds from it.
+   */
+  async #evictFrozenChunks() {
+    if (typeof this.storage.list !== 'function' || typeof this.storage.delete !== 'function') return;
+    if (typeof this.cache.listManifests !== 'function') return;
+    const referenced = new Set();
+    for (const snapshotId of await this.cache.listManifests()) {
+      const manifest = await this.cache.readManifest(snapshotId).catch(() => null);
+      if (!manifest) continue;
+      for (const chunk of manifest.chunks ?? []) referenced.add(chunk.sha256);
+      for (const file of manifest.files ?? []) for (const chunk of file.chunks ?? []) referenced.add(chunk.sha256);
+      for (const file of manifest.liveFiles ?? []) for (const chunk of file.chunks ?? []) referenced.add(chunk.sha256);
+      for (const file of manifest.trashFiles ?? []) for (const chunk of file.chunks ?? []) referenced.add(chunk.sha256);
+    }
+    const prefix = chunkKey(this.config.repositoryId, '');
+    let evicted = 0;
+    for (const record of await this.storage.list('frozen')) {
+      const key = String(record?.key ?? '');
+      if (!key.startsWith(prefix)) continue;
+      const sha256 = key.slice(prefix.length);
+      if (referenced.has(sha256)) continue;
+      try { await this.storage.delete('frozen', key); evicted += 1; } catch { /* next prune */ }
+    }
+    if (evicted) this.logger.info(`Evicted ${evicted} superseded chunk records from memory`);
   }
 
   async #reconcileOwnPresence() {
