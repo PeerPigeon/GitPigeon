@@ -539,11 +539,6 @@ export const REMOVED_MEMORY_MS = 30 * 24 * 60 * 60_000;
 export const PUBLISH_HEARTBEAT_MS = 20_000;
 // How often the watcher pulls the other publishers' records regardless of events.
 export const REMOTE_PULL_INTERVAL_MS = 30_000;
-// A record that stays stale (its machine is switched off) is asked for less
-// and less often, up to this; the roster likewise. Each ask is a broadcast
-// every peer in the room decrypts and answers.
-export const REMOTE_PULL_MAX_INTERVAL_MS = 5 * 60_000;
-export const ROSTER_PULL_INTERVAL_MS = 60_000;
 // Stale index records are pruned on start and then this often. Device-request
 // buckets are 5 s wide and read for 15 s; a superseded snapshot head is history
 // nothing reads. Left alone they were 3,808 and 1,054 records — 3 MB of a
@@ -849,17 +844,10 @@ async function connectMachineDirectory(index, logger = {}, {
   const publisherSubscriptions = new Map();
   let remoteSyncTimer = null;
   let remoteQueue = Promise.resolve();
-  let lastRosterPullAt = 0;
-  const remotePullAt = new Map();
-  const remotePullWaitMs = new Map();
   const syncRemoteRepositories = () => {
     const operation = remoteQueue.then(async () => {
       if (closed || !ready || !node.storage || node.getConnectedPeers().length === 0) return;
-      let roster = await node.storage.get("public", rosterKey);
-      if (!roster || Date.now() - lastRosterPullAt >= ROSTER_PULL_INTERVAL_MS) {
-        lastRosterPullAt = Date.now();
-        roster = await node.storage.retrieve("public", rosterKey, { timeoutMs: 2_000 }) ?? roster;
-      }
+      const roster = await node.storage.retrieve("public", rosterKey, { timeoutMs: 2_000 });
       for (const publisherId of rosterPublisherIds(roster?.value, index.indexId)) {
         knownRosterIds.add(publisherId);
       }
@@ -879,21 +867,7 @@ async function connectMachineDirectory(index, logger = {}, {
         if (!publisherSubscriptions.has(key)) {
           publisherSubscriptions.set(key, node.storage.subscribeKey("public", key));
         }
-        // Heartbeats gossip to us on their own; the room is asked only for a
-        // record that is missing or older than the liveness window, and a
-        // record that stays stale is asked for at a lengthening interval.
-        let record = await node.storage.get("public", key);
-        const heldAt = Date.parse(String(record?.value?.updatedAt ?? ''));
-        const fresh = Number.isFinite(heldAt) && Date.now() - heldAt < INDEX_STALE_MS;
-        const wait = remotePullWaitMs.get(key) ?? REMOTE_PULL_INTERVAL_MS;
-        if (!fresh && Date.now() - (remotePullAt.get(key) ?? 0) >= wait) {
-          remotePullAt.set(key, Date.now());
-          const pulled = await node.storage.retrieve("public", key, { timeoutMs: 2_000 });
-          const pulledAt = Date.parse(String(pulled?.value?.updatedAt ?? ''));
-          const newer = Number.isFinite(pulledAt) && (!Number.isFinite(heldAt) || pulledAt > heldAt);
-          remotePullWaitMs.set(key, newer ? REMOTE_PULL_INTERVAL_MS : Math.min(wait * 2, REMOTE_PULL_MAX_INTERVAL_MS));
-          record = pulled ?? record;
-        }
+        const record = await node.storage.retrieve("public", key, { timeoutMs: 2_000 });
         const value = record?.value;
         if (value?.protocol !== INDEX_PROTOCOL || value.kind !== "publisher-directory"
           || value.indexId !== index.indexId || value.publisherId !== publisherId
@@ -1001,7 +975,7 @@ async function connectMachineDirectory(index, logger = {}, {
       const storage = node.storage;
       if (!storage) return;
       const connected = node.getConnectedPeers().length > 0;
-      if (connected && (reconcile || needsReconcile || Date.now() - lastRosterReconcileAt >= ROSTER_PULL_INTERVAL_MS)) {
+      if (connected && (reconcile || needsReconcile || Date.now() - lastRosterReconcileAt >= 10_000)) {
         // Node storage is memory-backed while the browser keeps its IndexedDB
         // record across native process restarts. Import that higher version
         // before the first write or the browser will reject the live update as
