@@ -39,6 +39,8 @@ function validFrame(frame, repositoryId) {
 // 10 s cadence was a steady ~80 encrypted frames a minute for nothing.
 const PRESENCE_INTERVAL_MS = 30_000;
 const SYNC_ANSWER_MIN_INTERVAL_MS = 30_000;
+// A live document's Yjs history above this (and many times its text) is rebuilt.
+const DOCUMENT_HISTORY_MAX_BYTES = 1024 * 1024;
 const PRESENCE_FRESH_MS = 90_000;
 const SEED_RETRY_MS = 2_000;
 const SEED_FALLBACK_MS = 12_000;
@@ -494,10 +496,31 @@ export class RealtimeWorkspaceServer {
       ask();
     }, Math.min(this.seedRetryMs, fallbackAfter));
     state.seedTimer.unref?.();
-    doc.on('update', (update, origin) => {
-      if (origin === 'remote' || origin === 'seed') return;
-      this.#send({ ...frame, kind: 'update', payload: update }).catch(() => {});
-    });
+    const bindDoc = (target) => {
+      target.on('update', (update, origin) => {
+        if (origin === 'remote' || origin === 'seed') return;
+        this.#send({ ...frame, kind: 'update', payload: update }).catch(() => {});
+      });
+    };
+    bindDoc(doc);
+    // A document whose history has outgrown its text many times over is
+    // rebuilt from its current text. The seed is deterministic — client id
+    // from the content hash — so every node that rebuilds the same bytes
+    // builds the same structure and nothing unions. Askers get the compact
+    // state flagged as a reset and replace theirs.
+    state.compact = () => {
+      const content = state.text.toString();
+      const contentHash = createHash('sha256').update(content).digest('hex');
+      const fresh = new Y.Doc({ gc: false });
+      fresh.clientID = Number.parseInt(contentHash.slice(0, 8), 16) || 1;
+      if (content) fresh.getText('content').insert(0, content);
+      const previous = state.doc;
+      state.doc = fresh;
+      state.text = fresh.getText('content');
+      bindDoc(fresh);
+      previous.destroy();
+      this.logger.info?.(`${state.path}: live document history compacted from ${state.lastHistoryBytes ?? '?'} bytes to ${Y.encodeStateAsUpdate(fresh).length}`);
+    };
     this.documents.set(frame.documentId, state);
     return state;
   }
@@ -516,6 +539,16 @@ export class RealtimeWorkspaceServer {
    * the same rule the control channel's pong already follows.
    */
   async #answerSync(state, peerId, frame) {
+    const historyBytes = Y.encodeStateAsUpdate(state.doc).length;
+    if (historyBytes > DOCUMENT_HISTORY_MAX_BYTES && historyBytes > state.text.length * 8) {
+      // Serving a history of megabytes for a file of kilobytes, to every
+      // asker, was the largest flow on the mesh. Rebuild and tell the room.
+      state.lastHistoryBytes = historyBytes;
+      state.compact();
+      const compact = Y.encodeStateAsUpdate(state.doc);
+      await this.#send({ ...frame, kind: 'sync-response', reset: true, payload: compact });
+      return;
+    }
     const response = { ...frame, kind: 'sync-response', payload: Y.encodeStateAsUpdate(state.doc, frame.payload) };
     // Direct to the asker only. The broadcast copy went to every peer in the
     // room, and with the document history behind a busy file it was the
@@ -643,6 +676,7 @@ export class RealtimeWorkspaceServer {
         baseHash: message.baseHash,
         messageId,
         kind: message.kind,
+        ...(message.reset ? { reset: true } : {}),
         part,
         total,
         payload: payload.subarray(part * CHUNK_BYTES, (part + 1) * CHUNK_BYTES).toString('base64'),
