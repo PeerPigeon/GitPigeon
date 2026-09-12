@@ -21,6 +21,8 @@ import {
   publisherRosterValue,
   registerMachinePigeon,
   unregisterMachinePigeon,
+  parseStorageRoles,
+  storageRolesKey,
 } from '../src/machine-index.js';
 import { createRepository } from './helpers.js';
 
@@ -405,4 +407,47 @@ test('unregistering with tombstone:false drops the path but states no removal', 
   }), { root: stateRoot, pid: null });
   const stated = await unregisterMachinePigeon({ root: repository.root }, { root: stateRoot });
   assert.deepEqual(stated.state.removed.map((item) => item.repositoryId), ['only-copy-id']);
+});
+
+test('a publisher record states its storage role and disk when told them', async () => {
+  const stateRoot = await mkdtemp(path.join(tmpdir(), 'gitpigeon-index-role-'));
+  const state = await loadMachineIndex({ root: stateRoot });
+  const plain = publisherDirectoryValue(state, [], 1_700_000_000_000, 'svc', 'peer', 'Air', null);
+  assert.equal('storageRole' in plain, false);
+  assert.equal('disk' in plain, false);
+  const archive = publisherDirectoryValue(state, [], 1_700_000_000_000, 'svc', 'peer', 'Mini', null, {
+    storageRole: 'archive',
+    disk: { freeBytes: 9_000_000_000_000.4, totalBytes: 10_000_000_000_000 },
+  });
+  assert.equal(archive.storageRole, 'archive');
+  assert.deepEqual(archive.disk, { freeBytes: 9_000_000_000_000, totalBytes: 10_000_000_000_000 });
+  // A role the record does not know, or half a disk figure, is left out
+  // rather than published as something browsers must second-guess.
+  const odd = publisherDirectoryValue(state, [], 1_700_000_000_000, 'svc', 'peer', 'Pro', null, {
+    storageRole: 'forever',
+    disk: { freeBytes: 1 },
+  });
+  assert.equal('storageRole' in odd, false);
+  assert.equal('disk' in odd, false);
+  await rm(stateRoot, { recursive: true, force: true });
+});
+
+test('storage roles are read from the fleet record, ignoring anything malformed', () => {
+  const indexId = 'a'.repeat(32);
+  assert.equal(storageRolesKey(indexId), `gitpigeon/index/v1/${indexId}/storage-roles`);
+  const roles = parseStorageRoles({
+    protocol: 'gitpigeon-index/1',
+    kind: 'storage-roles',
+    indexId,
+    roles: {
+      ['1'.repeat(32)]: 'archive',
+      ['2'.repeat(32)]: 'transient',
+      ['3'.repeat(32)]: 'forever',
+      'not-a-publisher': 'archive',
+    },
+  }, indexId);
+  assert.deepEqual([...roles.entries()], [['1'.repeat(32), 'archive'], ['2'.repeat(32), 'transient']]);
+  assert.equal(parseStorageRoles({ protocol: 'gitpigeon-index/1', kind: 'storage-roles', indexId: 'b'.repeat(32), roles: {} }, indexId).size, 0);
+  assert.equal(parseStorageRoles({ protocol: 'gitpigeon-index/1', kind: 'fleet-update', indexId, roles: { ['1'.repeat(32)]: 'archive' } }, indexId).size, 0);
+  assert.equal(parseStorageRoles(null, indexId).size, 0);
 });

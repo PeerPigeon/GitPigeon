@@ -16,6 +16,7 @@ import {
   storagePrefix,
 } from './constants.js';
 import { RepositoryCache } from './cache.js';
+import { retentionPlan } from './retention.js';
 import { LiveWorkspace, liveWorkspaceDigest } from './live-workspace.js';
 import { SnapshotStreamServer } from './snapshot-stream.js';
 import { WorkspaceFiles, workspaceDigest } from './workspace.js';
@@ -101,7 +102,12 @@ export class RepositorySynchronizer {
     machineIndexId = null,
     streamTransport = null,
     deviceName = null,
+    // { role, archiveOnline() }: this machine's storage role (see
+    // retention.js). Shared by every synchronizer on the service and updated
+    // in place when the dashboard changes the role.
+    retention = null,
   }) {
+    this.retention = retention;
     this.repository = repository;
     this.storage = storage;
     this.config = config;
@@ -904,13 +910,26 @@ export class RepositorySynchronizer {
     return record;
   }
 
+  /** How this repository is thinned right now, from the machine's storage role. */
+  retentionPlan() {
+    const policy = this.retention ?? {};
+    const archiveOnline = typeof policy.archiveOnline === 'function' ? Boolean(policy.archiveOnline()) : Boolean(policy.archiveOnline);
+    return retentionPlan({ role: policy.role, archiveOnline });
+  }
+
   async #pruneCache() {
     if (typeof this.cache.prune !== 'function') return;
+    const plan = this.retentionPlan();
+    if (plan.skip) return;
     const keepSnapshotIds = [
       ...Object.values(this.state.heads).map((head) => head?.snapshotId).filter(Boolean),
       ...(this.snapshotStream?.activeSnapshotIds?.() ?? []),
     ];
-    const result = await this.cache.prune({ keepSnapshotIds });
+    const result = await this.cache.prune({
+      keepSnapshotIds,
+      retainSnapshots: plan.retainSnapshots,
+      retainRecentMs: plan.retainRecentMs,
+    });
     if (result?.removedManifests || result?.removedChunks) {
       this.logger.info(
         'Pruned ' + result.removedManifests + ' stale snapshot manifests and '

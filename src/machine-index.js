@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { DEFAULT_STORAGE_ROLE, diskUsage, isStorageRole, normalizeStorageRole } from './retention.js';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -517,6 +518,28 @@ export function fleetUpdateKey(indexId) {
   return `gitpigeon/index/v1/${indexId}/fleet-update`;
 }
 
+/**
+ * Storage roles, written by the dashboard: which machine is the archive that
+ * keeps everything, and which are transient and keep only the newest
+ * snapshot while an archive is online. See retention.js.
+ */
+export function storageRolesKey(indexId) {
+  return `gitpigeon/index/v1/${indexId}/storage-roles`;
+}
+
+/** publisherId -> role, from a storage-roles record; anything malformed is ignored. */
+export function parseStorageRoles(value, indexId) {
+  const roles = new Map();
+  if (!value || typeof value !== 'object') return roles;
+  if (value.protocol !== INDEX_PROTOCOL || value.kind !== 'storage-roles' || value.indexId !== indexId) return roles;
+  const entries = value.roles && typeof value.roles === 'object' ? Object.entries(value.roles) : [];
+  for (const [publisherId, role] of entries.slice(0, 256)) {
+    if (!PUBLISHER_ID.test(String(publisherId)) || !isStorageRole(role)) continue;
+    roles.set(String(publisherId), String(role));
+  }
+  return roles;
+}
+
 export function snapshotRecordKey(indexId, repositoryId, deviceId) {
   return `gitpigeon/index/v1/${indexId}/snapshot/${repositoryId}/${deviceId}`;
 }
@@ -676,10 +699,17 @@ export function publisherDirectoryValue(
   peerId = null,
   deviceName = null,
   pairingPublicKey = null,
+  { storageRole = null, disk = null } = {},
 ) {
   return {
     ...directoryValue(index, entries, now, serviceInstanceId),
     kind: 'publisher-directory',
+    // What this machine keeps (retention.js) and how much room it has, so
+    // the dashboard can say which watcher is the archive and how full it is.
+    ...(isStorageRole(storageRole) ? { storageRole } : {}),
+    ...(disk && Number.isFinite(disk.freeBytes) && Number.isFinite(disk.totalBytes)
+      ? { disk: { freeBytes: Math.round(disk.freeBytes), totalBytes: Math.round(disk.totalBytes) } }
+      : {}),
     // The key this machine's six-digit pairing code derives from. Browsers
     // show the code beside the machine, so a person can match what the CLI
     // prints without a pairing request being in flight.
@@ -774,6 +804,12 @@ async function connectMachineDirectory(index, logger = {}, {
   onRemoteRepositories = async () => {},
   onFleetUpdate = null,
   onRemoteShares = async () => {},
+  // Called with this machine's storage role whenever it is learned or
+  // changed, and with `archiveOnline()` for the durability floor.
+  onStorageRole = null,
+  // The directory whose volume is reported as this machine's disk; the
+  // clone directory, which on an archive is often not the boot volume.
+  diskDirectory = null,
 } = {}) {
   await installNativeWebRTC();
   await installNativeStorage(root);
@@ -888,6 +924,12 @@ async function connectMachineDirectory(index, logger = {}, {
           || value.indexId !== index.indexId || value.publisherId !== publisherId
           || !Array.isArray(value.pigeons)) continue;
         readableRecords += 1;
+        if (value.storageRole === 'archive') {
+          const seenAt = Date.parse(String(value.updatedAt ?? '')) || 0;
+          if (seenAt) archiveSeenAt.set(publisherId, seenAt);
+        } else {
+          archiveSeenAt.delete(publisherId);
+        }
         capabilities.push(...value.pigeons);
         for (const item of Array.isArray(value.sharesEnded) ? value.sharesEnded : []) {
           const repositoryId = String(item?.repositoryId ?? '');
@@ -1052,6 +1094,7 @@ async function connectMachineDirectory(index, logger = {}, {
         node.getClientId(),
         deviceHostName(),
         pairingPublicKey,
+        { storageRole, disk: await currentDisk() },
       );
       const fingerprint = JSON.stringify(value.pigeons);
       const directoryChanged = fingerprint !== lastDirectoryFingerprint;
@@ -1121,6 +1164,43 @@ async function connectMachineDirectory(index, logger = {}, {
   const publisherSubscription = node.storage.subscribeKey('public', publisherKey);
   const fleetKey = fleetUpdateKey(index.indexId);
   const fleetSubscription = node.storage.subscribeKey('public', fleetKey);
+  const rolesKey = storageRolesKey(index.indexId);
+  const rolesSubscription = node.storage.subscribeKey('public', rolesKey);
+  let storageRole = DEFAULT_STORAGE_ROLE;
+  let roleAnnounced = false;
+  let fleetRoles = new Map();
+  // publisherId -> when that machine's record was last fresh, for machines
+  // whose record says they are the archive.
+  const archiveSeenAt = new Map();
+  const archiveOnline = () => {
+    const now = Date.now();
+    for (const [publisherId, seenAt] of archiveSeenAt) {
+      if (fleetRoles.get(publisherId) === 'archive' && now - seenAt <= INDEX_STALE_MS) return true;
+    }
+    return storageRole === 'archive';
+  };
+  const considerStorageRoles = async () => {
+    if (closed || !node.storage) return;
+    const record = await node.storage.get('public', rolesKey).catch(() => null);
+    fleetRoles = parseStorageRoles(record?.value, index.indexId);
+    const next = normalizeStorageRole(fleetRoles.get(index.publisherId));
+    // Announced once even when unchanged, so the synchronizers hold a live
+    // archiveOnline() from the start rather than a placeholder.
+    if (next === storageRole && roleAnnounced) return;
+    const changed = next !== storageRole;
+    roleAnnounced = true;
+    storageRole = next;
+    if (changed) logger.info?.(`Storage role for this machine: ${storageRole}`);
+    try { await onStorageRole?.(storageRole, { archiveOnline }); } catch (error) { logger.warn?.(`Storage role change failed: ${error?.message ?? error}`); }
+    publish().catch(() => {});
+  };
+  let diskSample = { at: 0, value: null };
+  const currentDisk = async () => {
+    if (!diskDirectory) return null;
+    if (Date.now() - diskSample.at < 60_000) return diskSample.value;
+    diskSample = { at: Date.now(), value: await diskUsage(diskDirectory) };
+    return diskSample.value;
+  };
   let fleetCheckAt = 0;
   let fleetHandledRequestedAt = 0;
   let fleetChecking = false;
@@ -1157,10 +1237,12 @@ async function connectMachineDirectory(index, logger = {}, {
       scheduleRemoteRepositorySync();
     }
     if (event.key === fleetKey) considerFleetUpdate('policy changed').catch(() => {});
+    if (event.key === rolesKey) considerStorageRoles().catch(() => {});
   });
   ready = true;
   // The record may already be here, or arrive with the first peer.
   considerFleetUpdate('start').catch(() => {});
+  considerStorageRoles().catch(() => {});
   const pruneRecords = async () => {
     if (closed || !node.storage) return;
     try {
@@ -1203,13 +1285,20 @@ async function connectMachineDirectory(index, logger = {}, {
         ...(selfSeenVersion !== null ? { selfSeenVersion: String(selfSeenVersion).slice(0, 40) } : {}),
         ...(selfSeenName !== null ? { selfSeenName: String(selfSeenName).slice(0, 60) } : {}),
         ...(rosterSeenVersion !== null ? { rosterSeenVersion: String(rosterSeenVersion).slice(0, 40) } : {}),
+        storageRole,
+        archiveOnline: archiveOnline(),
       };
+    },
+    /** This machine's storage role and whether an archive is live, for the synchronizers. */
+    storagePolicy() {
+      return { role: storageRole, archiveOnline };
     },
     async close() {
       if (closed) return;
       clearInterval(timer);
       clearInterval(pruneTimer);
       try { fleetSubscription?.(); } catch { /* already closed */ }
+      try { rolesSubscription?.(); } catch { /* already closed */ }
       if (remoteSyncTimer) clearTimeout(remoteSyncTimer);
       remoteSyncTimer = null;
       rosterSubscription();

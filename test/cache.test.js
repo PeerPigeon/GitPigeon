@@ -48,3 +48,23 @@ test('snapshot cache pruning retains current and recent snapshots without leakin
   await assert.rejects(access(cache.manifestPath(ids[1])));
   await assert.rejects(access(cache.chunkPath(chunks[2])));
 });
+
+test('a transient machine keeps only the newest snapshot once the recent window is over', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-cache-transient-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cache = new RepositoryCache(path.join(root, '.git'));
+  await cache.init();
+  const ids = ['a', 'b', 'c'].map((value) => value.repeat(64));
+  const chunks = ['1', '2', '3'].map((value) => value.repeat(64));
+  for (const digest of chunks) await cache.writeChunk(digest, Buffer.from(digest));
+  await cache.writeManifest(manifest(ids[0], '2026-01-01T00:00:00.000Z', [{ sha256: chunks[0], size: 64 }]));
+  await cache.writeManifest(manifest(ids[1], '2026-01-02T00:00:00.000Z', [{ sha256: chunks[1], size: 64 }]));
+  await cache.writeManifest(manifest(ids[2], '2026-01-03T00:00:00.000Z', [{ sha256: chunks[2], size: 64 }]));
+
+  // Snapshots dated 2026 are far older than any window, so nothing is
+  // protected by recency; only the newest one survives.
+  const result = await cache.prune({ retainSnapshots: 1, retainRecentMs: 0 });
+  assert.deepEqual(result, { skipped: false, removedManifests: 2, removedChunks: 2, retainedManifests: 1 });
+  assert.deepEqual(await cache.listManifests(), [ids[2]]);
+  assert.deepEqual(await readdir(cache.chunkDirectory), [chunks[2]]);
+});

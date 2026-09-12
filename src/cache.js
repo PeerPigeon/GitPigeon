@@ -151,7 +151,11 @@ export class RepositoryCache {
     return names.filter((name) => /^[a-f0-9]{64}\.json$/.test(name)).map((name) => name.slice(0, -5));
   }
 
-  async prune({ keepSnapshotIds = [], retainSnapshots = DEFAULT_RETAINED_SNAPSHOTS } = {}) {
+  async prune({
+    keepSnapshotIds = [],
+    retainSnapshots = DEFAULT_RETAINED_SNAPSHOTS,
+    retainRecentMs = RETAIN_RECENT_SNAPSHOTS_MS,
+  } = {}) {
     await this.init();
     const protectedIds = new Set(
       keepSnapshotIds.map(String).filter((snapshotId) => SAFE_NAME.test(snapshotId)),
@@ -195,7 +199,7 @@ export class RepositoryCache {
     // a chunk removed under it fails that import outright.
     const now = Date.now();
     for (const { snapshotId, createdAt } of sorted) {
-      if (now - createdAt < RETAIN_RECENT_SNAPSHOTS_MS) protectedIds.add(snapshotId);
+      if (now - createdAt < retainRecentMs) protectedIds.add(snapshotId);
     }
 
     const keptManifests = manifests.filter(

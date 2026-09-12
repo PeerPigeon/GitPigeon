@@ -236,11 +236,17 @@ class CommittedOnlyLiveWorkspace {
   async apply() { return { written: [], removed: [], updated: [], conflicts: [] }; }
 }
 
+// This machine's storage role (retention.js), one per service process and
+// shared by every synchronizer it opens. The index half updates it in place
+// when the dashboard assigns a role; standard until then.
+const SERVICE_STORAGE_POLICY = { role: 'standard', archiveOnline: () => false };
+
 function openNetwork(repository, config, log, serviceInstanceId, machineIndexId, node, ownership = { owns: () => false }, deviceClaim = null, { committedOnly = false, cacheDir = null } = {}) {
   if (!node?.storage) throw new Error('The GitPigeon index mesh is not connected');
   const synchronizer = new RepositorySynchronizer({
     ownsLivePath: (file) => ownership.owns(file),
     deviceClaim,
+    retention: SERVICE_STORAGE_POLICY,
     repository,
     storage: node.storage,
     config,
@@ -1084,6 +1090,13 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     machineIndex = await connectMachineIndexService(log, {
       root,
       serviceInstanceId,
+      // The clone directory's volume is the disk the dashboard reports for
+      // this machine; on an archive it is often not the boot volume.
+      diskDirectory: await cloneDirectory({ root }).catch(() => null),
+      onStorageRole: async (role, { archiveOnline }) => {
+        SERVICE_STORAGE_POLICY.role = role;
+        SERVICE_STORAGE_POLICY.archiveOnline = archiveOnline;
+      },
       onFleetUpdate: IS_STANDALONE ? async ({ oneShot } = {}) => {
         // Only an explicit request (someone pressed Update fleet) goes to
         // GitHub. The standing auto-update policy is served without it: a
