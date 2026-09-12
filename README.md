@@ -330,8 +330,9 @@ prints what it found.
 | OneDrive, iCloud for Windows, legacy OneDrive and Google Drive folders | Windows, macOS | no per-folder marker exists; the watcher warns so the repository can be moved |
 
 Only regular directories are marked. A `node_modules` that is already a
-symlink to somewhere outside the synced folder is left alone. Nothing under
-`.git` is ever touched.
+symlink to somewhere outside the synced folder is left alone. Inside `.git`,
+only GitPigeon's own `gitpigeon` cache (chunks, manifests, share caches, which
+churn on every snapshot) is excluded; the rest of `.git` is never touched.
 
 ## Commands
 

@@ -53,10 +53,20 @@ export function isToolingDirectory(name) {
   return TOOLING_DIRECTORIES.has(String(name ?? '').toLowerCase());
 }
 
+// GitPigeon's own per-repository cache (chunks, manifests, share caches)
+// lives under .git/gitpigeon and churns on every snapshot: tens of thousands
+// of files that the cloud client re-uploads endlessly. It is a tooling
+// artifact like any other, and the one place inside .git that is marked.
+export const REPOSITORY_CACHE_DIRECTORY = 'gitpigeon';
+
 // The first tooling directory on a repository-relative path, or null.
-// `packages/web/node_modules/pkg/index.js` -> `packages/web/node_modules`.
+// `packages/web/node_modules/pkg/index.js` -> `packages/web/node_modules`;
+// `.git/gitpigeon/chunks/abc` -> `.git/gitpigeon`.
 export function toolingDirectoryOf(relativePath) {
   const parts = String(relativePath ?? '').replaceAll('\\', '/').split('/').filter(Boolean);
+  if (parts[0] === '.git') {
+    return parts[1] === REPOSITORY_CACHE_DIRECTORY ? `.git/${REPOSITORY_CACHE_DIRECTORY}` : null;
+  }
   const index = parts.findIndex((part) => isToolingDirectory(part));
   return index === -1 ? null : parts.slice(0, index + 1).join('/');
 }
@@ -267,8 +277,19 @@ export async function findToolingDirectories(root, { list = readdir, limit = WAL
       visited += 1;
       if (visited > limit) return;
       if (!entry.isDirectory()) continue;
-      if (entry.name === '.git' || entry.name === '.Trash') continue;
+      if (entry.name === '.Trash') continue;
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.name === '.git') {
+        let cache;
+        try {
+          cache = (await list(path.join(directory, entry.name), { withFileTypes: true }))
+            .find((child) => child.isDirectory() && child.name === REPOSITORY_CACHE_DIRECTORY);
+        } catch {
+          continue;
+        }
+        if (cache) found.push(`${relative}/${REPOSITORY_CACHE_DIRECTORY}`);
+        continue;
+      }
       if (isToolingDirectory(entry.name)) {
         found.push(relative);
         continue;

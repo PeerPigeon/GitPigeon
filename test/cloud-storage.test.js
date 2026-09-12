@@ -336,3 +336,24 @@ test('sweepCloudStorage excludes every tooling directory under a synced root, on
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("GitPigeon's own .git/gitpigeon cache is a tooling artifact; the rest of .git is untouched", async () => {
+  const root = await temporaryRepository();
+  try {
+    await mkdir(path.join(root, '.git', 'gitpigeon', 'chunks'), { recursive: true });
+    await mkdir(path.join(root, 'packages', 'web', '.git', 'objects'), { recursive: true });
+    assert.deepEqual(await findToolingDirectories(root), [
+      '.git/gitpigeon', 'node_modules', 'packages/web/dist', 'packages/web/node_modules',
+    ]);
+    assert.equal(toolingDirectoryOf('.git/gitpigeon/chunks/abc'), '.git/gitpigeon');
+    assert.equal(toolingDirectoryOf('.git/objects/ab/cdef'), null);
+    assert.equal(toolingDirectoryOf('.git/index'), null);
+    const tools = fakeTools({ domains: { [path.dirname(root)]: ICLOUD_DOMAIN } });
+    const guard = new CloudSyncGuard(root, { log: fakeLog(), platform: 'darwin', homedir: '/nowhere', env: {}, run: tools.run });
+    assert.ok((await guard.protectAll()).includes('.git/gitpigeon'));
+    assert.equal(tools.marked(FILE_PROVIDER_IGNORE_XATTR, path.join(root, '.git', 'gitpigeon')), '1');
+    assert.equal(tools.marked(FILE_PROVIDER_IGNORE_XATTR, path.join(root, '.git')), undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
