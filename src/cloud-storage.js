@@ -23,6 +23,7 @@
 // so the repository watcher re-applies them whenever an artifact directory
 // shows activity, and a periodic sweep catches anything the watcher missed.
 import { execFile } from 'node:child_process';
+import { watch as watchFilesystem } from 'node:fs';
 import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -64,11 +65,13 @@ export const REPOSITORY_CACHE_DIRECTORY = 'gitpigeon';
 // `.git/gitpigeon/chunks/abc` -> `.git/gitpigeon`.
 export function toolingDirectoryOf(relativePath) {
   const parts = String(relativePath ?? '').replaceAll('\\', '/').split('/').filter(Boolean);
-  if (parts[0] === '.git') {
-    return parts[1] === REPOSITORY_CACHE_DIRECTORY ? `.git/${REPOSITORY_CACHE_DIRECTORY}` : null;
+  for (let index = 0; index < parts.length; index += 1) {
+    if (parts[index] === '.git') {
+      return parts[index + 1] === REPOSITORY_CACHE_DIRECTORY ? parts.slice(0, index + 2).join('/') : null;
+    }
+    if (isToolingDirectory(parts[index])) return parts.slice(0, index + 1).join('/');
   }
-  const index = parts.findIndex((part) => isToolingDirectory(part));
-  return index === -1 ? null : parts.slice(0, index + 1).join('/');
+  return null;
 }
 
 function providerFromDomain(domain) {
@@ -438,6 +441,108 @@ export async function sweepCloudStorage({
     }
   }
   return report;
+}
+
+/**
+ * Live protection for every cloud-synced folder on the machine. A sweep on a
+ * clock leaves a window: `npm install` in a project GitPigeon was never asked
+ * to watch would sync for hours first. Watching each synced root marks a
+ * tooling directory within a second of it appearing, wherever it appears.
+ * Recursive watching is FSEvents on macOS and costs nothing per file; where
+ * it is unavailable the periodic sweep remains the backstop.
+ */
+export class CloudRootsWatcher {
+  constructor({
+    log = null,
+    roots = null,
+    watch = watchFilesystem,
+    run = execFileAsync,
+    stat = lstat,
+    remarkDelayMs = REMARK_DELAY_MS,
+    platform = process.platform,
+    homedir = os.homedir(),
+    env = process.env,
+    read = readFile,
+    list = readdir,
+  } = {}) {
+    this.log = log;
+    this.roots = roots;
+    this.watch = watch;
+    this.run = run;
+    this.stat = stat;
+    this.remarkDelayMs = remarkDelayMs;
+    this.discovery = { platform, homedir, env, run, read, stat, list };
+    this.watchers = [];
+    this.pending = new Map();
+    this.timer = null;
+    this.closed = false;
+    this.failed = new Set();
+  }
+
+  async start() {
+    const roots = this.roots ?? await cloudSyncedRoots(this.discovery);
+    for (const root of roots) {
+      if (!root.markers.length || this.closed) continue;
+      try {
+        const watcher = this.watch(root.root, { recursive: true }, (_event, filename) => this.note(root, filename));
+        watcher.on?.('error', (error) => {
+          this.log?.debug?.(`Cloud storage watcher for ${root.root} stopped: ${error.message}`);
+        });
+        this.watchers.push(watcher);
+      } catch (error) {
+        this.log?.debug?.(`Cloud storage watcher for ${root.root} unavailable: ${error.message}`);
+      }
+    }
+    return roots;
+  }
+
+  note(root, filename) {
+    if (this.closed) return;
+    const directory = toolingDirectoryOf(String(filename ?? ''));
+    if (!directory) return;
+    this.pending.set(path.join(root.root, ...directory.split('/')), root);
+    if (this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.flush().catch((error) => this.log?.debug?.(`Cloud storage watcher: ${error.message}`));
+    }, this.remarkDelayMs);
+    this.timer.unref?.();
+  }
+
+  async flush() {
+    const entries = [...this.pending.entries()];
+    this.pending.clear();
+    const marked = [];
+    for (const [absolute, root] of entries) {
+      try {
+        const info = await this.stat(absolute);
+        if (!info.isDirectory() || info.isSymbolicLink()) continue;
+        if (await excludeDirectoryFromCloudSync(absolute, root.markers, { run: this.run })) {
+          marked.push(absolute);
+          this.failed.delete(absolute);
+        }
+      } catch (error) {
+        if (error?.code === 'ENOENT') continue;
+        if (!this.failed.has(absolute)) {
+          this.failed.add(absolute);
+          this.log?.warn?.(`Could not exclude ${absolute} from ${providerLabel(root.provider)} sync: ${error.message}`);
+        }
+      }
+    }
+    if (marked.length) {
+      this.log?.info?.(`${providerLabel(entries[0][1].provider)}: excluded ${marked.join(', ')} from cloud sync`);
+    }
+    return marked;
+  }
+
+  close() {
+    this.closed = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.pending.clear();
+    for (const watcher of this.watchers) watcher.close?.();
+    this.watchers = [];
+  }
 }
 
 /**

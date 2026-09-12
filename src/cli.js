@@ -1,5 +1,5 @@
 import { shouldScanRepository } from './repository-change.js';
-import { CloudSyncGuard, sweepCloudStorage } from './cloud-storage.js';
+import { CloudRootsWatcher, CloudSyncGuard, sweepCloudStorage } from './cloud-storage.js';
 import { watch as watchFilesystem } from "node:fs";
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
@@ -961,6 +961,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let vanishedTimer = null;
   let meshStateTimer = null;
   let cloudSweepTimer = null;
+  let cloudRootsWatcher = null;
   let indexWatcher;
   let reconciling = false;
   let peerUpdates;
@@ -1398,6 +1399,12 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       cloudSweepTimer.unref?.();
     }, CLOUD_SWEEP_DELAY_MS);
     cloudSweepTimer.unref?.();
+    // And live: a node_modules appearing anywhere in a synced folder is
+    // excluded within a second, not at the next sweep.
+    cloudRootsWatcher = new CloudRootsWatcher({ log });
+    cloudRootsWatcher.start()
+      .then((roots) => { if (roots.length) log.info(`Watching ${roots.map((entry) => entry.root).join(', ')} to keep tooling artifacts out of cloud sync`); })
+      .catch((error) => log.debug?.(`Cloud storage watcher: ${error.message}`));
     if (IS_STANDALONE) {
       // Machines installed before the shim chased current.json keep a stale
       // `git pigeon` on PATH forever; every service start heals it.
@@ -1460,6 +1467,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     process.off('SIGTERM', stop);
     if (vanishedTimer) clearInterval(vanishedTimer);
     if (cloudSweepTimer) { clearTimeout(cloudSweepTimer); clearInterval(cloudSweepTimer); }
+    cloudRootsWatcher?.close();
     if (meshStateTimer) clearInterval(meshStateTimer);
     if (reconciliationTimer) clearTimeout(reconciliationTimer);
     indexWatcher?.close();
@@ -2451,7 +2459,7 @@ function watchedRepositories(registrations) {
 
 const VANISHED_CLONE_CHECK_MS = 30_000;
 const CLOUD_SWEEP_DELAY_MS = 30_000;
-const CLOUD_SWEEP_INTERVAL_MS = 6 * 60 * 60_000;
+const CLOUD_SWEEP_INTERVAL_MS = 30 * 60_000;
 const PUBLISH_QUIET_MS = 5_000;
 const PUBLISH_MIN_INTERVAL_MS = 20_000;
 

@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
+  CloudRootsWatcher,
   CloudSyncGuard,
   DROPBOX_IGNORE_STREAM,
   DROPBOX_IGNORE_XATTR,
@@ -346,6 +347,8 @@ test("GitPigeon's own .git/gitpigeon cache is a tooling artifact; the rest of .g
       '.git/gitpigeon', 'node_modules', 'packages/web/dist', 'packages/web/node_modules',
     ]);
     assert.equal(toolingDirectoryOf('.git/gitpigeon/chunks/abc'), '.git/gitpigeon');
+    assert.equal(toolingDirectoryOf('GitPigeon/addy.pw/.git/gitpigeon/chunks/abc'), 'GitPigeon/addy.pw/.git/gitpigeon');
+    assert.equal(toolingDirectoryOf('GitPigeon/addy.pw/.git/objects/ab'), null);
     assert.equal(toolingDirectoryOf('.git/objects/ab/cdef'), null);
     assert.equal(toolingDirectoryOf('.git/index'), null);
     const tools = fakeTools({ domains: { [path.dirname(root)]: ICLOUD_DOMAIN } });
@@ -353,6 +356,64 @@ test("GitPigeon's own .git/gitpigeon cache is a tooling artifact; the rest of .g
     assert.ok((await guard.protectAll()).includes('.git/gitpigeon'));
     assert.equal(tools.marked(FILE_PROVIDER_IGNORE_XATTR, path.join(root, '.git', 'gitpigeon')), '1');
     assert.equal(tools.marked(FILE_PROVIDER_IGNORE_XATTR, path.join(root, '.git')), undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a node_modules appearing anywhere under a synced folder is excluded within a second', async () => {
+  const root = await temporaryRepository();
+  try {
+    const tools = fakeTools();
+    const log = fakeLog();
+    const callbacks = new Map();
+    const watch = (directory, options, callback) => {
+      assert.equal(options.recursive, true);
+      callbacks.set(directory, callback);
+      return { close() { callbacks.delete(directory); } };
+    };
+    const watcher = new CloudRootsWatcher({
+      log, watch, run: tools.run, remarkDelayMs: 10,
+      roots: [
+        { provider: 'icloud', root, markers: ['file-provider'] },
+        { provider: 'onedrive', root: path.join(root, 'elsewhere'), markers: [] },
+      ],
+    });
+    await watcher.start();
+    // Only a root with a marker is watched; there is nothing to do for OneDrive.
+    assert.deepEqual([...callbacks.keys()], [root]);
+    const fire = callbacks.get(root);
+
+    await mkdir(path.join(root, 'fresh-project', 'node_modules', 'left-pad'), { recursive: true });
+    fire('rename', 'fresh-project/node_modules');
+    fire('rename', 'fresh-project/node_modules/left-pad/index.js');
+    fire('change', 'fresh-project/src/app.js');
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(tools.marked(FILE_PROVIDER_IGNORE_XATTR, path.join(root, 'fresh-project', 'node_modules')), '1');
+    assert.equal(log.lines.info.length, 1);
+    assert.match(log.lines.info[0], /^iCloud Drive: excluded .*fresh-project\/node_modules from cloud sync$/);
+
+    // GitPigeon's cache inside a nested repository's .git is caught the same way.
+    await mkdir(path.join(root, 'repo', '.git', 'gitpigeon', 'chunks'), { recursive: true });
+    fire('rename', 'repo/.git/gitpigeon/chunks/abc');
+    fire('rename', 'repo/.git/objects/ab/cdef');
+    assert.deepEqual(await watcher.flush(), [path.join(root, 'repo', '.git', 'gitpigeon')]);
+    assert.equal(tools.marked(FILE_PROVIDER_IGNORE_XATTR, path.join(root, 'repo', '.git')), undefined);
+
+    // An event for a tree that is already gone creates nothing and says nothing.
+    fire('rename', 'gone/dist/bundle.js');
+    assert.deepEqual(await watcher.flush(), []);
+    assert.deepEqual(log.lines.warn, []);
+
+    // Already marked: no rewrite, no repeated log line (two so far: the
+    // fresh project and the cache).
+    assert.equal(log.lines.info.length, 2);
+    fire('change', 'fresh-project/node_modules/left-pad/index.js');
+    assert.deepEqual(await watcher.flush(), []);
+    assert.equal(log.lines.info.length, 2);
+
+    watcher.close();
+    assert.equal(callbacks.size, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

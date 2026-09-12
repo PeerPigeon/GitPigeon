@@ -4,6 +4,7 @@ export { RepositoryCache } from './cache.js';
 export { WorkspaceFiles, workspaceDigest } from './workspace.js';
 export { LIVE_FILE_LIMIT, LiveWorkspace, liveWorkspaceDigest } from './live-workspace.js';
 export {
+  CloudRootsWatcher,
   CloudSyncGuard,
   TOOLING_DIRECTORIES,
   cloudSyncedRoots,

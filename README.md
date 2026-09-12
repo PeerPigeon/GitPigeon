@@ -315,12 +315,13 @@ an event was missed.
 
 Projects GitPigeon was never asked to watch count too: a `node_modules` in any
 project under a synced Desktop or Documents folder keeps the cloud client just
-as busy. Thirty seconds after it starts, and every six hours after that, the
-service walks every cloud-synced folder on the machine (synced Desktop and
-Documents, the iCloud Drive container, everything under
-`~/Library/CloudStorage`, Dropbox, OneDrive) and excludes every tooling
-directory it finds. `git pigeon nosync` runs the same sweep on demand and
-prints what it found.
+as busy. The service watches every cloud-synced folder on the machine (synced
+Desktop and Documents, the iCloud Drive container, everything under
+`~/Library/CloudStorage`, Dropbox, OneDrive) and excludes a tooling directory
+within a second of it appearing anywhere inside them, whether or not GitPigeon
+was ever asked to watch that project. As a backstop it also walks those folders
+thirty seconds after it starts and every thirty minutes. `git pigeon nosync`
+runs the same sweep on demand and prints what it found.
 
 | Cloud client | Where | How the folder is excluded |
 | --- | --- | --- |
