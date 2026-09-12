@@ -1,5 +1,5 @@
 import { shouldScanRepository } from './repository-change.js';
-import { CloudSyncGuard } from './cloud-storage.js';
+import { CloudSyncGuard, sweepCloudStorage } from './cloud-storage.js';
 import { watch as watchFilesystem } from "node:fs";
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
@@ -122,6 +122,13 @@ Background service
   git pigeon update [--local]           Update from the latest release, or
                                         with --local, from a paired watcher
                                         on the LAN mesh
+
+Cloud storage
+  git pigeon nosync                     Exclude node_modules, build output and
+                                        caches in every iCloud, Dropbox or
+                                        OneDrive folder on this machine from
+                                        cloud sync (the watcher also does this
+                                        on start and every few hours)
 
 Checking on things
   git pigeon status [--json]            Show this repository's sync state
@@ -953,6 +960,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let reconciliationTimer;
   let vanishedTimer = null;
   let meshStateTimer = null;
+  let cloudSweepTimer = null;
   let indexWatcher;
   let reconciling = false;
   let peerUpdates;
@@ -1380,6 +1388,16 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     vanishedTimer.unref?.();
     await control.ready();
     log.info(`GitPigeon service is watching ${sessions.size} ${sessions.size === 1 ? 'repository' : 'repositories'} as PID ${process.pid}`);
+    // Every cloud-synced folder on this machine, not only watched clones: an
+    // unmanaged project's node_modules in iCloud keeps fileproviderd pinned
+    // just the same. Once soon after start, then on a slow clock.
+    const cloudSweep = () => sweepCloudStorage({ log }).catch((error) => log.debug?.(`Cloud storage sweep: ${error.message}`));
+    cloudSweepTimer = setTimeout(() => {
+      cloudSweep();
+      cloudSweepTimer = setInterval(cloudSweep, CLOUD_SWEEP_INTERVAL_MS);
+      cloudSweepTimer.unref?.();
+    }, CLOUD_SWEEP_DELAY_MS);
+    cloudSweepTimer.unref?.();
     if (IS_STANDALONE) {
       // Machines installed before the shim chased current.json keep a stale
       // `git pigeon` on PATH forever; every service start heals it.
@@ -1441,6 +1459,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);
     if (vanishedTimer) clearInterval(vanishedTimer);
+    if (cloudSweepTimer) { clearTimeout(cloudSweepTimer); clearInterval(cloudSweepTimer); }
     if (meshStateTimer) clearInterval(meshStateTimer);
     if (reconciliationTimer) clearTimeout(reconciliationTimer);
     indexWatcher?.close();
@@ -2431,6 +2450,8 @@ function watchedRepositories(registrations) {
 }
 
 const VANISHED_CLONE_CHECK_MS = 30_000;
+const CLOUD_SWEEP_DELAY_MS = 30_000;
+const CLOUD_SWEEP_INTERVAL_MS = 6 * 60 * 60_000;
 const PUBLISH_QUIET_MS = 5_000;
 const PUBLISH_MIN_INTERVAL_MS = 20_000;
 
@@ -2981,6 +3002,22 @@ async function commandStatus(args, cwd) {
   }
 }
 
+async function commandNosync(args) {
+  if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
+  const { cloudSyncedRoots } = await import('./cloud-storage.js');
+  const roots = await cloudSyncedRoots();
+  if (!roots.length) {
+    console.log('No cloud-synced folder was found on this machine.');
+    return;
+  }
+  console.log(`Scanning ${roots.map((entry) => entry.root).join(', ')}…`);
+  const report = await sweepCloudStorage({ log: logger(false), roots });
+  for (const entry of report) {
+    const label = entry.provider === 'icloud' ? 'iCloud Drive' : entry.provider;
+    console.log(`${entry.root}: ${entry.found} tooling ${entry.found === 1 ? 'directory' : 'directories'}, ${entry.marked.length} newly excluded from ${label}${entry.failed.length ? `, ${entry.failed.length} failed` : ''}`);
+  }
+}
+
 async function commandDoctor(args, cwd) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
   const repository = await GitRepository.discover(cwd);
@@ -3075,6 +3112,7 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   if (command === 'protocol') return await commandProtocol(args, verbose);
   if (command === 'terminal-device') return commandTerminalDevice(args);
   if (command === 'status') return await commandStatus(args, cwd);
+  if (command === 'nosync') return await commandNosync(args);
   if (command === 'doctor') return await commandDoctor(args, cwd);
   throw new Error(`Unknown command: ${command}\n\n${HELP}`);
 }

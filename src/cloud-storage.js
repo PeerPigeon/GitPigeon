@@ -46,6 +46,7 @@ export const DROPBOX_IGNORE_XATTR_LINUX = 'user.com.dropbox.ignored';
 export const DROPBOX_IGNORE_STREAM = 'com.dropbox.ignored';
 
 const WALK_LIMIT = 200_000;
+const SWEEP_WALK_LIMIT = 5_000_000;
 const REMARK_DELAY_MS = 1_000;
 
 export function isToolingDirectory(name) {
@@ -251,11 +252,11 @@ export async function excludeDirectoryFromCloudSync(directory, markers, { run = 
  * separators. Does not descend into `.git` or into a tooling directory
  * itself — one marker on `node_modules` covers everything beneath it.
  */
-export async function findToolingDirectories(root, { list = readdir } = {}) {
+export async function findToolingDirectories(root, { list = readdir, limit = WALK_LIMIT } = {}) {
   const found = [];
   let visited = 0;
   const walk = async (directory, prefix) => {
-    if (visited > WALK_LIMIT) return;
+    if (visited > limit) return;
     let entries;
     try {
       entries = await list(directory, { withFileTypes: true });
@@ -264,9 +265,9 @@ export async function findToolingDirectories(root, { list = readdir } = {}) {
     }
     for (const entry of entries) {
       visited += 1;
-      if (visited > WALK_LIMIT) return;
+      if (visited > limit) return;
       if (!entry.isDirectory()) continue;
-      if (entry.name === '.git') continue;
+      if (entry.name === '.git' || entry.name === '.Trash') continue;
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
       if (isToolingDirectory(entry.name)) {
         found.push(relative);
@@ -277,6 +278,145 @@ export async function findToolingDirectories(root, { list = readdir } = {}) {
   };
   await walk(root, '');
   return found.sort();
+}
+
+async function existingDirectories(candidates, stat) {
+  const found = [];
+  for (const candidate of candidates) {
+    try {
+      if ((await stat(candidate)).isDirectory()) found.push(candidate);
+    } catch {
+      // Not on this machine.
+    }
+  }
+  return found;
+}
+
+/**
+ * Every cloud-synced folder on this machine, whether or not a GitPigeon
+ * repository lives in it: synced Desktop and Documents, the iCloud Drive
+ * container, everything under ~/Library/CloudStorage, Dropbox, OneDrive.
+ * A `node_modules` in an unmanaged project churns the cloud client just as
+ * hard as one in a watched repository.
+ */
+export async function cloudSyncedRoots({
+  platform = process.platform,
+  homedir = os.homedir(),
+  env = process.env,
+  run = execFileAsync,
+  read = readFile,
+  stat = lstat,
+  list = readdir,
+} = {}) {
+  const roots = [];
+  const seen = new Set();
+  const add = (entry) => {
+    const key = path.resolve(entry.root);
+    if (seen.has(key)) return;
+    seen.add(key);
+    roots.push({ ...entry, root: key });
+  };
+  const dropbox = await dropboxRoots({ homedir, env, platform, read });
+
+  if (platform === 'darwin') {
+    const candidates = [path.join(homedir, 'Desktop'), path.join(homedir, 'Documents')];
+    try {
+      for (const entry of await list(path.join(homedir, 'Library', 'CloudStorage'), { withFileTypes: true })) {
+        if (entry.isDirectory()) candidates.push(path.join(homedir, 'Library', 'CloudStorage', entry.name));
+      }
+    } catch {
+      // No File Provider clients installed.
+    }
+    const present = await existingDirectories(candidates, stat);
+    let stdout = '';
+    if (present.length) {
+      try {
+        ({ stdout } = await run('xattr', ['-p', FILE_PROVIDER_DOMAIN_XATTR, ...present], { encoding: 'utf8' }));
+      } catch (error) {
+        stdout = String(error?.stdout ?? '');
+      }
+    }
+    for (const line of String(stdout).split('\n')) {
+      const separator = line.lastIndexOf(': ');
+      if (separator === -1) continue;
+      const root = line.slice(0, separator);
+      const domain = line.slice(separator + 2).trim();
+      if (!present.includes(root) || !domain) continue;
+      const provider = providerFromDomain(domain);
+      add({ provider, root, markers: provider === 'dropbox' ? ['file-provider', 'dropbox-xattr'] : ['file-provider'] });
+    }
+    for (const root of await existingDirectories([path.join(homedir, 'Library', 'Mobile Documents', 'com~apple~CloudDocs')], stat)) {
+      add({ provider: 'icloud', root, markers: ['file-provider'] });
+    }
+    for (const root of await existingDirectories(dropbox, stat)) add({ provider: 'dropbox', root, markers: ['dropbox-xattr'] });
+    for (const [provider, name] of [['onedrive', 'OneDrive'], ['google-drive', 'Google Drive'], ['box', 'Box']]) {
+      for (const root of await existingDirectories([path.join(homedir, name)], stat)) add({ provider, root, markers: [] });
+    }
+    return roots;
+  }
+
+  if (platform === 'win32') {
+    for (const root of await existingDirectories(dropbox, stat)) add({ provider: 'dropbox', root, markers: ['dropbox-stream'] });
+    for (const variable of ['OneDrive', 'OneDriveConsumer', 'OneDriveCommercial']) {
+      if (env[variable]) for (const root of await existingDirectories([env[variable]], stat)) add({ provider: 'onedrive', root, markers: [] });
+    }
+    for (const root of await existingDirectories([path.join(homedir, 'iCloudDrive')], stat)) add({ provider: 'icloud', root, markers: [] });
+    return roots;
+  }
+
+  for (const root of await existingDirectories(dropbox, stat)) add({ provider: 'dropbox', root, markers: ['dropbox-xattr-linux'] });
+  return roots;
+}
+
+/**
+ * Walk every cloud-synced folder on this machine and exclude each tooling
+ * directory found. Idempotent; safe to run on a timer.
+ */
+export async function sweepCloudStorage({
+  log = null,
+  roots = null,
+  platform = process.platform,
+  homedir = os.homedir(),
+  env = process.env,
+  run = execFileAsync,
+  read = readFile,
+  stat = lstat,
+  list = readdir,
+  limit = SWEEP_WALK_LIMIT,
+} = {}) {
+  const targets = roots ?? await cloudSyncedRoots({ platform, homedir, env, run, read, stat, list });
+  const report = [];
+  for (const target of targets) {
+    const label = providerLabel(target.provider);
+    const directories = await findToolingDirectories(target.root, { list, limit });
+    const entry = { root: target.root, provider: target.provider, found: directories.length, marked: [], failed: [] };
+    report.push(entry);
+    if (!target.markers.length) {
+      if (directories.length) {
+        log?.warn?.(`${label} has no per-folder exclusion, so ${directories.length} tooling ${directories.length === 1 ? 'directory' : 'directories'} under ${target.root} will be uploaded.`);
+      }
+      continue;
+    }
+    for (const relative of directories) {
+      const absolute = path.join(target.root, ...relative.split('/'));
+      try {
+        const info = await stat(absolute);
+        if (!info.isDirectory() || info.isSymbolicLink()) continue;
+        if (await excludeDirectoryFromCloudSync(absolute, target.markers, { run })) entry.marked.push(relative);
+      } catch (error) {
+        entry.failed.push({ path: relative, error: error.message });
+      }
+    }
+    if (entry.marked.length) {
+      const shown = entry.marked.slice(0, 5).join(', ');
+      const more = entry.marked.length > 5 ? ` and ${entry.marked.length - 5} more` : '';
+      log?.info?.(`${label}: excluded ${entry.marked.length} tooling ${entry.marked.length === 1 ? 'directory' : 'directories'} under ${target.root} from cloud sync (${shown}${more})`);
+    }
+    if (entry.failed.length) {
+      log?.warn?.(`${label}: could not exclude ${entry.failed.length} under ${target.root}, first: ${entry.failed[0].path}: ${entry.failed[0].error}`);
+    }
+  }
+  return report;
 }
 
 /**

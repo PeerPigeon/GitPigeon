@@ -6,6 +6,8 @@ export { LIVE_FILE_LIMIT, LiveWorkspace, liveWorkspaceDigest } from './live-work
 export {
   CloudSyncGuard,
   TOOLING_DIRECTORIES,
+  cloudSyncedRoots,
+  sweepCloudStorage,
   detectCloudStorage,
   excludeDirectoryFromCloudSync,
   findToolingDirectories,

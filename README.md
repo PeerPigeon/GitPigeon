@@ -311,8 +311,16 @@ cloud-synced folder and mark every dependency, build, coverage and cache
 directory as excluded from that client's sync. The marker disappears together
 with the directory, so the watcher restores it whenever a tree is recreated
 (`rm -rf node_modules && npm install`), and a periodic sweep re-checks in case
-an event was missed. Existing trees in already-registered repositories are
-handled the next time the service starts.
+an event was missed.
+
+Projects GitPigeon was never asked to watch count too: a `node_modules` in any
+project under a synced Desktop or Documents folder keeps the cloud client just
+as busy. Thirty seconds after it starts, and every six hours after that, the
+service walks every cloud-synced folder on the machine (synced Desktop and
+Documents, the iCloud Drive container, everything under
+`~/Library/CloudStorage`, Dropbox, OneDrive) and excludes every tooling
+directory it finds. `git pigeon nosync` runs the same sweep on demand and
+prints what it found.
 
 | Cloud client | Where | How the folder is excluded |
 | --- | --- | --- |

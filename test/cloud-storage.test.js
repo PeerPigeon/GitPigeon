@@ -10,9 +10,11 @@ import {
   DROPBOX_IGNORE_XATTR_LINUX,
   FILE_PROVIDER_DOMAIN_XATTR,
   FILE_PROVIDER_IGNORE_XATTR,
+  cloudSyncedRoots,
   detectCloudStorage,
   excludeDirectoryFromCloudSync,
   findToolingDirectories,
+  sweepCloudStorage,
   toolingDirectoryOf,
 } from '../src/cloud-storage.js';
 
@@ -274,6 +276,62 @@ test('a marker tool failure is reported once, not on every sweep', async () => {
     assert.deepEqual(await guard.protectAll(), []);
     assert.equal(log.lines.warn.length, 3);
     assert.match(log.lines.warn[0], /Could not exclude node_modules from iCloud Drive sync: xattr: Operation not permitted/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cloudSyncedRoots finds every synced folder on a Mac, managed or not', async () => {
+  const home = '/Users/someone';
+  const desktop = path.join(home, 'Desktop');
+  const documents = path.join(home, 'Documents');
+  const cloudStorage = path.join(home, 'Library', 'CloudStorage');
+  const dropboxRoot = path.join(cloudStorage, 'Dropbox');
+  const container = path.join(home, 'Library', 'Mobile Documents', 'com~apple~CloudDocs');
+  const tools = fakeTools({ domains: { [documents]: ICLOUD_DOMAIN, [dropboxRoot]: DROPBOX_DOMAIN } });
+  const existing = new Set([desktop, documents, cloudStorage, dropboxRoot, container, path.join(home, 'OneDrive')]);
+  const stat = async (file) => {
+    if (!existing.has(file)) { const error = new Error('ENOENT'); error.code = 'ENOENT'; throw error; }
+    return { isDirectory: () => true, isSymbolicLink: () => false };
+  };
+  const list = async (directory) => {
+    assert.equal(directory, cloudStorage);
+    return [{ name: 'Dropbox', isDirectory: () => true }, { name: 'notes.txt', isDirectory: () => false }];
+  };
+  const roots = await cloudSyncedRoots({ platform: 'darwin', homedir: home, env: {}, run: tools.run, read: async () => { throw new Error('ENOENT'); }, stat, list });
+  assert.deepEqual(roots, [
+    { provider: 'icloud', root: documents, markers: ['file-provider'] },
+    { provider: 'dropbox', root: dropboxRoot, markers: ['file-provider', 'dropbox-xattr'] },
+    { provider: 'icloud', root: container, markers: ['file-provider'] },
+    { provider: 'onedrive', root: path.join(home, 'OneDrive'), markers: [] },
+  ]);
+  // Desktop exists but carries no File Provider domain: not synced, not listed.
+  assert.ok(!roots.some((entry) => entry.root === desktop));
+});
+
+test('sweepCloudStorage excludes every tooling directory under a synced root, once', async () => {
+  const root = await temporaryRepository();
+  try {
+    await mkdir(path.join(root, 'unmanaged-project', 'node_modules', 'left-pad'), { recursive: true });
+    await mkdir(path.join(root, 'unmanaged-project', '.git', 'node_modules'), { recursive: true });
+    const tools = fakeTools();
+    const log = fakeLog();
+    const roots = [{ provider: 'icloud', root, markers: ['file-provider'] }];
+    const first = await sweepCloudStorage({ log, roots, run: tools.run });
+    assert.equal(first.length, 1);
+    assert.equal(first[0].found, 4);
+    assert.deepEqual(first[0].marked, ['node_modules', 'packages/web/dist', 'packages/web/node_modules', 'unmanaged-project/node_modules']);
+    assert.deepEqual(first[0].failed, []);
+    assert.equal(tools.marked(FILE_PROVIDER_IGNORE_XATTR, path.join(root, 'unmanaged-project', 'node_modules')), '1');
+    assert.equal(tools.marked(FILE_PROVIDER_IGNORE_XATTR, path.join(root, 'unmanaged-project', '.git', 'node_modules')), undefined);
+    assert.match(log.lines.info[0], /^iCloud Drive: excluded 4 tooling directories under /);
+    const second = await sweepCloudStorage({ log, roots, run: tools.run });
+    assert.deepEqual(second[0].marked, []);
+    assert.equal(log.lines.info.length, 1);
+
+    const warned = await sweepCloudStorage({ log, roots: [{ provider: 'onedrive', root, markers: [] }], run: tools.run });
+    assert.deepEqual(warned[0].marked, []);
+    assert.match(log.lines.warn.at(-1), /OneDrive has no per-folder exclusion, so 4 tooling directories under /);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
