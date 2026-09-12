@@ -4,6 +4,14 @@ export { RepositoryCache } from './cache.js';
 export { WorkspaceFiles, workspaceDigest } from './workspace.js';
 export { LIVE_FILE_LIMIT, LiveWorkspace, liveWorkspaceDigest } from './live-workspace.js';
 export {
+  CloudSyncGuard,
+  TOOLING_DIRECTORIES,
+  detectCloudStorage,
+  excludeDirectoryFromCloudSync,
+  findToolingDirectories,
+  toolingDirectoryOf,
+} from './cloud-storage.js';
+export {
   PAIRING_NETWORK_ID,
   PAIRING_PROTOCOL,
   PAIRING_TTL_MS,

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -458,4 +458,38 @@ test('a file past the live-editing limit is never a live document and never answ
   assert.equal(node.broadcastFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'sync-response').length, 0);
   assert.equal(server.documents.size, 0);
   browser.destroy();
+});
+
+test('a live document under node_modules or dist is never opened, so it is never written to any machine', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-generated-doc-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await GitRepository.init(root);
+  const repositoryId = 'a'.repeat(64);
+  const node = new FakeNode();
+  const server = new RealtimeWorkspaceServer({ node, repository, repositoryId, secret: 's', deviceId: 'solo', seedElectedFallbackMs: 120, seedFallbackMs: 240, seedRetryMs: 40 });
+  await server.start();
+  t.after(() => server.stop());
+  for (const file of ['node_modules/pkg/index.js', 'packages/web/dist/bundle.js']) {
+    const documentId = createHash('sha256').update([
+      'gitpigeon-realtime-v2', repositoryId, 'refs/heads/main', file,
+    ].join('\0')).digest('hex');
+    const browser = new Y.Doc();
+    node.receive('browser', repositoryId, REALTIME_CHANNEL, {
+      documentId,
+      path: file,
+      revision: 'refs/heads/main',
+      baseHash: createHash('sha256').update('').digest('hex'),
+      messageId: randomBytes(16).toString('hex'),
+      kind: 'sync-request',
+      part: 0,
+      total: 1,
+      payload: Buffer.from(Y.encodeStateVector(browser)).toString('base64'),
+    });
+    browser.destroy();
+  }
+  await settleSeed();
+  assert.equal(node.directFrames(REALTIME_CHANNEL).filter((f) => f.kind === 'sync-response').length, 0);
+  assert.equal(server.documents.size, 0);
+  await assert.rejects(stat(path.join(root, 'node_modules')), { code: 'ENOENT' });
+  await assert.rejects(stat(path.join(root, 'packages')), { code: 'ENOENT' });
 });

@@ -289,6 +289,10 @@ export class LiveWorkspace {
     const conflicts = [];
     for (const incoming of files) {
       const file = this.normalize(incoming.path);
+      // A peer never gets to grow a dependency tree or build output here —
+      // not a peer on an older build, not a browser. This side skips them
+      // when publishing; receiving is held to the same rule.
+      if (this.isGenerated(file)) continue;
       const current = await this.currentDigest(file);
       const next = incoming.deleted ? null : incoming.sha256;
       const hasBaseline = Object.prototype.hasOwnProperty.call(baselines, file);
@@ -318,6 +322,11 @@ export class LiveWorkspace {
       baselines[file] = next;
     }
     return { updated, conflicts };
+  }
+
+  /** A regenerable artifact path: dependency, build, coverage or cache trees, logs and temp files. */
+  isGenerated(file) {
+    return this.#shouldSkip(file);
   }
 
   #shouldSkip(file) {

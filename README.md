@@ -296,6 +296,35 @@ After choosing or merging the desired contents, normal background watching
 resumes from that version. `git pigeon untrack PATH...` is an advanced local
 override that disables private syncing and removes the Git exclusion.
 
+## Tooling artifacts stay out of cloud storage
+
+A repository that lives in iCloud Drive, Dropbox, OneDrive, Google Drive or Box
+would otherwise drag every `node_modules`, `.venv`, `dist`, `target` and
+similar tree into the cloud: hundreds of thousands of regenerable files
+uploaded on every install and downloaded onto every other machine. GitPigeon
+never syncs those trees itself, in either direction: a watcher never publishes
+them, and a watcher never writes them when a peer, an older build, or a browser
+live session offers one. It also tells the cloud client not to sync them.
+
+`git pigeon init` and the background watcher detect when a repository sits in a
+cloud-synced folder and mark every dependency, build, coverage and cache
+directory as excluded from that client's sync. The marker disappears together
+with the directory, so the watcher restores it whenever a tree is recreated
+(`rm -rf node_modules && npm install`), and a periodic sweep re-checks in case
+an event was missed. Existing trees in already-registered repositories are
+handled the next time the service starts.
+
+| Cloud client | Where | How the folder is excluded |
+| --- | --- | --- |
+| iCloud Drive (including synced Desktop and Documents) | macOS 14 or later | `com.apple.fileprovider.ignore#P` extended attribute |
+| Dropbox, OneDrive, Google Drive, Box under `~/Library/CloudStorage` | macOS | the same File Provider attribute |
+| Dropbox (any client) | macOS, Linux, Windows | Dropbox's documented `com.dropbox.ignored` marker |
+| OneDrive, iCloud for Windows, legacy OneDrive and Google Drive folders | Windows, macOS | no per-folder marker exists; the watcher warns so the repository can be moved |
+
+Only regular directories are marked. A `node_modules` that is already a
+symlink to somewhere outside the synced folder is left alone. Nothing under
+`.git` is ever touched.
+
 ## Commands
 
 | Command | Purpose |

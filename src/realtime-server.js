@@ -193,6 +193,10 @@ export class RealtimeWorkspaceServer {
       await respond({ ok: true, unchanged: true });
       return;
     }
+    if (this.liveWorkspace.isGenerated(to)) {
+      await respond({ ok: false, error: `Invalid path: ${to} is a generated artifact` });
+      return;
+    }
     const absoluteFrom = path.join(this.repository.root, ...from.split('/'));
     const absoluteTo = path.join(this.repository.root, ...to.split('/'));
     try {
@@ -389,6 +393,10 @@ export class RealtimeWorkspaceServer {
 
   async #document(frame) {
     const normalized = this.liveWorkspace.normalize(frame.path);
+    // A live document under node_modules or dist would be written to disk on
+    // every machine in the room. Those trees are never live-synced, in either
+    // direction.
+    if (this.liveWorkspace.isGenerated(normalized)) return null;
     // One document per file per revision. The base hash used to be part of
     // the identity: every write to disk changed the file's hash, the next
     // browser opened a different document, and this server ended up hosting

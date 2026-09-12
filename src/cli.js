@@ -1,4 +1,5 @@
 import { shouldScanRepository } from './repository-change.js';
+import { CloudSyncGuard } from './cloud-storage.js';
 import { watch as watchFilesystem } from "node:fs";
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
@@ -643,7 +644,15 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     }, Math.max(quiet, untilAllowed));
   };
 
+  // A repository inside iCloud Drive, Dropbox or OneDrive must not drag its
+  // `node_modules` and build output into the cloud. Existing artifact trees
+  // are marked at start, fresh ones as the watcher sees them appear, and the
+  // periodic sweep re-checks in case an event was missed.
+  const cloudGuard = new CloudSyncGuard(repository.root, { log });
+  cloudGuard.protectAll().catch((error) => log.debug?.(`Cloud storage guard: ${error.message}`));
+
   const sweepOrphanedTemps = async () => {
+    await cloudGuard.protectAll().catch((error) => log.debug?.(`Cloud storage guard: ${error.message}`));
     // Failed writes used to strand `<file>.<pid>-<hex>.tmp` beside real
     // files — dozens of them on a machine whose disk was misbehaving.
     const { readdir, rm: remove, stat: statFile } = await import('node:fs/promises');
@@ -699,6 +708,9 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
     try {
       filesystemWatcher = watchFilesystem(repository.root, { recursive: true }, (_event, filename) => {
         const changed = String(filename ?? "").replaceAll("\\", "/");
+        // `npm install` recreates node_modules without its cloud-ignore
+        // marker; the burst of events beneath it is the cue to restore it.
+        cloudGuard.noteChange(changed);
         if (!shouldScanRepository(changed)) return;
         realtimeServer.filesystemChanged(changed).catch((error) => log.error(error));
         schedulePublish();
@@ -758,6 +770,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
       stopped = true;
       if (changeTimer) clearTimeout(changeTimer);
       clearInterval(sweepTimer);
+      cloudGuard.close();
       filesystemWatcher?.close();
       if (watcherRetryTimer) clearTimeout(watcherRetryTimer);
       stopFallbackPolling();
@@ -1537,6 +1550,9 @@ async function commandInit(args, cwd, verbose) {
   }
   const workspace = new WorkspaceFiles(repository);
   await workspace.init();
+  // Done here, not only in the service, so the person sees it happen.
+  const cloudGuard = new CloudSyncGuard(repository.root, { log: logger(verbose) });
+  await cloudGuard.protectAll().catch((error) => logger(verbose).debug(`Cloud storage guard: ${error.message}`));
   const indexRoot = machineIndexRoot();
   const wasRegistered = (await listMachinePigeons({ root: indexRoot, activeOnly: false }))
     .some((entry) => entry.repository === repository.root);
