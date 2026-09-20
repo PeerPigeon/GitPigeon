@@ -514,6 +514,41 @@ export function liveDirectoryKey(indexId, bucket) {
  * `requestedAt` is a one-shot "update now" that a watcher which was offline
  * honours on its next connection.
  */
+/**
+ * A watcher that has just come up on a newer build than it last ran tells
+ * the fleet to look, once. Builds pass between watchers of the same platform
+ * and architecture over the mesh within a minute, but a machine with no such
+ * peer (the one Intel Mac among Apple Silicon ones) only learned of a release
+ * from its own daily check, or from someone pressing Update fleet — so one
+ * machine sat a version behind for up to a day, still running the bug the
+ * release fixed. The one-shot request is the same record that button writes;
+ * every watcher, old or new, already honours it.
+ */
+export async function announceNewBuild({ root, storage, fleetKey, indexId, logger = {}, version = GITPIGEON_VERSION, now = Date.now() }) {
+  const file = path.join(root, 'last-build.json');
+  let previous = null;
+  try { previous = String(JSON.parse(await readFile(file, 'utf8')).version ?? '') || null; } catch { previous = null; }
+  if (previous === version) return 0;
+  await mkdir(root, { recursive: true });
+  await writeFile(file, `${JSON.stringify({ version, since: new Date(now).toISOString() })}\n`, { mode: 0o600 });
+  // First run ever, or a downgrade: nothing newer to tell anyone about.
+  const { isNewerVersion } = await import('./auto-update.js');
+  if (!previous || !isNewerVersion(version, previous) || !storage) return 0;
+  const current = (await storage.get('public', fleetKey).catch(() => null))?.value;
+  const requestedAt = new Date(now).toISOString();
+  await storage.put('public', fleetKey, {
+    protocol: INDEX_PROTOCOL,
+    kind: 'fleet-update',
+    indexId,
+    autoUpdate: current?.kind === 'fleet-update' && current.autoUpdate === true,
+    requestedAt,
+    updatedAt: requestedAt,
+  });
+  logger.info?.(`Now on ${version} (was ${previous}); asked the fleet to check for it`);
+  // This machine is the one that has it: it need not answer its own request.
+  return now;
+}
+
 export function fleetUpdateKey(indexId) {
   return `gitpigeon/index/v1/${indexId}/fleet-update`;
 }
@@ -1242,6 +1277,9 @@ async function connectMachineDirectory(index, logger = {}, {
   ready = true;
   // The record may already be here, or arrive with the first peer.
   considerFleetUpdate('start').catch(() => {});
+  announceNewBuild({ root, storage: node.storage, fleetKey, indexId: index.indexId, logger })
+    .then((flagged) => { if (flagged) fleetHandledRequestedAt = flagged; })
+    .catch((error) => logger.debug?.(`Fleet update flag: ${error?.message ?? error}`));
   considerStorageRoles().catch(() => {});
   const pruneRecords = async () => {
     if (closed || !node.storage) return;

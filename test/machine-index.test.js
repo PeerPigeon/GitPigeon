@@ -451,3 +451,40 @@ test('storage roles are read from the fleet record, ignoring anything malformed'
   assert.equal(parseStorageRoles({ protocol: 'gitpigeon-index/1', kind: 'fleet-update', indexId, roles: { ['1'.repeat(32)]: 'archive' } }, indexId).size, 0);
   assert.equal(parseStorageRoles(null, indexId).size, 0);
 });
+
+test('a watcher that comes up on a newer build asks the fleet to check, once', async (t) => {
+  const { announceNewBuild, fleetUpdateKey, INDEX_PROTOCOL } = await import('../src/machine-index.js');
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-new-build-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const records = new Map();
+  const storage = {
+    get: async (_space, key) => (records.has(key) ? { value: records.get(key) } : null),
+    put: async (_space, key, value) => { records.set(key, value); },
+  };
+  const fleetKey = fleetUpdateKey('index-under-test');
+  const run = (version, now) => announceNewBuild({ root, storage, fleetKey, indexId: 'index-under-test', version, now });
+
+  // The first run ever has nothing newer to announce.
+  assert.equal(await run('0.13.142', 1_000), 0);
+  assert.equal(records.size, 0);
+  // Restarting on the same build says nothing.
+  assert.equal(await run('0.13.142', 2_000), 0);
+  assert.equal(records.size, 0);
+
+  // An Intel machine among Apple Silicon ones gets no build from its peers;
+  // without this it learned of a release from its own daily check.
+  records.set(fleetKey, { protocol: INDEX_PROTOCOL, kind: 'fleet-update', indexId: 'index-under-test', autoUpdate: true, requestedAt: null });
+  assert.equal(await run('0.13.143', 3_000), 3_000);
+  const flag = records.get(fleetKey);
+  assert.equal(flag.kind, 'fleet-update');
+  assert.equal(flag.requestedAt, new Date(3_000).toISOString());
+  assert.equal(flag.autoUpdate, true, 'the fleet\'s standing policy is kept, not reset');
+
+  // Said once: the next restart on that build does not ask again…
+  records.delete(fleetKey);
+  assert.equal(await run('0.13.143', 4_000), 0);
+  assert.equal(records.size, 0);
+  // …and a downgrade is not news.
+  assert.equal(await run('0.13.140', 5_000), 0);
+  assert.equal(records.size, 0);
+});
