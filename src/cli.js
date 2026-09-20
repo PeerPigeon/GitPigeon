@@ -296,6 +296,26 @@ function repositorySessionSignature(config) {
 }
 
 /**
+ * Whoever holds the owner key is the owner. A fresh clone on the machine
+ * that minted a share re-adopted it from the fleet and came up as a mirror
+ * of itself; with the old clone retired, every machine was a mirror, nobody
+ * published, and a lock was refused everywhere with "the lock happens
+ * there" — about a "there" that no longer existed.
+ */
+async function reclaimOwnShare(repository, config, root = machineIndexRoot()) {
+  if (!config.share || config.share.role === 'owner') return config;
+  try {
+    const ownKey = (await loadPairingKeyPair(root)).pub;
+    if (config.share.ownerPublicKey !== ownKey) return config;
+    const { adopted, ...share } = config.share;
+    void adopted;
+    return await saveConfig(repository.gitDir, { ...config, share: { ...share, role: 'owner' } });
+  } catch {
+    return config;
+  }
+}
+
+/**
  * A watcher-owned share is never mirrorless. Readers try the watchers first
  * and fall to the mirror when none answers, and the Nostr fallback on the
  * free public relays is always there behind "Watcher" — a bare share was a
@@ -304,6 +324,7 @@ function repositorySessionSignature(config) {
  * copied link stays valid.
  */
 async function ensureShareMirror(repository, config) {
+  config = await reclaimOwnShare(repository, config);
   if (config.share?.role !== 'owner' || config.share.mirror) return config;
   try {
     const { buildMirrorFromDefaults } = await import('./mirror.js');
@@ -1153,6 +1174,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       // bounce sessions).
       onRemoteShares: async (shares, ended = new Map()) => {
         const entries = await listMachinePigeons({ root, activeOnly: false });
+        const ownShareKey = await loadPairingKeyPair(root).then((pair) => pair.pub, () => null);
         let changed = false;
         for (const entry of entries) {
           const remote = shares.get(entry.repositoryId) ?? null;
@@ -1173,7 +1195,11 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
             createdAt: local.createdAt,
             ...(local.mirror?.publicBaseUrl ? { mirror: local.mirror.publicBaseUrl } : {}),
           } : null;
-          const adopt = (share) => ({ key: share.key, ownerPublicKey: share.ownerPublicKey, role: 'mirror', adopted: true });
+          // A share signed by this machine's own key is OWNED here, never
+          // adopted: see reclaimOwnShare.
+          const adopt = (share) => (share.ownerPublicKey === ownShareKey
+            ? { key: share.key, ownerPublicKey: share.ownerPublicKey, role: 'owner', ...(share.createdAt ? { createdAt: share.createdAt } : {}) }
+            : { key: share.key, ownerPublicKey: share.ownerPublicKey, role: 'mirror', adopted: true });
           let next = null;
           let message = null;
           if (local && local.role !== 'owner' && endedHere.some((item) => item.key === local.key)) {

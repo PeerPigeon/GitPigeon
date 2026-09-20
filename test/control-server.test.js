@@ -249,3 +249,63 @@ test('lock then unlock resumes the same share identity — one link, always', as
   assert.equal(unlockReply.ok, true);
   assert.equal(unlockReply.shareKey, 'k'.repeat(43), 'the browser is told the resumed key');
 });
+
+test('a share nobody owns can still be locked: by the machine holding its key, or ended when the owner is gone', async (t) => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const run = promisify(execFile);
+  const { loadConfig, saveConfig } = await import('../src/config.js');
+  const { loadPairingKeyPair } = await import('../src/pairing-identity.js');
+  const { loadMachineIndex } = await import('../src/machine-index.js');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'gitpigeon-control-orphan-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const ownKey = (await loadPairingKeyPair(root)).pub;
+
+  const make = async (name, repositoryId, ownerPublicKey) => {
+    const repoDir = path.join(root, name);
+    await run('git', ['init', '-q', repoDir]);
+    const gitDir = path.join(repoDir, '.git');
+    const config = await saveConfig(gitDir, {
+      version: 1, repositoryId, secret: 's'.repeat(43), deviceId: 'device-aaaaaaaa',
+      share: { key: (name[0]).repeat(43), ownerPublicKey, role: 'mirror', adopted: true },
+    });
+    await registerMachinePigeon({ root: repoDir, gitDir }, config, { root, pid: null });
+    return gitDir;
+  };
+  // A fresh clone on the machine that minted the share re-adopted it from
+  // the fleet: a mirror of itself, and the only holder of the owner key.
+  const mine = await make('mine', 'repo-own-key-0001', ownKey);
+  // A share whose owner is some machine that no longer exists.
+  const theirs = await make('theirs', 'repo-orphaned-0001', 'someone-elses-public-key-0123456789');
+
+  const node = new FakeNode();
+  const server = new ControlServer({ node, indexId, root });
+  server.start();
+  t.after(() => server.stop());
+  const ask = async (requestId, extra) => {
+    const before = node.directFrames(CONTROL_CHANNEL).length;
+    node.receive('browser', indexId, CONTROL_CHANNEL, { kind: 'set-repository-sharing', requestId, shared: false, ...extra }, 'direct');
+    for (let waited = 0; waited < 100 && node.directFrames(CONTROL_CHANNEL).length === before; waited += 1) await settle();
+    return node.directFrames(CONTROL_CHANNEL).find((frame) => frame.requestId === requestId);
+  };
+
+  const own = await ask('own', { targetRepositoryId: 'repo-own-key-0001' });
+  assert.equal(own.ok, true, 'the machine holding the owner key locks its own share');
+  const lockedOwn = await loadConfig(mine);
+  assert.equal(lockedOwn.share, undefined);
+  assert.equal(lockedOwn.shareDormant?.role, 'owner', 'stowed as the owner it is, so the same link resumes here');
+  assert.equal(lockedOwn.shareDormant?.adopted, undefined);
+
+  const refused = await ask('refused', { targetRepositoryId: 'repo-orphaned-0001' });
+  assert.equal(refused.ok, false, 'someone else\'s share is still not this machine\'s to lock…');
+  assert.equal(refused.code, 'not-owner', '…and the refusal says why in a form the browser can act on');
+  assert.ok((await loadConfig(theirs)).share, 'a refused lock changes nothing');
+
+  const ended = await ask('ended', { targetRepositoryId: 'repo-orphaned-0001', orphaned: true });
+  assert.equal(ended.ok, true, 'once every live machine has refused, the share is ended rather than left unlockable');
+  const endedConfig = await loadConfig(theirs);
+  assert.equal(endedConfig.share, undefined);
+  assert.equal(endedConfig.shareDormant, undefined, 'never this machine\'s link to resume');
+  const index = await loadMachineIndex({ root });
+  assert.ok((index.sharesEnded ?? []).some((item) => item.key === 't'.repeat(43)), 'the end is stated to the fleet, so every adopter drops the key');
+});

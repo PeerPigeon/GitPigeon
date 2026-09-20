@@ -52,7 +52,7 @@ export class ControlServer {
       const result = await this.#run(frame);
       await this.#reply(peerId, { kind: 'result', requestId, ok: true, ...result });
     } catch (error) {
-      await this.#reply(peerId, { kind: 'result', requestId, ok: false, message: error.message });
+      await this.#reply(peerId, { kind: 'result', requestId, ok: false, message: error.message, ...(typeof error.code === 'string' ? { code: error.code } : {}) });
     }
   }
 
@@ -134,16 +134,41 @@ export class ControlServer {
         // share stowing its copy would flap back on the next sync while the
         // owner kept publishing. Refusing here lets the browser's control
         // fan-over reach the owning machine.
+        let orphanEnded = false;
         if (config.share.role === 'mirror') {
-          throw new Error('This repository is shared by another machine; the lock happens there');
+          const { loadPairingKeyPair } = await import('./pairing-identity.js');
+          const ownKey = (await loadPairingKeyPair(this.root)).pub;
+          if (config.share.ownerPublicKey === ownKey) {
+            // "Another machine" is THIS machine. The share is signed by this
+            // machine's own key; a fresh clone re-adopted it from the fleet
+            // and came up as a mirror of itself. With every machine a mirror
+            // there was no owner left anywhere, and the lock could never
+            // happen "there". Whoever holds the owner key is the owner.
+            const { adopted, ...own } = config.share;
+            void adopted;
+            config = { ...config, share: { ...own, role: 'owner' } };
+          } else if (frame.orphaned === true) {
+            // The browser asked every live machine and none owns the share:
+            // its owner is gone (retired, re-imaged, unwatched). A share that
+            // nobody can lock is not acceptable; end it as a stated fact so
+            // every adopter and browser drops the key. It is not stowed as
+            // dormant — it was never this machine's link to resume.
+            orphanEnded = true;
+          } else {
+            const refusal = new Error('This repository is shared by another machine; the lock happens there');
+            refusal.code = 'not-owner';
+            throw refusal;
+          }
         }
         const { share, ...rest } = config;
-        config = await saveConfig(repository.gitDir, { ...rest, shareDormant: share });
+        config = await saveConfig(repository.gitDir, orphanEnded ? rest : { ...rest, shareDormant: share });
         // A lock travels as a stated fact: every adopter and browser drops
         // this key on sight, instead of guessing from the share going quiet.
         const { markShareEnded } = await import('./machine-index.js');
         await markShareEnded(entry.repositoryId, share.key, { root: this.root });
-        this.logger.info?.(`Locked ${path.basename(entry.repository)}; the same link resumes on the next unlock`);
+        this.logger.info?.(orphanEnded
+          ? `Ended the fleet share for ${path.basename(entry.repository)}: no live machine owns it`
+          : `Locked ${path.basename(entry.repository)}; the same link resumes on the next unlock`);
       }
       await registerMachinePigeon(repository, config, { root: this.root });
       // Answer NOW. The session reload behind a toggle takes seconds (room
