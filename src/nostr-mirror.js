@@ -23,6 +23,26 @@ export const DEFAULT_NOSTR_RELAYS = Object.freeze([
 
 const OK_TIMEOUT_MS = 10_000;
 
+/**
+ * The pointer's Nostr identity, derived from the share key: every holder of
+ * a share link computes the same address without being told anything more.
+ * It authenticates nothing — the pointer's content carries the owner's
+ * signature — it only makes the address findable.
+ */
+export function nostrPointerKey(shareKey) {
+  return createHash('sha256').update('gitpigeon-nostr-pointer/1\0').update(String(shareKey)).digest('hex');
+}
+
+/** Publish one record under the pointer identity on the default relays. */
+export async function publishNostrPointer({ shareKey, tag, body, relays = DEFAULT_NOSTR_RELAYS }) {
+  const client = new NostrMirrorClient({ secretKey: nostrPointerKey(shareKey), relays });
+  try {
+    await client.put(tag, body);
+  } finally {
+    client.close();
+  }
+}
+
 export function generateNostrMirrorKey() {
   return randomBytes(32).toString('hex');
 }

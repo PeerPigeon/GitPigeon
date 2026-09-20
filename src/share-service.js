@@ -22,6 +22,7 @@ import {
 } from './share.js';
 
 const OWNER_POLL_MS = 15_000;
+const POINTER_REFRESH_MS = 6 * 60 * 60_000;
 const MIRROR_POLL_MS = 10_000;
 
 async function storageValue(node, key) {
@@ -192,6 +193,9 @@ export async function startShareService({
   // The repository's own name, carried into the signed head so a share
   // reader adopts it instead of one owner's folder basename.
   name = null,
+  // How the mirror pointer reaches the relays; injectable so tests (which
+  // inject a node) never touch the network.
+  publishPointer = injectedNode ? null : undefined,
 }) {
   const role = share.role === 'owner' ? 'owner' : 'mirror';
   let node = injectedNode;
@@ -464,6 +468,27 @@ export async function startShareService({
     if (!keyPair?.priv) throw new Error('An owner share needs the machine key pair');
     await ensureRoster().catch((error) => logger.debug?.(`Share roster: ${error.message}`));
   }
+  // The owner states where the mirror is, at an address any link can find.
+  // Relay retention is best-effort, so the statement is repeated.
+  let pointerTimer = null;
+  const pointTo = async () => {
+    const mirror = share.mirror?.publicBaseUrl;
+    if (closed || role !== 'owner' || !mirror || publishPointer === null) return;
+    try {
+      const { signMirrorPointer, sharePointerTag } = await import('./share.js');
+      const record = await signMirrorPointer({ repositoryId, mirror, ownerKeyPair: keyPair });
+      const publish = publishPointer ?? (await import('./nostr-mirror.js')).publishNostrPointer;
+      await publish({ shareKey: share.key, tag: sharePointerTag(repositoryId), body: JSON.stringify(record) });
+      logger.debug?.(`Mirror pointer published for ${repositoryId}`);
+    } catch (error) {
+      logger.debug?.(`Mirror pointer: ${error.message}`);
+    }
+  };
+  if (role === 'owner') {
+    pointTo();
+    pointerTimer = setInterval(pointTo, POINTER_REFRESH_MS);
+    pointerTimer.unref?.();
+  }
   const changeSubscription = node.storage?.subscribe?.((event) => {
     if (event?.origin === 'remote' && event.space === 'public' && String(event.key ?? '').startsWith(shareStoragePrefix(repositoryId))) tick();
   }) ?? null;
@@ -478,6 +503,7 @@ export async function startShareService({
     async close() {
       closed = true;
       if (timer) clearInterval(timer);
+      if (pointerTimer) clearInterval(pointerTimer);
       node.off?.('message', serveChunks);
       changeSubscription?.();
       for (const unsubscribe of subscriptions) unsubscribe?.();

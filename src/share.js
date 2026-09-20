@@ -21,6 +21,7 @@ export const SHARE_NETWORK_ID = 'gitpigeon-share-v1';
 export const SHARE_ROSTER_CONTEXT = 'gitpigeon-share-roster/1';
 export const SHARE_HEAD_CONTEXT = 'gitpigeon-share-head/1';
 export const SHARE_PROPOSAL_CONTEXT = 'gitpigeon-share-proposal/1';
+export const SHARE_POINTER_CONTEXT = 'gitpigeon-share-pointer/1';
 export const SHARE_CHUNK_BYTES = 192 * 1024;
 const WEB_SHARE_PATH = /^\/r\/([a-zA-Z0-9_-]{8,128})\/?$/;
 
@@ -189,6 +190,52 @@ export async function verifyRoster(record, ownerPublicKey) {
   try {
     const { verifyMessage } = await import('unsea');
     const valid = await verifyMessage(canonical(SHARE_ROSTER_CONTEXT, value), String(signature ?? ''), validPublicKey(ownerPublicKey));
+    return valid ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where the share's always-on mirror is, signed by the owner key the link
+ * already carries. A link is often copied before the mirror is attached, or
+ * by a path that drops it; without the mirror base a reader with no watcher
+ * online has nowhere to look, even though the relays hold every record. The
+ * pointer is published at an address derived from the share key alone (see
+ * nostrPointerKey), so ANY link finds the mirror. Anyone holding the link
+ * can write at that address — which is why the pointer is only believed
+ * when the owner signed it.
+ */
+export function sharePointerTag(repositoryId) {
+  return `gitpigeon-pointer/v1/${validateRepositoryId(repositoryId)}`;
+}
+
+export async function signMirrorPointer({ repositoryId, mirror, ownerKeyPair }) {
+  const { signMessage } = await import('unsea');
+  const record = {
+    repositoryId: validateRepositoryId(repositoryId),
+    mirror: String(mirror),
+    updatedAt: new Date().toISOString(),
+  };
+  if (!/^nostr:[0-9a-f]{64}\?relays=.+$/.test(record.mirror)) record.mirror = validateMirrorUrl(record.mirror);
+  return {
+    protocol: SHARE_POINTER_CONTEXT,
+    ...record,
+    signature: await signMessage(canonical(SHARE_POINTER_CONTEXT, record), ownerKeyPair.priv),
+  };
+}
+
+export async function verifyMirrorPointer(record, ownerPublicKey) {
+  if (!record || typeof record !== 'object' || record.protocol !== SHARE_POINTER_CONTEXT) return null;
+  const value = {
+    repositoryId: String(record.repositoryId ?? ''),
+    mirror: String(record.mirror ?? ''),
+    updatedAt: String(record.updatedAt ?? ''),
+  };
+  if (!value.mirror || !Number.isFinite(Date.parse(value.updatedAt))) return null;
+  try {
+    const { verifyMessage } = await import('unsea');
+    const valid = await verifyMessage(canonical(SHARE_POINTER_CONTEXT, value), String(record.signature ?? ''), validPublicKey(ownerPublicKey));
     return valid ? value : null;
   } catch {
     return null;

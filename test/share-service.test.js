@@ -174,3 +174,29 @@ test('a mirror proposes commits; the owner lists and lands them for review', asy
   const ownerMain = await repoA.git(['show', 'refs/heads/main:app.js']);
   assert.equal(ownerMain.stdout, 'console.log(1)\n');
 });
+
+test('the owner of a mirrored share publishes where the mirror is; an adopting machine never does', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-share-pointer-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = await GitRepository.init(root);
+  const { generateRandomPair } = await import('unsea');
+  const { verifyMirrorPointer } = await import('../src/share.js');
+  const owner = await generateRandomPair();
+  const repositoryId = 'b'.repeat(32);
+  const mirror = { type: 'nostr', secretKey: 'a'.repeat(64), relays: ['wss://relay.example'], publicBaseUrl: `nostr:${'c'.repeat(64)}?relays=wss%3A%2F%2Frelay.example` };
+  const share = { key: createShareKey(), ownerPublicKey: owner.pub, mirror };
+  const published = [];
+  const publishPointer = async (pointer) => { published.push(pointer); };
+
+  const ownerService = await startShareService({ repository, repositoryId, share: { ...share, role: 'owner' }, keyPair: owner, node: fakeShareNode(new Map()), publishPointer });
+  t.after(() => ownerService.close());
+  assert.ok(await until(() => published.length === 1), 'the owner stated where the mirror is');
+  assert.equal(published[0].shareKey, share.key);
+  assert.equal(published[0].tag, `gitpigeon-pointer/v1/${repositoryId}`);
+  assert.equal((await verifyMirrorPointer(JSON.parse(published[0].body), owner.pub))?.mirror, mirror.publicBaseUrl);
+
+  const adopterService = await startShareService({ repository, repositoryId, share: { ...share, role: 'mirror' }, node: fakeShareNode(new Map()), publishPointer });
+  t.after(() => adopterService.close());
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(published.length, 1, 'only the owner holds the key that makes a pointer believable');
+});

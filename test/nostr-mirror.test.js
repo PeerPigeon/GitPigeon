@@ -52,3 +52,38 @@ test('the client publishes replaceable records to a relay and newer versions win
     await relay.close();
   }
 });
+
+test('any share link finds the mirror: an owner-signed pointer at an address derived from the share key', async () => {
+  const { generateRandomPair } = await import('unsea');
+  const { createShareKey, sharePointerTag, signMirrorPointer, verifyMirrorPointer } = await import('../src/share.js');
+  const { nostrPointerKey, publishNostrPointer } = await import('../src/nostr-mirror.js');
+  const owner = await generateRandomPair();
+  const stranger = await generateRandomPair();
+  const shareKey = createShareKey();
+  const repositoryId = 'a'.repeat(32);
+  const mirror = nostrPublicBase(await nostrPublicKey(generateNostrMirrorKey()), ['wss://relay.example']);
+
+  // Derived from the share key alone: the link's `s=` is all a reader needs.
+  assert.match(nostrPointerKey(shareKey), /^[0-9a-f]{64}$/);
+  assert.equal(nostrPointerKey(shareKey), nostrPointerKey(shareKey));
+  assert.notEqual(nostrPointerKey(shareKey), nostrPointerKey(createShareKey()));
+
+  const record = await signMirrorPointer({ repositoryId, mirror, ownerKeyPair: owner });
+  assert.equal((await verifyMirrorPointer(record, owner.pub))?.mirror, mirror);
+  // Every link holder can WRITE at the pointer address, so only the owner's
+  // signature makes a pointer believable.
+  assert.equal(await verifyMirrorPointer(record, stranger.pub), null);
+  assert.equal(await verifyMirrorPointer({ ...record, mirror: 'https://evil.example/bucket' }, owner.pub), null);
+  assert.equal(await verifyMirrorPointer(await signMirrorPointer({ repositoryId, mirror, ownerKeyPair: stranger }), owner.pub), null);
+
+  const relay = await startFakeNostrRelay();
+  try {
+    await publishNostrPointer({ shareKey, tag: sharePointerTag(repositoryId), body: JSON.stringify(record), relays: [relay.url] });
+    const [event] = [...relay.events.values()];
+    assert.equal(event.pubkey, await nostrPublicKey(nostrPointerKey(shareKey)));
+    assert.deepEqual(event.tags, [['d', `gitpigeon-pointer/v1/${repositoryId}`]]);
+    assert.equal((await verifyMirrorPointer(JSON.parse(event.content), owner.pub))?.mirror, mirror);
+  } finally {
+    await relay.close();
+  }
+});
