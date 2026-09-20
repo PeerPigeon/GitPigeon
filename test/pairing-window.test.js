@@ -95,3 +95,20 @@ test('the background service checks the window and the proof before any capabili
   const approve = mesh.slice(mesh.indexOf('async approve('), mesh.indexOf('async close('));
   assert.doesNotMatch(approve, /sendEncryptedDirect\(record\.peerId, grant\)/);
 });
+
+test('the watcher answers with its own proof of the phrase, distinct from the browser\'s', async (t) => {
+  const { pairingAnswer, pairingAnswerFor } = await import('../src/pairing-identity.js');
+  const root = await scratch(t);
+  const now = 1_800_000_000_000;
+  const request = { requestId: 'e'.repeat(32), epub: 'browser-epub' };
+  assert.equal(await pairingAnswerFor(root, request, now), null, 'no window, no answer');
+  const { phrase } = await openPairingWindow(root, { now });
+  const answer = await pairingAnswerFor(root, request, now + 1);
+  assert.equal(answer, pairingAnswer(phrase, request));
+  // Not the browser's proof replayed back at it: a machine that merely SAW
+  // the request cannot echo its way into being believed.
+  assert.notEqual(answer, pairingProof(phrase, request));
+  assert.notEqual(answer, pairingAnswer('AAAA-AAAA-AAAA', request));
+  assert.notEqual(answer, pairingAnswer(phrase, { ...request, epub: 'someone-else' }));
+  assert.equal(await pairingAnswerFor(root, request, now + PAIRING_WINDOW_MS + 1), null);
+});

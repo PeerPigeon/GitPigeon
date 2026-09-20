@@ -116,6 +116,34 @@ export function pairingProof(phrase, { requestId, epub }) {
     .digest('hex');
 }
 
+/**
+ * The watcher's half of the handshake. A browser that proved the phrase is
+ * answered with proof that THIS machine knows it too — so the browser can
+ * take the answer without asking anyone to compare digits, and an answer
+ * from any other machine on the mesh (which sees the request and the key to
+ * seal to, like everyone) is recognisably not the one that was asked.
+ */
+export function pairingAnswer(phrase, { requestId, epub }) {
+  return createHmac('sha256', normalizePairingPhrase(phrase))
+    .update('gitpigeon-pairing-answer/1\0')
+    .update(String(requestId))
+    .update('\0')
+    .update(String(epub))
+    .digest('hex');
+}
+
+/** The answer for a request, from the open window's phrase; null when shut. */
+export async function pairingAnswerFor(root, request, now = Date.now()) {
+  try {
+    const state = JSON.parse(await readFile(path.join(root, WINDOW_FILE), 'utf8'));
+    const until = Date.parse(String(state?.until ?? ''));
+    if (!Number.isFinite(until) || until <= now || typeof state.phrase !== 'string') return null;
+    return pairingAnswer(state.phrase, request);
+  } catch {
+    return null;
+  }
+}
+
 export async function openPairingWindow(root, { ms = PAIRING_WINDOW_MS, now = Date.now() } = {}) {
   await mkdir(root, { recursive: true });
   const until = new Date(now + ms).toISOString();

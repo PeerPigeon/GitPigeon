@@ -52,7 +52,7 @@ import {
   validateNativeClonePayload,
 } from './device-grants.js';
 import { startDeviceApprovalResponder } from './device-approval-mesh.js';
-import { PAIRING_WINDOW_MS, closePairingWindow, loadPairingKeyPair, localPairingCode, openPairingWindow, pairingWindowOpen, verifyPairingProof } from './pairing-identity.js';
+import { PAIRING_WINDOW_MS, closePairingWindow, loadPairingKeyPair, localPairingCode, openPairingWindow, pairingAnswerFor, pairingWindowOpen, verifyPairingProof } from './pairing-identity.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
 import { ensureServiceWatchdog, inspectCommandOnPath, installNativeIntegration, refreshNativeCommandShim, removeServiceWatchdog } from './native-install.js';
 import { ControlServer } from './control-server.js';
@@ -946,12 +946,16 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
       }
       const code = await responder.codeFor(request.requestId).catch(() => null);
       if (!code) continue;
-      log.info?.(`${request.deviceName} is asking to pair. Approve it there if it shows ${code}.`);
+      // Read before the window can shut: the answer proves this machine
+      // knows the phrase too, so the browser takes it without a second look.
+      const phraseProof = await pairingAnswerFor(root, request);
+      log.info?.(`${request.deviceName} proved the pairing phrase; answering.`);
       const { confirmed } = await responder.approve(request.requestId, {
         index: { indexId: index.indexId, secret: index.secret, publisherId: index.publisherId },
         nativeDevicePublicKey: identity.publicKey,
         deviceName: deviceHostName(),
         repositories: [],
+        ...(phraseProof ? { phraseProof } : {}),
       });
       if (!confirmed) continue;
       // One window, one browser: the door shuts behind whoever it was for.
@@ -1963,9 +1967,21 @@ async function commandPair(args, verbose) {
   // browser that proves the phrase; outside it, nothing offered over the
   // mesh is taken.
   const { phrase } = await openPairingWindow(root);
+  const serviceRunning = (await watchServiceStatus(root).catch(() => null))?.running === true;
+  const dashboard = process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/';
   console.log(`Pairing phrase:              ${phrase}`);
   console.log(`The phrase works once, for the next ${Math.round(PAIRING_WINDOW_MS / 60_000)} minutes.`);
-  console.log('Looking for a device or browser asking to pair…');
+  // One command, nothing to type: the page opened HERE carries the phrase in
+  // its fragment (never sent to the server, removed from the address bar at
+  // once), proves it, and this machine's answer proves it back. A phrase is
+  // typed only on some OTHER device.
+  let openedHere = false;
+  try { openedHere = openDashboard(`${dashboard}#pair=${encodeURIComponent(phrase)}`); } catch { openedHere = false; }
+  console.log(openedHere
+    ? `\nOpened ${dashboard} in this machine's browser; it pairs by itself.`
+    : `\nOpen ${dashboard} and type the phrase above.`);
+  console.log(`To pair a browser on another device, open ${dashboard} there and type the phrase.`);
+  console.log('Waiting…');
 
   // Both routes run at once: local discovery for anything on this network, and
   // a one-time link for anything that is not.
@@ -1977,9 +1993,12 @@ async function commandPair(args, verbose) {
     console.log(`\nPaired ${result.browserId.slice(0, 16)}… through the one-time link.`);
   }).catch((error) => log.debug?.(error.message));
 
+  const ownKeyPair = await loadPairingKeyPair(root);
   const responder = await startDeviceApprovalResponder({
-    logger: log,
-    keyPair: await loadPairingKeyPair(root),
+    // Other machines' health lines belong in the service log, not over a
+    // prompt someone is trying to read.
+    logger: { ...log, info: (message) => { if (!String(message).startsWith('[watcher-status]')) log.info?.(message); } },
+    keyPair: ownKeyPair,
   });
   let connectedAt = null;
   let announcedConnection = false;
@@ -1995,9 +2014,24 @@ async function commandPair(args, verbose) {
       // Only a browser that proves the phrase on this screen is listed. Every
       // browser calls itself "Chrome"; without this the person choosing had
       // no way to tell their own tab from anyone else's asking at that moment.
+      // The background service answers a browser that proves the phrase and
+      // shuts the window behind it. That IS the pairing; say so and finish.
+      if (serviceRunning && !await pairingWindowOpen(root)) {
+        const paired = (await loadMachineIndex({ root }).catch(() => null))?.pairingComplete === true;
+        console.log(paired
+          ? '\nPaired. This browser now sees every repository this machine watches.'
+          : '\nThe pairing window closed without a browser pairing (it expired, or wrong phrases were tried). Run `git pigeon pair` again.');
+        return;
+      }
       const pending = [];
       for (const request of responder.pending()) {
+        // This machine's own service announces itself on the same mesh; it is
+        // not a device asking to be let in.
+        if (request.devicePublicKey && request.devicePublicKey === ownKeyPair.pub) continue;
         if (request.requesterKind === 'browser') {
+          // With the service running, browsers are its job: two answers to one
+          // request would show the person the same machine twice.
+          if (serviceRunning) continue;
           if (!request.proof || !request.epub) continue;
           if (!proven.has(request.requestId)) proven.set(request.requestId, await verifyPairingProof(root, request));
           if (!proven.get(request.requestId)) continue;
@@ -2008,17 +2042,12 @@ async function commandPair(args, verbose) {
         announcedConnection = true;
         console.log('Connected to the mesh. Press Ctrl+C to stop.');
       }
-      // Never open a page, and never claim nothing is out there until the mesh
-      // has actually been up long enough to have heard it. Only an unpaired
-      // browser announces itself, so a tab opened from here would be paired
-      // already and stay just as silent as the one the user already had open.
+      // Never claim nothing is out there until the mesh has actually been up
+      // long enough to have heard it.
       if (!pending.length && !explained && connectedAt && Date.now() - connectedAt >= DISCOVERY_HINT_MS) {
         explained = true;
-        const dashboard = process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/';
-        console.log(`\nStill nothing asking to pair. Open ${dashboard} on the device you want to add,`);
-        console.log('and leave it on the pairing screen.');
-        console.log('A browser that is already paired will not appear here. To pair one again, clear');
-        console.log('its GitPigeon site data or use a private window.\n');
+        console.log(`\nStill waiting. On the device you want to add, open ${dashboard} and type the phrase above.`);
+        console.log('A browser that was paired before asks again as soon as it has the phrase.\n');
       }
       for (const request of pending) {
         if (announced.has(request.requestId)) continue;

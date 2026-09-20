@@ -179,17 +179,22 @@ test('an expired or silent request stops being offered', async (t) => {
   );
 });
 
-test('pair never opens a page of its own', async () => {
+test('pair opens the dashboard only WITH the phrase, which is what makes a page worth opening', async () => {
   const source = await import('node:fs/promises')
     .then(({ readFile }) => readFile(new URL('../src/cli.js', import.meta.url), 'utf8'));
   const command = /async function commandPair\(args, verbose\) \{[\s\S]*?\n\}/.exec(source)?.[0] ?? '';
   assert.ok(command, 'commandPair should be present');
 
-  // Only an unpaired browser announces itself. Opening a tab from here lands on
-  // the same already-paired origin, so it stays just as silent as the page the
-  // user already had open — it only ever added noise.
-  assert.doesNotMatch(command, /openDashboard/);
-  assert.match(command, /already paired will not appear/);
+  // A bare tab opened from here landed on an already-paired origin and stayed
+  // as silent as the page the user already had open. The phrase changes that:
+  // a browser holding one asks again, paired or not, and the page opened here
+  // carries it in the fragment so there is nothing to type.
+  assert.match(command, /openDashboard\(`\$\{dashboard\}#pair=\$\{encodeURIComponent\(phrase\)\}`\)/);
+  assert.doesNotMatch(command, /openDashboard\(dashboard\)/);
+  // This machine's own announcement is not a device asking to be let in, and
+  // other machines' health lines do not belong over a prompt.
+  assert.match(command, /request\.devicePublicKey === ownKeyPair\.pub/);
+  assert.match(command, /startsWith\('\[watcher-status\]'\)/);
 
   // Joining the mesh and hearing a gossip announcement takes far longer than a
   // few seconds, so the hint waits for signaling to connect and then for a real
