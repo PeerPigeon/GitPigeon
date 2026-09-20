@@ -95,8 +95,10 @@ test('the responder lists requests and grants only the chosen one', async (t) =>
   });
   t.after(() => responder.close());
 
-  const alice = createMeshPairingRequest({ requestId: 'a'.repeat(32), deviceName: 'Alice' });
-  const bob = createMeshPairingRequest({ requestId: 'b'.repeat(32), deviceName: 'Bob' });
+  const { generateRandomPair, decryptMessageWithMeta } = await import('unsea');
+  const bobKeys = await generateRandomPair();
+  const alice = createMeshPairingRequest({ requestId: 'a'.repeat(32), deviceName: 'Alice', epub: (await generateRandomPair()).epub });
+  const bob = createMeshPairingRequest({ requestId: 'b'.repeat(32), deviceName: 'Bob', epub: bobKeys.epub });
   announce(node, 'alice-peer', alice);
   announce(node, 'bob-peer', bob);
   await settle();
@@ -112,12 +114,17 @@ test('the responder lists requests and grants only the chosen one', async (t) =>
   assert.equal(approved.request.deviceName, 'Bob');
   assert.equal(approved.confirmed, true);
 
-  // Only Bob's peer was sent to, and the capability went out as plain JSON for
-  // PeerPigeon to encrypt rather than wrapped in a second envelope.
-  assert.ok(node.direct.length >= 1);
-  assert.ok(node.direct.every(({ peerId }) => peerId === 'bob-peer'));
-  assert.deepEqual(node.direct[0].frame.capability, capability);
-  assert.equal(node.direct[0].frame.kind, 'grant');
+  // The capability goes out sealed to the key Bob's request named, and ONLY
+  // that way. A direct copy went to whichever peer the request arrived from —
+  // a relaying hop, or whoever replayed it — which is not the same thing as
+  // the requester.
+  assert.equal(node.direct.length, 0);
+  const sealed = node.broadcasts.filter((frame) => frame?.kind === 'sealed-grant');
+  assert.ok(sealed.length >= 1);
+  assert.ok(sealed.every((frame) => frame.requestId === bob.requestId));
+  const opened = JSON.parse(await decryptMessageWithMeta(sealed[0].cipher, bobKeys.epriv));
+  assert.deepEqual(opened.capability, capability);
+  assert.equal(opened.kind, 'grant');
   assert.deepEqual(responder.pending().map((r) => r.deviceName), ['Alice']);
 });
 
@@ -128,9 +135,17 @@ test('a grant is resent until the requester acknowledges it', async (t) => {
   });
   t.after(() => responder.close());
 
-  const request = createMeshPairingRequest({ requestId: 'a'.repeat(32), deviceName: 'Safari' });
+  const { generateRandomPair } = await import('unsea');
+  const request = createMeshPairingRequest({ requestId: 'a'.repeat(32), deviceName: 'Safari', epub: (await generateRandomPair()).epub });
   announce(node, 'browser', request);
   await settle();
+
+  // A request that names no key cannot be answered at all: there is nothing
+  // to seal the capability to, and it is never sent any other way.
+  const keyless = createMeshPairingRequest({ requestId: 'd'.repeat(32), deviceName: 'Keyless' });
+  announce(node, 'someone', keyless);
+  await settle();
+  await assert.rejects(() => responder.approve(keyless.requestId, { index: {} }), /no key to seal/);
 
   // A requester that never acknowledges has not taken the grant. A single
   // fire-and-forget send followed by tearing the node down loses it, which is
@@ -139,7 +154,9 @@ test('a grant is resent until the requester acknowledges it', async (t) => {
     confirmMs: 1_200, resendMs: 200,
   });
   assert.equal(stubborn.confirmed, false);
-  assert.ok(node.direct.length > 1, `expected a resend, sent ${node.direct.length}`);
+  const resent = node.broadcasts.filter((frame) => frame?.kind === 'sealed-grant' && frame.requestId === request.requestId);
+  assert.ok(resent.length > 1, `expected a resend, sent ${resent.length}`);
+  assert.equal(node.direct.length, 0);
 });
 
 test('an expired or silent request stops being offered', async (t) => {

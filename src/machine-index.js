@@ -17,6 +17,7 @@ import { mergeShareDeclarations, preferredShare } from './share-precedence.js';
 import { installNativeWebRTC } from './webrtc.js';
 
 export const INDEX_PROTOCOL = 'gitpigeon-index/1';
+export const EXPOSURE_ROTATION = 'open-pairing-offer-2026-09';
 export const INDEX_NETWORK_ID = 'gitpigeon-index-v1';
 export const INDEX_HEARTBEAT_MS = 10_000;
 // A publisher heartbeat is 10s, so a 12s window left two seconds for a record
@@ -158,6 +159,12 @@ function validateState(value) {
     // let the next `git pigeon init` retry without rotating the capability.
     pairingComplete: value.version >= 3 && value.pairingComplete === true,
     pairingMode: value.version === 1 ? 'legacy' : value.pairingMode === 'secure' ? 'secure' : 'legacy',
+    // Which forced rotations this secret has been through (see
+    // rotateForExposureOnce). Dropped here, the rotation would run again on
+    // every start and no pairing would survive a restart.
+    ...(typeof value.exposureRotation === 'string' && value.exposureRotation.length <= 80
+      ? { exposureRotation: value.exposureRotation }
+      : {}),
     entries,
     // Stated removals survive restarts, or a browser cache outlives them.
     removed: Array.isArray(value.removed)
@@ -205,6 +212,8 @@ function freshState() {
     publisherId: randomBytes(16).toString('hex'),
     pairingComplete: false,
     pairingMode: 'secure',
+    // Minted by a build that never hands it to strangers: nothing to rotate.
+    exposureRotation: EXPOSURE_ROTATION,
     entries: [],
   };
 }
@@ -792,6 +801,28 @@ export async function rotateMachineIndexSecret({ root = machineIndexRoot() } = {
     value.pairingComplete = false;
     await writeState(root, value);
     return value;
+  });
+}
+
+/**
+ * Every index secret minted before 0.13.145 must be presumed known to
+ * strangers: until then a watcher sent it to any browser that asked on the
+ * public approval mesh. A holder keeps every repository, the control channel
+ * and a terminal on every machine for as long as the secret lives, so the
+ * first start of a fixed build replaces it, once. Every browser pairs again
+ * and every machine rejoins — through the phrase, this time.
+ */
+export async function rotateForExposureOnce({ root = machineIndexRoot() } = {}) {
+  return await withLock(root, async () => {
+    let value;
+    try { value = await readState(root); } catch { return false; }
+    if (!value?.secret || value.exposureRotation === EXPOSURE_ROTATION) return false;
+    value.secret = randomBytes(32).toString('base64url');
+    value.pairingMode = 'secure';
+    value.pairingComplete = false;
+    value.exposureRotation = EXPOSURE_ROTATION;
+    await writeState(root, value);
+    return true;
   });
 }
 

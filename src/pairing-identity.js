@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -70,11 +70,83 @@ export const PAIRING_WINDOW_MS = 10 * 60_000;
  * dashboard received the index secret of every watcher online: every
  * repository on the index, and a terminal on every machine.
  */
+const PHRASE_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789';
+const PHRASE_GROUPS = 3;
+const PHRASE_GROUP_LENGTH = 4;
+export const PAIRING_MAX_FAILURES = 5;
+
+/**
+ * Twelve characters from a thirty-symbol alphabet: a little under sixty
+ * bits, shown only in this machine's terminal, good for one window and one
+ * pairing. Short enough to read to someone; far too long to guess in five
+ * tries or to search before the window shuts.
+ */
+export function createPairingPhrase() {
+  const symbols = [];
+  while (symbols.length < PHRASE_GROUPS * PHRASE_GROUP_LENGTH) {
+    // Rejection sampling: 240 is the largest multiple of the alphabet size
+    // that fits a byte, so every symbol stays equally likely.
+    for (const value of randomBytes(32)) {
+      if (value < 240 && symbols.length < PHRASE_GROUPS * PHRASE_GROUP_LENGTH) {
+        symbols.push(PHRASE_ALPHABET[value % PHRASE_ALPHABET.length]);
+      }
+    }
+  }
+  return Array.from({ length: PHRASE_GROUPS }, (_, group) => (
+    symbols.slice(group * PHRASE_GROUP_LENGTH, (group + 1) * PHRASE_GROUP_LENGTH).join('')
+  )).join('-');
+}
+
+/** Typed by a person: case, spaces and dashes are not part of the secret. */
+export function normalizePairingPhrase(value) {
+  return String(value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+/**
+ * What a requester sends instead of the phrase: bound to its own request and
+ * to the key the answer will be sealed to, so a proof copied off the mesh is
+ * worth nothing to anyone else.
+ */
+export function pairingProof(phrase, { requestId, epub }) {
+  return createHmac('sha256', normalizePairingPhrase(phrase))
+    .update('gitpigeon-pairing-proof/1\0')
+    .update(String(requestId))
+    .update('\0')
+    .update(String(epub))
+    .digest('hex');
+}
+
 export async function openPairingWindow(root, { ms = PAIRING_WINDOW_MS, now = Date.now() } = {}) {
   await mkdir(root, { recursive: true });
   const until = new Date(now + ms).toISOString();
-  await writeFile(path.join(root, WINDOW_FILE), `${JSON.stringify({ until })}\n`, { mode: 0o600 });
-  return until;
+  const phrase = createPairingPhrase();
+  await writeFile(path.join(root, WINDOW_FILE), `${JSON.stringify({ until, phrase, failures: 0 })}\n`, { mode: 0o600 });
+  return { until, phrase };
+}
+
+/**
+ * Whether a request proves knowledge of this machine's open phrase. A wrong
+ * proof counts against the window; enough of them shut it, so the phrase
+ * cannot be searched online however fast requests arrive.
+ */
+export async function verifyPairingProof(root, { requestId, epub, proof }, now = Date.now()) {
+  const file = path.join(root, WINDOW_FILE);
+  let state;
+  try { state = JSON.parse(await readFile(file, 'utf8')); } catch { return false; }
+  const until = Date.parse(String(state?.until ?? ''));
+  if (!Number.isFinite(until) || until <= now || until - now > PAIRING_WINDOW_MS + 1_000) return false;
+  if (typeof state.phrase !== 'string' || normalizePairingPhrase(state.phrase).length < 12) return false;
+  if (!epub || !requestId || !/^[0-9a-f]{64}$/.test(String(proof ?? ''))) return false;
+  const expected = Buffer.from(pairingProof(state.phrase, { requestId, epub }), 'hex');
+  const given = Buffer.from(String(proof), 'hex');
+  if (given.length === expected.length && timingSafeEqual(given, expected)) return true;
+  const failures = (Number(state.failures) || 0) + 1;
+  if (failures >= PAIRING_MAX_FAILURES) {
+    await closePairingWindow(root).catch(() => {});
+  } else {
+    await writeFile(file, `${JSON.stringify({ ...state, failures })}\n`, { mode: 0o600 }).catch(() => {});
+  }
+  return false;
 }
 
 export async function closePairingWindow(root) {

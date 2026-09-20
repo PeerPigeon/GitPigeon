@@ -56,6 +56,7 @@ export function validateMeshPairingRequest(value, now = Date.now()) {
     ...(typeof value.devicePublicKey === 'string' && value.devicePublicKey.length > 0 && value.devicePublicKey.length <= 200
       ? { devicePublicKey: value.devicePublicKey }
       : {}),
+    ...(/^[0-9a-f]{64}$/.test(String(value.proof ?? '')) ? { proof: String(value.proof) } : {}),
     ...(/^[0-9a-f]{64}$/.test(String(value.indexFingerprint ?? ''))
       ? { indexFingerprint: String(value.indexFingerprint) }
       : {}),
@@ -477,10 +478,13 @@ export async function startDeviceApprovalResponder({
           capability,
         }).catch(() => null)
         : null;
+      // Sealed or nothing. The direct copy went to whichever peer the request
+      // ARRIVED from — for a gossiped broadcast that is a relaying hop, and
+      // for a replayed one it is whoever replayed it. The capability goes
+      // only to the key the request named, which is the key its proof binds.
+      if (!sealed) throw new Error('That pairing request named no key to seal the capability to');
+      void grant;
       const send = async () => {
-        await node.sendEncryptedDirect(record.peerId, grant).catch((error) => {
-          logger.debug?.(`Direct grant: ${error?.message ?? error}`);
-        });
         if (sealed) {
           try {
             node.broadcast({

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -487,4 +487,35 @@ test('a watcher that comes up on a newer build asks the fleet to check, once', a
   // …and a downgrade is not news.
   assert.equal(await run('0.13.140', 5_000), 0);
   assert.equal(records.size, 0);
+});
+
+test('a secret minted before the fix is replaced once, and only once', async (t) => {
+  const { EXPOSURE_ROTATION, loadMachineIndex, rotateForExposureOnce } = await import('../src/machine-index.js');
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-exposure-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  // A new index is minted by a build that never hands it to strangers.
+  const fresh = await loadMachineIndex({ root });
+  assert.equal(await rotateForExposureOnce({ root }), false);
+  assert.equal((await loadMachineIndex({ root })).secret, fresh.secret);
+
+  // An index from before the fix carries no marker. Find the state file and
+  // strip it, as every existing installation's file is.
+  const { readdir } = await import('node:fs/promises');
+  const stateFile = path.join(root, (await readdir(root)).find((name) => name === 'index.json'));
+  const old = JSON.parse(await readFile(stateFile, 'utf8'));
+  delete old.exposureRotation;
+  old.pairingComplete = true;
+  await writeFile(stateFile, JSON.stringify(old));
+
+  assert.equal(await rotateForExposureOnce({ root }), true);
+  const rotated = await loadMachineIndex({ root });
+  assert.notEqual(rotated.secret, fresh.secret, 'the exposed secret is gone');
+  assert.equal(rotated.indexId, fresh.indexId, 'the index keeps its identity');
+  assert.equal(rotated.pairingComplete, false, 'everything pairs again');
+  assert.equal(rotated.exposureRotation, EXPOSURE_ROTATION);
+
+  // The marker survives the state validator, or every restart would unpair.
+  assert.equal(await rotateForExposureOnce({ root }), false);
+  assert.equal((await loadMachineIndex({ root })).secret, rotated.secret);
 });

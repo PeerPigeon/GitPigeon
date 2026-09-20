@@ -41,6 +41,7 @@ import {
   markMachinePigeonsStopped,
   openDashboard,
   registerMachinePigeon,
+  rotateForExposureOnce,
   tombstoneMachinePigeon,
   unregisterMachinePigeon,
 } from './machine-index.js';
@@ -51,7 +52,7 @@ import {
   validateNativeClonePayload,
 } from './device-grants.js';
 import { startDeviceApprovalResponder } from './device-approval-mesh.js';
-import { PAIRING_WINDOW_MS, closePairingWindow, loadPairingKeyPair, localPairingCode, openPairingWindow, pairingWindowOpen } from './pairing-identity.js';
+import { PAIRING_WINDOW_MS, closePairingWindow, loadPairingKeyPair, localPairingCode, openPairingWindow, pairingWindowOpen, verifyPairingProof } from './pairing-identity.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
 import { ensureServiceWatchdog, inspectCommandOnPath, installNativeIntegration, refreshNativeCommandShim, removeServiceWatchdog } from './native-install.js';
 import { ControlServer } from './control-server.js';
@@ -855,6 +856,14 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
   const adopt = async (capability) => {
     try {
       if (!capability?.index?.indexId) return;
+      // Anyone on the approval mesh can SEND a grant: this machine's offer id
+      // is in its public announcement. Taking one moved the machine into an
+      // index of the sender's choosing, terminal and all. It joins an index
+      // only while someone at this machine has opened a pairing window.
+      if (!await pairingWindowOpen(root)) {
+        log.info?.('Ignored an index offered over the mesh: pairing is closed on this machine. Run `git pigeon pair` here first.');
+        return;
+      }
       const current = await loadMachineIndex({ root });
       // Same index AND same secret is the only nothing-to-do case. Comparing
       // the id alone made a machine left behind by a secret rotation drop the
@@ -863,6 +872,7 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
       if (current.indexId === capability.index.indexId
         && current.secret === capability.index.secret) return;
       await adoptMachineIndexCapability(capability.index, { root });
+      await closePairingWindow(root).catch(() => {});
       log.info?.(`Joined GitPigeon index ${String(capability.index.indexId).slice(0, 10)}; restarting`);
       // The restart is NOT this process's job. Stopping ourselves and then
       // spawning our successor from inside the dying process raced our own
@@ -923,7 +933,17 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
     const identity = await loadOrCreateNativeDeviceIdentity({ root });
     for (const request of waiting) {
       if (offered.has(request.requestId)) continue;
+      // An open window is not enough: within it the first browser to ask
+      // used to win. The request must prove it knows the phrase this
+      // machine's terminal is showing, bound to the key the capability will
+      // be sealed to. A request without a proof is simply not for us — it is
+      // left unmarked, and costs the window nothing.
+      if (!request.proof || !request.epub) continue;
       offered.add(request.requestId);
+      if (!await verifyPairingProof(root, request)) {
+        log.info?.(`${request.deviceName} offered a wrong pairing phrase.`);
+        continue;
+      }
       const code = await responder.codeFor(request.requestId).catch(() => null);
       if (!code) continue;
       log.info?.(`${request.deviceName} is asking to pair. Approve it there if it shows ${code}.`);
@@ -971,6 +991,10 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       return null;
     }
   })();
+  // Before anything joins a room with it.
+  if (await rotateForExposureOnce({ root }).catch(() => false)) {
+    log.warn('SECURITY: this machine\'s index secret was replaced. Builds before 0.13.145 sent it to any browser that asked, so it must be presumed known. Every browser and machine has to pair again: run `git pigeon pair` here and enter the phrase it shows at gitpigeon.dev.');
+  }
   const machineIndexId = (await loadMachineIndex({ root })).publisherId;
   let resolveStop;
   const stopped = new Promise((resolve) => { resolveStop = resolve; });
@@ -1277,6 +1301,13 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       // citizen of this machine's mesh: cloned, registered, synced, served.
       onShareClone: async (opened, { reply }) => {
         try {
+          // A sealed request from anyone on the public mesh used to make
+          // this machine clone, register and serve a repository of the
+          // sender's choosing. Writing to this disk is for someone at it.
+          if (!await pairingWindowOpen(root)) {
+            await reply({ requestId: String(opened?.requestId ?? ''), ok: false, error: 'Pairing is closed on this machine. Run `git pigeon pair` there first.' });
+            return;
+          }
           const requestId = String(opened?.requestId ?? '');
           const parsed = parseShareUrl(String(opened?.shareUrl ?? ''));
           const entries = await listMachinePigeons({ root, activeOnly: false });
@@ -1741,11 +1772,12 @@ async function commandEnroll(args, verbose) {
  */
 async function reportPairingCode(root = machineIndexRoot()) {
   const code = await localPairingCode(root);
-  await openPairingWindow(root);
+  const { phrase } = await openPairingWindow(root);
   console.log(`\n  This machine's pairing code: ${code}`);
-  console.log('  Approve this machine in your browser only if it shows the same code.');
-  console.log(`  This machine accepts one browser for the next ${Math.round(PAIRING_WINDOW_MS / 60_000)} minutes, then stops offering.`);
-  return code;
+  console.log(`  Pairing phrase:              ${phrase}`);
+  console.log('  Enter the phrase at gitpigeon.dev; approve this machine only if it shows the same code.');
+  console.log(`  The phrase works once, for the next ${Math.round(PAIRING_WINDOW_MS / 60_000)} minutes. Never send it with a link to this machine.`);
+  return { code, phrase };
 }
 
 async function commandInstall(args, verbose) {
@@ -1788,10 +1820,13 @@ async function commandInstall(args, verbose) {
     // to wait for. It used to hold the terminal while it announced itself.
     await startWatchService({ root, verbose });
     console.log('\nThis machine is ready to pair and will keep offering.');
-    await reportPairingCode(root);
+    const { phrase } = await reportPairingCode(root);
     const dashboard = process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/';
     console.log(`\nApprove it at ${dashboard} once the code above matches.`);
-    openDashboard(dashboard);
+    // Opened HERE, so the phrase rides along in the fragment: it never reaches
+    // the server, the page strips it from the address bar at once, and the
+    // person at this machine has nothing to type.
+    openDashboard(`${dashboard}#pair=${encodeURIComponent(phrase)}`);
     return;
   }
   await commandEnroll([], verbose);
@@ -1924,6 +1959,12 @@ async function commandPair(args, verbose) {
   const identity = await loadOrCreateNativeDeviceIdentity({ root });
 
   console.log(`This machine's pairing code: ${await localPairingCode(root)}`);
+  // While this command runs, the machine may also be JOINED to an index by a
+  // browser that proves the phrase; outside it, nothing offered over the
+  // mesh is taken.
+  const { phrase } = await openPairingWindow(root);
+  console.log(`Pairing phrase:              ${phrase}`);
+  console.log(`The phrase works once, for the next ${Math.round(PAIRING_WINDOW_MS / 60_000)} minutes.`);
   console.log('Looking for a device or browser asking to pair…');
 
   // Both routes run at once: local discovery for anything on this network, and
@@ -1945,10 +1986,24 @@ async function commandPair(args, verbose) {
   responder.node.mesh.on('signaling:connected', () => { connectedAt ??= Date.now(); });
   let announced = new Set();
   let explained = false;
+  // Which requests have proven the phrase, decided once each: a wrong proof
+  // counts against the window, and must not be counted again every half second.
+  const proven = new Map();
   try {
     while (true) {
       if (linkAccepted) return;
-      const pending = responder.pending();
+      // Only a browser that proves the phrase on this screen is listed. Every
+      // browser calls itself "Chrome"; without this the person choosing had
+      // no way to tell their own tab from anyone else's asking at that moment.
+      const pending = [];
+      for (const request of responder.pending()) {
+        if (request.requesterKind === 'browser') {
+          if (!request.proof || !request.epub) continue;
+          if (!proven.has(request.requestId)) proven.set(request.requestId, await verifyPairingProof(root, request));
+          if (!proven.get(request.requestId)) continue;
+        }
+        pending.push(request);
+      }
       if (connectedAt && !announcedConnection) {
         announcedConnection = true;
         console.log('Connected to the mesh. Press Ctrl+C to stop.');
