@@ -535,3 +535,36 @@ test('overlapping filesystem events for one file never double it', async (t) => 
   assert.equal(applyOutbound(), `${content}settled\n`);
   assert.equal(await readFile(file, 'utf8'), `${content}settled\n`);
 });
+
+test('a whole unrelated document arriving for a file this watcher already holds is never merged into it', async (t) => {
+  const content = 'node_modules/\ndist/\n.env\n';
+  const { server, node, documentId, file, applyOutbound } = await openSeededDocument(t, { name: 'foreign-whole', content });
+  const repositoryId = 'a'.repeat(64);
+  const frame = (kind, payload) => ({
+    documentId, path: 'notes.md', revision: 'refs/heads/main', baseHash: 'c'.repeat(64),
+    messageId: randomBytes(16).toString('hex'), kind, part: 0, total: 1,
+    payload: Buffer.from(payload).toString('base64'),
+  });
+  // Another device seeded the SAME file from its own copy — one line ahead —
+  // after a restart. Its history shares nothing with ours. Applied blind, the
+  // two unioned: the file written back twice over, and once more on every
+  // restart after that (64 copies of a .gitignore after six).
+  const other = new Y.Doc({ gc: false });
+  other.getText('content').insert(0, `${content}coverage/\n`);
+  const whole = Y.encodeStateAsUpdate(other);
+  node.receive('other-watcher', repositoryId, REALTIME_CHANNEL, frame('sync-response', whole));
+  node.receive('other-watcher', repositoryId, REALTIME_CHANNEL, frame('update', whole));
+  await settle();
+  assert.equal(server.documents.get(documentId).text.toString(), content);
+  assert.equal(await readFile(file, 'utf8'), content);
+  assert.equal(applyOutbound(), content);
+
+  // Edits that build on the history we hold still land.
+  const peer = new Y.Doc({ gc: false });
+  Y.applyUpdate(peer, Y.encodeStateAsUpdate(server.documents.get(documentId).doc));
+  const before = Y.encodeStateVector(peer);
+  peer.getText('content').insert(peer.getText('content').length, 'coverage/\n');
+  node.receive('browser', repositoryId, REALTIME_CHANNEL, frame('update', Y.encodeStateAsUpdate(peer, before)));
+  await settle();
+  assert.equal(await readFile(file, 'utf8'), `${content}coverage/\n`);
+});

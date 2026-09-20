@@ -57,6 +57,30 @@ const SEED_ELECTED_FALLBACK_MS = 6_000;
 // and are taken as an edit, never overwritten by the live document.
 const ECHO_WINDOW_MS = 15_000;
 
+/**
+ * True when a payload is a self-contained document sharing no Yjs client with
+ * the one held. An ordinary edit references structs we hold (it shares a
+ * client, or its inserts hang off ours and stay pending in a scratch copy);
+ * only a separately seeded document is both unrelated and whole.
+ */
+function foreignWholeDocument(state, payload) {
+  if (!state.seeded || state.text.length === 0) return false;
+  let remote;
+  try { remote = Y.decodeStateVector(Y.encodeStateVectorFromUpdate(payload)); } catch { return false; }
+  if (remote.size === 0) return false;
+  const own = Y.decodeStateVector(Y.encodeStateVector(state.doc));
+  for (const client of remote.keys()) if (own.has(client)) return false;
+  const scratch = new Y.Doc();
+  try {
+    Y.applyUpdate(scratch, payload);
+    return scratch.getText('content').length > 0;
+  } catch {
+    return false;
+  } finally {
+    scratch.destroy();
+  }
+}
+
 export class RealtimeWorkspaceServer {
   constructor({ node, repository, secret, repositoryId, deviceId = null, logger = {}, onFileWritten = null, seedFallbackMs = SEED_FALLBACK_MS, seedElectedFallbackMs = SEED_ELECTED_FALLBACK_MS, seedRetryMs = SEED_RETRY_MS, echoWindowMs = ECHO_WINDOW_MS }) {
     this.node = node;
@@ -656,6 +680,21 @@ export class RealtimeWorkspaceServer {
     // update to everyone and fire a full-state response back at the sender
     // after every keystroke batch: gossip already delivers broadcasts to the
     // room, so all of it was amplification that raced the next keystroke.
+    // A whole document that shares no history with ours is not an edit to
+    // it. After a restart a watcher can seed a file's document from its own
+    // copy while another device holds one seeded from different bytes; the
+    // two share no Yjs client, and applying one to the other UNIONS them —
+    // the file written back with its content twice, and once more on every
+    // restart after that. Ours stands: nothing is lost by refusing (the
+    // sender keeps its copy, and the file sync carries real differences),
+    // whereas a union is written to disk and handed to every machine.
+    if (foreignWholeDocument(state, frame.payload)) {
+      if (!state.foreignNoticeAt || Date.now() - state.foreignNoticeAt > 60_000) {
+        state.foreignNoticeAt = Date.now();
+        this.logger.info?.(`${state.path}: ignored an unrelated live document from ${String(peerId).slice(0, 12)} instead of merging it into this one`);
+      }
+      return;
+    }
     const hadContent = state.text.length > 0;
     Y.applyUpdate(state.doc, frame.payload, 'remote');
     if (hadContent && state.text.length === 0) {
