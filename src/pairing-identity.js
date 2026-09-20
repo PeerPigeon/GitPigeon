@@ -54,6 +54,43 @@ export async function loadPairingKeyPair(root) {
   return created;
 }
 
+const WINDOW_FILE = 'pairing-window.json';
+export const PAIRING_WINDOW_MS = 10 * 60_000;
+
+/**
+ * The background service hands this machine's index capability to a browser
+ * ONLY while a pairing window is open, and a window is opened only by someone
+ * at this machine running a pairing command.
+ *
+ * It used to offer to every browser that announced itself, always. The
+ * approval mesh is one public network, the announcement is a plain broadcast
+ * anyone can make, and the six digits are derived from a public key — so the
+ * "approve only if the code matches" check ran in the REQUESTER's browser,
+ * after the capability had already arrived there. Anyone who opened the
+ * dashboard received the index secret of every watcher online: every
+ * repository on the index, and a terminal on every machine.
+ */
+export async function openPairingWindow(root, { ms = PAIRING_WINDOW_MS, now = Date.now() } = {}) {
+  await mkdir(root, { recursive: true });
+  const until = new Date(now + ms).toISOString();
+  await writeFile(path.join(root, WINDOW_FILE), `${JSON.stringify({ until })}\n`, { mode: 0o600 });
+  return until;
+}
+
+export async function closePairingWindow(root) {
+  const { rm } = await import('node:fs/promises');
+  await rm(path.join(root, WINDOW_FILE), { force: true });
+}
+
+export async function pairingWindowOpen(root, now = Date.now()) {
+  try {
+    const until = Date.parse(String(JSON.parse(await readFile(path.join(root, WINDOW_FILE), 'utf8')).until ?? ''));
+    return Number.isFinite(until) && until > now && until - now <= PAIRING_WINDOW_MS + 1_000;
+  } catch {
+    return false;
+  }
+}
+
 /** The code this machine shows, without touching the network. */
 export async function localPairingCode(root) {
   return pairingCode((await loadPairingKeyPair(root)).pub);

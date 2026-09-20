@@ -51,7 +51,7 @@ import {
   validateNativeClonePayload,
 } from './device-grants.js';
 import { startDeviceApprovalResponder } from './device-approval-mesh.js';
-import { loadPairingKeyPair, localPairingCode } from './pairing-identity.js';
+import { PAIRING_WINDOW_MS, closePairingWindow, loadPairingKeyPair, localPairingCode, openPairingWindow, pairingWindowOpen } from './pairing-identity.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
 import { ensureServiceWatchdog, inspectCommandOnPath, installNativeIntegration, refreshNativeCommandShim, removeServiceWatchdog } from './native-install.js';
 import { ControlServer } from './control-server.js';
@@ -897,6 +897,7 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
   });
   const offered = new Set();
   let closed = false;
+  let closedNoticeAt = 0;
 
   const tick = async () => {
     if (closed) return;
@@ -906,12 +907,19 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
     const waiting = responder.pending()
       .filter((request) => request.requesterKind === 'browser' && !offered.has(request.requestId));
     if (waiting.length === 0) return;
+    // The capability leaves this machine only while someone AT this machine
+    // has opened a pairing window (see openPairingWindow). A browser asking
+    // is not a reason to answer: asking is a public broadcast anyone can
+    // make, and the code it is compared against is public too. Requests are
+    // left unmarked, so one still waiting when a window opens is answered.
+    if (!await pairingWindowOpen(root)) {
+      if (!closedNoticeAt || Date.now() - closedNoticeAt > 10 * 60_000) {
+        closedNoticeAt = Date.now();
+        log.info?.(`${waiting[0].deviceName} is asking to pair, but pairing is closed on this machine. Run \`git pigeon pair\` here to let a browser in.`);
+      }
+      return;
+    }
     const index = await loadMachineIndex({ root });
-    // Every watcher offers to every browser that is not yet approved. Gating
-    // this on a stored "already paired" flag was worse than useless: the flag
-    // could be set while no browser held anything, and the machine would then
-    // refuse to pair with any browser ever again. The person confirming the
-    // code in the browser is the check that matters.
     const identity = await loadOrCreateNativeDeviceIdentity({ root });
     for (const request of waiting) {
       if (offered.has(request.requestId)) continue;
@@ -926,6 +934,8 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
         repositories: [],
       });
       if (!confirmed) continue;
+      // One window, one browser: the door shuts behind whoever it was for.
+      await closePairingWindow(root).catch(() => {});
       await completeDashboardPairing(index, { root }).catch((error) => log.debug?.(error.message));
       log.info?.(`Paired ${request.deviceName}.`);
     }
@@ -1731,8 +1741,10 @@ async function commandEnroll(args, verbose) {
  */
 async function reportPairingCode(root = machineIndexRoot()) {
   const code = await localPairingCode(root);
+  await openPairingWindow(root);
   console.log(`\n  This machine's pairing code: ${code}`);
   console.log('  Approve this machine in your browser only if it shows the same code.');
+  console.log(`  This machine accepts one browser for the next ${Math.round(PAIRING_WINDOW_MS / 60_000)} minutes, then stops offering.`);
   return code;
 }
 
