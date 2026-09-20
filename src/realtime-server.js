@@ -248,7 +248,22 @@ export class RealtimeWorkspaceServer {
     }
   }
 
-  async filesystemChanged(input) {
+  /**
+   * One filesystem event at a time. Events for one file arrive in bursts
+   * (an editor truncates then writes; a cloud-synced folder watched by
+   * several machines delivers every machine's write), and each handler
+   * spans several awaits. Two running at once read the file and the
+   * baseline at different moments: the second saw the baseline the first
+   * had cleared for its write, patched against nothing, and put a second
+   * copy of the whole file into the document.
+   */
+  filesystemChanged(input) {
+    const run = (this.filesystemQueue ?? Promise.resolve()).then(() => this.#filesystemChanged(input));
+    this.filesystemQueue = run.catch(() => {});
+    return run;
+  }
+
+  async #filesystemChanged(input) {
     let file;
     try { file = this.liveWorkspace.normalize(input); } catch { return; }
     // The clone itself is gone (rm -rf of the folder while this watcher
@@ -320,7 +335,12 @@ export class RealtimeWorkspaceServer {
       // "delete whatever the file lacks": it deleted what the person was
       // typing, as they typed it. A file-to-file patch touches only the span
       // the external writer actually changed.
-      const base = state.lastWritten ?? '';
+      // An unknown baseline (cleared around a write, and left cleared by a
+      // write that failed) is NOT an empty file. Against '' the patch is the
+      // entire file, inserted into a document that already holds it: the
+      // file doubled, on disk and on every machine. The document is the
+      // closest known state of the file; diff against that.
+      const base = state.lastWritten ?? current;
       let prefix = 0;
       const shortest = Math.min(base.length, content.length);
       while (prefix < shortest && base[prefix] === content[prefix]) prefix += 1;

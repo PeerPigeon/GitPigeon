@@ -493,3 +493,45 @@ test('a live document under node_modules or dist is never opened, so it is never
   await assert.rejects(stat(path.join(root, 'node_modules')), { code: 'ENOENT' });
   await assert.rejects(stat(path.join(root, 'packages')), { code: 'ENOENT' });
 });
+
+test('an unknown file baseline never turns an external edit into a second copy of the whole file', async (t) => {
+  const content = '# test\n\nA GitPigeon test repository.\n';
+  const { server, documentId, file, applyOutbound } = await openSeededDocument(t, { name: 'no-baseline', content });
+  // The baseline is cleared around every write and stays cleared if the
+  // write fails. Diffing the file against "nothing" made the whole file the
+  // patch: inserted at the top of a document that already held it, written
+  // back to disk doubled, and broadcast to every machine.
+  server.documents.get(documentId).lastWritten = null;
+  await writeFile(file, `${content}one more line\n`);
+  await server.filesystemChanged('notes.md');
+  await settle();
+  assert.equal(applyOutbound(), `${content}one more line\n`);
+  assert.equal(await readFile(file, 'utf8'), `${content}one more line\n`);
+});
+
+test('overlapping filesystem events for one file never double it', async (t) => {
+  const content = '# test\n\nA GitPigeon test repository.\n';
+  const { server, file, applyOutbound } = await openSeededDocument(t, { name: 'overlap', content });
+  // A cloud-synced folder watched by several machines delivers bursts of
+  // events for one file, each racing the write the last one started.
+  const pending = [];
+  for (let round = 1; round <= 12; round += 1) {
+    await writeFile(file, `${content}${'edit\n'.repeat(round)}`);
+    pending.push(server.filesystemChanged('notes.md'));
+    pending.push(server.filesystemChanged('notes.md'));
+  }
+  await Promise.all(pending);
+  await settle();
+  // Writes racing the watcher's own write can lose to it (last writer wins);
+  // what must never happen is a second copy, or a document that disagrees
+  // with the file it is the live view of.
+  const raced = applyOutbound();
+  assert.equal(raced.split('# test').length - 1, 1, 'the heading appears once');
+  assert.equal(raced, await readFile(file, 'utf8'));
+  // Once the burst is over, an edit lands exactly.
+  await writeFile(file, `${content}settled\n`);
+  await server.filesystemChanged('notes.md');
+  await settle();
+  assert.equal(applyOutbound(), `${content}settled\n`);
+  assert.equal(await readFile(file, 'utf8'), `${content}settled\n`);
+});
