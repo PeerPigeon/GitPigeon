@@ -112,3 +112,29 @@ test('the watcher answers with its own proof of the phrase, distinct from the br
   assert.notEqual(answer, pairingAnswer(phrase, { ...request, epub: 'someone-else' }));
   assert.equal(await pairingAnswerFor(root, request, now + PAIRING_WINDOW_MS + 1), null);
 });
+
+test('a machine joins an index only when the grant proves its phrase; each statement has its own label', async (t) => {
+  const { pairingMac, pairingMacFor, verifyPairingMac } = await import('../src/pairing-identity.js');
+  const root = await scratch(t);
+  const now = 1_800_000_000_000;
+  const offer = { requestId: 'f'.repeat(32), epub: 'watcher-epub' };
+  assert.equal(await pairingMacFor(root, 'announce', offer, now), null, 'no window: nothing to announce with');
+  const { phrase } = await openPairingWindow(root, { now });
+
+  const tag = await pairingMacFor(root, 'announce', offer, now + 1);
+  assert.equal(tag, pairingMac('announce', phrase, offer));
+  const grant = pairingMac('grant', phrase, offer);
+  assert.equal(await verifyPairingMac(root, 'grant', { ...offer, proof: grant }, now + 2), true);
+  // The public announcement tag is not a grant proof: seeing a machine
+  // announce itself does not let anyone hand it an index.
+  assert.equal(await verifyPairingMac(root, 'grant', { ...offer, proof: tag }, now + 3), false);
+  assert.equal(await verifyPairingMac(root, 'grant', { ...offer, proof: pairingProof(phrase, offer) }, now + 4), false);
+  assert.equal(await verifyPairingMac(root, 'grant', { ...offer }, now + 5), false);
+  assert.equal(new Set(['proof', 'answer', 'announce', 'grant'].map((purpose) => pairingMac(purpose, phrase, offer))).size, 4);
+
+  const source = await readFile(new URL('../src/cli.js', import.meta.url), 'utf8');
+  const adopt = source.slice(source.indexOf('const adopt = async'), source.indexOf('const responder ='));
+  const proofAt = adopt.indexOf("verifyPairingMac(root, 'grant'");
+  assert.ok(proofAt !== -1 && proofAt < adopt.indexOf('adoptMachineIndexCapability('), 'the grant proof is checked before the machine joins anything');
+  assert.match(source, /offerAllowed: \(\) => pairingWindowOpen\(root\)/);
+});

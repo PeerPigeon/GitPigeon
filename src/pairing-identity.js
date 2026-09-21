@@ -117,6 +117,57 @@ export function pairingProof(phrase, { requestId, epub }) {
 }
 
 /**
+ * One phrase, several statements, each under its own label so none can be
+ * replayed as another:
+ *   proof    — a browser asking this machine for its index;
+ *   answer   — this machine answering that browser;
+ *   announce — this machine saying "I am the one showing that phrase", so a
+ *              dashboard lists it ONLY for whoever typed the phrase;
+ *   grant    — a dashboard handing this machine an index to join.
+ */
+export function pairingMac(purpose, phrase, { requestId, epub }) {
+  return createHmac('sha256', normalizePairingPhrase(phrase))
+    .update(`gitpigeon-pairing-${purpose}/1\0`)
+    .update(String(requestId))
+    .update('\0')
+    .update(String(epub))
+    .digest('hex');
+}
+
+/** This machine's statement for a purpose, from the open window; null when shut. */
+export async function pairingMacFor(root, purpose, request, now = Date.now()) {
+  try {
+    const state = JSON.parse(await readFile(path.join(root, WINDOW_FILE), 'utf8'));
+    const until = Date.parse(String(state?.until ?? ''));
+    if (!Number.isFinite(until) || until <= now || typeof state.phrase !== 'string') return null;
+    return pairingMac(purpose, state.phrase, request);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a statement made TO this machine proves the open phrase. Wrong
+ * ones count against the window exactly as wrong browser proofs do.
+ */
+export async function verifyPairingMac(root, purpose, { requestId, epub, proof }, now = Date.now()) {
+  const file = path.join(root, WINDOW_FILE);
+  let state;
+  try { state = JSON.parse(await readFile(file, 'utf8')); } catch { return false; }
+  const until = Date.parse(String(state?.until ?? ''));
+  if (!Number.isFinite(until) || until <= now || until - now > PAIRING_WINDOW_MS + 1_000) return false;
+  if (typeof state.phrase !== 'string' || normalizePairingPhrase(state.phrase).length < 12) return false;
+  if (!epub || !requestId || !/^[0-9a-f]{64}$/.test(String(proof ?? ''))) return false;
+  const expected = Buffer.from(pairingMac(purpose, state.phrase, { requestId, epub }), 'hex');
+  const given = Buffer.from(String(proof), 'hex');
+  if (given.length === expected.length && timingSafeEqual(given, expected)) return true;
+  const failures = (Number(state.failures) || 0) + 1;
+  if (failures >= PAIRING_MAX_FAILURES) await closePairingWindow(root).catch(() => {});
+  else await writeFile(file, `${JSON.stringify({ ...state, failures })}\n`, { mode: 0o600 }).catch(() => {});
+  return false;
+}
+
+/**
  * The watcher's half of the handshake. A browser that proved the phrase is
  * answered with proof that THIS machine knows it too — so the browser can
  * take the answer without asking anyone to compare digits, and an answer

@@ -287,3 +287,38 @@ test('a machine announces which index it already belongs to', async (t) => {
     deviceName: 'New machine',
   })).indexFingerprint, undefined);
 });
+
+test('a watcher says nothing on the public mesh unless it is being paired, and then only with its phrase tag', async (t) => {
+  let node;
+  let open = false;
+  const responder = await startDeviceApprovalResponder({
+    nodeFactory: (options) => { node = new FakeApprovalNode(options); return node; },
+    offerDeviceName: 'Quiet-Mac.local',
+    keyPair: { pub: 'quiet-public-key', epub: 'quiet-epub' },
+    offerAllowed: async () => open,
+    offerTag: async ({ requestId, epub }) => `tag:${requestId}:${epub}`.padEnd(64, '0'),
+  });
+  t.after(() => responder.close());
+  await settle();
+  // Every paired dashboard in the world used to show this machine's hostname
+  // with an Authorize button, every five seconds, forever.
+  assert.equal(node.broadcasts.filter((frame) => frame?.kind === 'request').length, 0, 'silent while pairing is closed');
+
+  // A peer connecting is when it would have announced; still nothing.
+  node.emit('peerConnected');
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(node.broadcasts.filter((frame) => frame?.kind === 'request').length, 0);
+
+  open = true;
+  node.emit('peerConnected');
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  const announced = node.broadcasts.filter((frame) => frame?.kind === 'request');
+  assert.equal(announced.length, 1, 'it speaks once someone opens its pairing window');
+  assert.equal(announced[0].deviceName, 'Quiet-Mac.local');
+  assert.match(String(announced[0].announceTag ?? ''), /^tag:/, 'a dashboard can recognise it only with the phrase');
+
+  open = false;
+  node.emit('peerConnected');
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(node.broadcasts.filter((frame) => frame?.kind === 'request').length, 1, 'and falls silent again when it shuts');
+});

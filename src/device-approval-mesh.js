@@ -57,6 +57,7 @@ export function validateMeshPairingRequest(value, now = Date.now()) {
       ? { devicePublicKey: value.devicePublicKey }
       : {}),
     ...(/^[0-9a-f]{64}$/.test(String(value.proof ?? '')) ? { proof: String(value.proof) } : {}),
+    ...(/^[0-9a-f]{64}$/.test(String(value.announceTag ?? '')) ? { announceTag: String(value.announceTag) } : {}),
     ...(/^[0-9a-f]{64}$/.test(String(value.indexFingerprint ?? ''))
       ? { indexFingerprint: String(value.indexFingerprint) }
       : {}),
@@ -278,6 +279,11 @@ export async function startDeviceApprovalResponder({
   offerIndexId = null,
   offerIndexSecret = null,
   offerDiagnostics = null,
+  // Whether this machine may announce itself right now, and the tag that
+  // lets a dashboard recognise it as the one showing a given phrase. A
+  // machine with no reason to be found says nothing at all.
+  offerAllowed = null,
+  offerTag = null,
   onGrant = null,
   // Sealed terminal relay: frames for this machine arrive here when the
   // index room cannot carry them — the pairing mesh never depended on it.
@@ -310,7 +316,7 @@ export async function startDeviceApprovalResponder({
     // A browser approving this machine's own offer, handing it an index.
     if (value?.protocol === MESH_PAIRING_PROTOCOL && value.kind === 'grant') {
       if (!onGrant || !message.encrypted || value.requestId !== offerRequestId) return;
-      Promise.resolve(onGrant(value.capability))
+      Promise.resolve(onGrant(value.capability, { proof: value.proof, requestId: offerRequestId, epub: node.getKeyPair().epub }))
         .catch((error) => logger.debug?.(`Pairing grant: ${error.message}`));
       return;
     }
@@ -343,7 +349,7 @@ export async function startDeviceApprovalResponder({
     if (value?.protocol === MESH_PAIRING_PROTOCOL && value.kind === 'sealed-grant') {
       if (!onGrant || value.requestId !== offerRequestId || !value.cipher) return;
       openSealed(value.cipher, node)
-        .then((grant) => grant && onGrant(grant.capability))
+        .then((grant) => grant && onGrant(grant.capability, { proof: grant.proof, requestId: offerRequestId, epub: node.getKeyPair().epub }))
         .catch((error) => logger.debug?.(`Sealed pairing grant: ${error.message}`));
       return;
     }
@@ -351,7 +357,7 @@ export async function startDeviceApprovalResponder({
     // index it settled on, so a set of machines ends up together.
     if (value?.protocol === MESH_PAIRING_PROTOCOL && value.kind === 'adopt') {
       if (!onAdopt || !message.encrypted || !granted.has(String(message.fromPeerId))) return;
-      Promise.resolve(onAdopt(value.capability))
+      Promise.resolve(onAdopt(value.capability, { proof: value.proof, requestId: offerRequestId, epub: node.getKeyPair().epub }))
         .catch((error) => logger.debug?.(`Adopt request: ${error.message}`));
       return;
     }
@@ -392,19 +398,28 @@ export async function startDeviceApprovalResponder({
   });
   const announceOffer = () => {
     if (closed || !offerRequestId || !offerDeviceName) return;
-    try {
-      node.broadcast(createMeshPairingRequest({
-        requestId: offerRequestId,
-        deviceName: offerDeviceName,
-        indexId: offerIndexId,
-        indexSecret: offerIndexSecret,
-        epub: node.getKeyPair().epub,
-        devicePublicKey: node.getKeyPair().pub,
-        diagnostics: offerDiagnostics?.() ?? null,
-      }));
-    } catch (error) {
-      logger.debug?.(`Watcher offer: ${error.message}`);
-    }
+    (async () => {
+      // Every dashboard in the world showed every watcher's announcement as
+      // "a device asking to join" — its hostname, its build, a button to
+      // authorise it. A watcher is found only by someone it is being paired
+      // with: it speaks while its pairing window is open, and not otherwise.
+      if (offerAllowed && !await offerAllowed()) return;
+      const epub = node.getKeyPair().epub;
+      const announceTag = offerTag ? await offerTag({ requestId: offerRequestId, epub }) : null;
+      if (closed) return;
+      node.broadcast({
+        ...createMeshPairingRequest({
+          requestId: offerRequestId,
+          deviceName: offerDeviceName,
+          indexId: offerIndexId,
+          indexSecret: offerIndexSecret,
+          epub,
+          devicePublicKey: node.getKeyPair().pub,
+          diagnostics: offerDiagnostics?.() ?? null,
+        }),
+        ...(announceTag ? { announceTag } : {}),
+      });
+    })().catch((error) => logger.debug?.(`Watcher offer: ${error.message}`));
   };
   node.on('message', receive);
   node.on('peerConnected', announceOffer);

@@ -52,7 +52,7 @@ import {
   validateNativeClonePayload,
 } from './device-grants.js';
 import { startDeviceApprovalResponder } from './device-approval-mesh.js';
-import { PAIRING_WINDOW_MS, closePairingWindow, loadPairingKeyPair, localPairingCode, openPairingWindow, pairingAnswerFor, pairingWindowOpen, verifyPairingProof } from './pairing-identity.js';
+import { PAIRING_WINDOW_MS, closePairingWindow, loadPairingKeyPair, localPairingCode, openPairingWindow, pairingAnswerFor, pairingMacFor, pairingWindowOpen, verifyPairingMac, verifyPairingProof } from './pairing-identity.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
 import { ensureServiceWatchdog, inspectCommandOnPath, installNativeIntegration, refreshNativeCommandShim, removeServiceWatchdog } from './native-install.js';
 import { ControlServer } from './control-server.js';
@@ -853,7 +853,7 @@ async function openRepositorySession({ repository, config }, pollMs, log, servic
  */
 async function startPairingService(root, log, { indexDiagnostics = null, onTerminalRelay = null, onShareClone = null } = {}) {
   const keyPair = await loadPairingKeyPair(root);
-  const adopt = async (capability) => {
+  const adopt = async (capability, sender = {}) => {
     try {
       if (!capability?.index?.indexId) return;
       // Anyone on the approval mesh can SEND a grant: this machine's offer id
@@ -862,6 +862,14 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
       // only while someone at this machine has opened a pairing window.
       if (!await pairingWindowOpen(root)) {
         log.info?.('Ignored an index offered over the mesh: pairing is closed on this machine. Run `git pigeon pair` here first.');
+        return;
+      }
+      // And an open window is not consent to whoever sends first. The sender
+      // must prove the phrase this machine's terminal is showing: anyone can
+      // see this machine announce itself while the window is open, only the
+      // person reading its screen can say what it says.
+      if (!await verifyPairingMac(root, 'grant', { requestId: sender.requestId, epub: sender.epub, proof: sender.proof })) {
+        log.info?.('Ignored an index offered over the mesh: the sender did not prove this machine\'s pairing phrase.');
         return;
       }
       const current = await loadMachineIndex({ root });
@@ -898,6 +906,8 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
       return { offerIndexId: current?.indexId ?? null, offerIndexSecret: current?.secret ?? null };
     })(),
     offerDiagnostics: () => ({ build: GITPIGEON_VERSION, ...(indexDiagnostics?.() ?? {}) }),
+    offerAllowed: () => pairingWindowOpen(root),
+    offerTag: (request) => pairingMacFor(root, 'announce', request),
     onTerminalRelay,
     onShareClone,
     onGrant: adopt,
