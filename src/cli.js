@@ -52,7 +52,7 @@ import {
   validateNativeClonePayload,
 } from './device-grants.js';
 import { startDeviceApprovalResponder } from './device-approval-mesh.js';
-import { PAIRING_WINDOW_MS, closePairingWindow, loadPairingKeyPair, localPairingCode, openPairingWindow, pairingAnswerFor, pairingMacFor, pairingWindowOpen, verifyPairingMac, verifyPairingProof } from './pairing-identity.js';
+import { PAIRING_WINDOW_MS, closePairingWindow, loadPairingKeyPair, localPairingCode, openPairingPhrase, openPairingWindow, pairingAnswerFor, pairingMacFor, pairingNetworkId, pairingWindowOpen, verifyPairingMac, verifyPairingProof } from './pairing-identity.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
 import { ensureServiceWatchdog, inspectCommandOnPath, installNativeIntegration, refreshNativeCommandShim, removeServiceWatchdog } from './native-install.js';
 import { ControlServer } from './control-server.js';
@@ -892,38 +892,59 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
       log.error?.(new Error(`Could not adopt the offered index: ${error.message}`));
     }
   };
-  const responder = await startDeviceApprovalResponder({
+  let closed = false;
+  // The node on the network every installation shares carries NO pairing: it
+  // never announces this machine, never answers a browser, never takes an
+  // index. It is kept only for the sealed relay and share-clone requests.
+  const shared = await startDeviceApprovalResponder({
     logger: log,
     keyPair,
-    // Announce this machine for as long as the watcher runs, so a browser that
-    // has already paired with one machine still sees the next one. Same node as
-    // the responder: one peer per machine on the approval mesh.
-    offerDeviceName: deviceHostName(),
-    // So a browser that already took this machine in stops asking to approve
-    // it again every time it announces.
-    ...await (async () => {
-      const current = await loadMachineIndex({ root }).catch(() => null);
-      return { offerIndexId: current?.indexId ?? null, offerIndexSecret: current?.secret ?? null };
-    })(),
-    offerDiagnostics: () => ({ build: GITPIGEON_VERSION, ...(indexDiagnostics?.() ?? {}) }),
-    offerAllowed: () => pairingWindowOpen(root),
-    offerTag: (request) => pairingMacFor(root, 'announce', request),
     onTerminalRelay,
     onShareClone,
-    onGrant: adopt,
-    // A browser this machine offered itself to can ask it to join the index it
-    // settled on, which is how several machines end up together.
-    onAdopt: adopt,
   });
+  // Pairing happens on a network named by the one-time phrase, which exists
+  // only while a window is open and holds only the peers that were given the
+  // phrase. It is started when a window opens and torn down when it shuts.
+  let responder = null;
+  let responderPhrase = null;
+  const offerIndex = async () => {
+    const current = await loadMachineIndex({ root }).catch(() => null);
+    return { offerIndexId: current?.indexId ?? null, offerIndexSecret: current?.secret ?? null };
+  };
+  const followWindow = async () => {
+    const phrase = await openPairingPhrase(root);
+    if (phrase === responderPhrase) return;
+    const previous = responder;
+    responder = null;
+    responderPhrase = phrase;
+    if (previous) await previous.close().catch(() => {});
+    if (!phrase || closed) return;
+    const started = await startDeviceApprovalResponder({
+      networkId: pairingNetworkId(phrase),
+      logger: log,
+      keyPair,
+      offerDeviceName: deviceHostName(),
+      ...await offerIndex(),
+      offerDiagnostics: () => ({ build: GITPIGEON_VERSION, ...(indexDiagnostics?.() ?? {}) }),
+      offerAllowed: () => pairingWindowOpen(root),
+      offerTag: (request) => pairingMacFor(root, 'announce', request),
+      onGrant: adopt,
+      onAdopt: adopt,
+    });
+    if (closed || responderPhrase !== phrase) {
+      await started.close().catch(() => {});
+      return;
+    }
+    responder = started;
+    log.info?.('Pairing is open on this machine, on a network only its phrase names.');
+  };
   const offered = new Set();
-  let closed = false;
   let closedNoticeAt = 0;
 
   const tick = async () => {
     if (closed) return;
-    // Nothing to answer, nothing to load: this runs every second for the
-    // life of the service, and reading the index and identity files each
-    // time was a steady trickle of disk work on an idle machine.
+    await followWindow();
+    if (!responder) return;
     const waiting = responder.pending()
       .filter((request) => request.requesterKind === 'browser' && !offered.has(request.requestId));
     if (waiting.length === 0) return;
@@ -983,7 +1004,8 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
       if (closed) return;
       closed = true;
       clearInterval(timer);
-      await responder.close().catch(() => {});
+      await responder?.close().catch(() => {});
+      await shared.close().catch(() => {});
     },
   };
 }
@@ -1990,7 +2012,9 @@ async function commandPair(args, verbose) {
   console.log(openedHere
     ? `\nOpened ${dashboard} in this machine's browser; it pairs by itself.`
     : `\nOpen ${dashboard} and type the phrase above.`);
-  console.log(`To pair a browser on another device, open ${dashboard} there and type the phrase.`);
+  console.log('\nTo pair a browser on another device, open this one-time link there (or type the phrase):');
+  console.log(`  ${dashboard}#pair=${encodeURIComponent(phrase)}`);
+  console.log('It is yours alone: the link names a private network only this machine is on, for ten minutes.');
   console.log('Waiting…');
 
   // Both routes run at once: local discovery for anything on this network, and
@@ -2005,6 +2029,7 @@ async function commandPair(args, verbose) {
 
   const ownKeyPair = await loadPairingKeyPair(root);
   const responder = await startDeviceApprovalResponder({
+    networkId: pairingNetworkId(phrase),
     // Other machines' health lines belong in the service log, not over a
     // prompt someone is trying to read.
     logger: { ...log, info: (message) => { if (!String(message).startsWith('[watcher-status]')) log.info?.(message); } },

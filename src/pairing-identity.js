@@ -117,6 +117,36 @@ export function pairingProof(phrase, { requestId, epub }) {
 }
 
 /**
+ * Where a pairing happens. There used to be ONE network for it, shared by
+ * every GitPigeon installation on earth: every request, announcement and
+ * answer was a broadcast to strangers, and everything that went wrong with
+ * pairing went wrong because of who else was listening. The network is now
+ * named by the one-time phrase itself, so the only peers on it are the
+ * machine showing the phrase and the browser it was given to. Nobody else
+ * can find it, let alone speak on it. The proofs stay: a network name is not
+ * a credential.
+ */
+export function pairingNetworkId(phrase) {
+  const digest = createHash('sha256')
+    .update('gitpigeon-pairing-network/1\0')
+    .update(normalizePairingPhrase(phrase))
+    .digest('hex');
+  return `gitpigeon-pair-v1-${digest.slice(0, 40)}`;
+}
+
+/** The open window's phrase, or null when pairing is closed. */
+export async function openPairingPhrase(root, now = Date.now()) {
+  try {
+    const state = JSON.parse(await readFile(path.join(root, WINDOW_FILE), 'utf8'));
+    const until = Date.parse(String(state?.until ?? ''));
+    if (!Number.isFinite(until) || until <= now || until - now > PAIRING_WINDOW_MS + 1_000) return null;
+    return typeof state.phrase === 'string' && normalizePairingPhrase(state.phrase).length >= 12 ? state.phrase : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * One phrase, several statements, each under its own label so none can be
  * replayed as another:
  *   proof    — a browser asking this machine for its index;

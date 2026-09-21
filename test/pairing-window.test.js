@@ -138,3 +138,31 @@ test('a machine joins an index only when the grant proves its phrase; each state
   assert.ok(proofAt !== -1 && proofAt < adopt.indexOf('adoptMachineIndexCapability('), 'the grant proof is checked before the machine joins anything');
   assert.match(source, /offerAllowed: \(\) => pairingWindowOpen\(root\)/);
 });
+
+test('pairing happens on a network only the phrase names', async (t) => {
+  const { openPairingPhrase, pairingNetworkId } = await import('../src/pairing-identity.js');
+  const { DEVICE_APPROVAL_NETWORK_ID, deviceApprovalNodeOptions } = await import('../src/device-approval-mesh.js');
+  const root = await scratch(t);
+  const now = 1_800_000_000_000;
+  assert.equal(await openPairingPhrase(root, now), null);
+  const { phrase } = await openPairingWindow(root, { now });
+  assert.equal(await openPairingPhrase(root, now + 1), phrase);
+  assert.equal(await openPairingPhrase(root, now + PAIRING_WINDOW_MS + 1), null);
+
+  const network = pairingNetworkId(phrase);
+  assert.match(network, /^gitpigeon-pair-v1-[0-9a-f]{40}$/);
+  assert.notEqual(network, DEVICE_APPROVAL_NETWORK_ID, 'never the network every installation shares');
+  assert.equal(pairingNetworkId(` ${phrase.toLowerCase()} `), network, 'however the phrase was typed');
+  assert.notEqual(pairingNetworkId('AAAA-AAAA-AAAA'), network);
+  assert.ok(!network.includes(normalizePairingPhrase(phrase)), 'the name does not give the phrase away');
+  assert.equal(deviceApprovalNodeOptions(null, network).networkId, network);
+  assert.equal(deviceApprovalNodeOptions(null).networkId, DEVICE_APPROVAL_NETWORK_ID);
+
+  // The service's node on the shared network pairs nothing: no announcement,
+  // no answers, no index taken.
+  const source = await readFile(new URL('../src/cli.js', import.meta.url), 'utf8');
+  const service = source.slice(source.indexOf('async function startPairingService'), source.indexOf('async function runWatchService'));
+  const shared = service.slice(service.indexOf('const shared = await startDeviceApprovalResponder({'), service.indexOf('let responder = null;'));
+  assert.doesNotMatch(shared, /offerDeviceName|onGrant|onAdopt|networkId/);
+  assert.match(service, /networkId: pairingNetworkId\(phrase\)/);
+});

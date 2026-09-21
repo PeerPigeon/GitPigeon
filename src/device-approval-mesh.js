@@ -19,7 +19,7 @@ const REQUEST_ID = /^[a-f0-9]{32}$/;
 const ANNOUNCE_INTERVAL_MS = 5_000;
 const PAIRING_TTL_MS = 5 * 60_000;
 
-export function deviceApprovalNodeOptions(keyPair) {
+export function deviceApprovalNodeOptions(keyPair, networkId = DEVICE_APPROVAL_NETWORK_ID) {
   return {
     // Crypto must be on: the grant travels through sendEncryptedDirect, which
     // throws on a node without it. The announcement itself stays public — it
@@ -28,7 +28,7 @@ export function deviceApprovalNodeOptions(keyPair) {
     // restarts; without one PeerPigeon mints a fresh identity every start and
     // the code printed at install would not survive the next boot.
     crypto: keyPair ? { keyPair } : {},
-    networkId: DEVICE_APPROVAL_NETWORK_ID,
+    networkId,
     sessionId: DEVICE_APPROVAL_SESSION_ID,
     // Peer formation is PeerPigeon's decision; see peerpigeon.js.
   };
@@ -185,8 +185,8 @@ async function openSealed(cipher, node) {
   return value && typeof value === 'object' ? value : null;
 }
 
-async function createNode(nodeFactory, keyPair) {
-  const options = deviceApprovalNodeOptions(keyPair);
+async function createNode(nodeFactory, keyPair, networkId) {
+  const options = deviceApprovalNodeOptions(keyPair, networkId || DEVICE_APPROVAL_NETWORK_ID);
   if (nodeFactory) return nodeFactory(options);
   await installNativeWebRTC();
   const { PeerPigeonNode } = await import('peerpigeon');
@@ -195,6 +195,7 @@ async function createNode(nodeFactory, keyPair) {
 
 /** The side asking to be paired. */
 export async function startDeviceApprovalRequester(request, {
+  networkId = null,
   logger = {},
   onGrant = () => {},
   nodeFactory,
@@ -202,7 +203,7 @@ export async function startDeviceApprovalRequester(request, {
 } = {}) {
   const valid = validateMeshPairingRequest(request);
   if (!valid) throw new Error('Invalid GitPigeon pairing request');
-  const node = await createNode(nodeFactory, keyPair);
+  const node = await createNode(nodeFactory, keyPair, networkId);
   let closed = false;
 
   const receive = (message) => {
@@ -265,6 +266,9 @@ export async function startDeviceApprovalRequester(request, {
 
 /** The side approving a pairing, used by `git pigeon pair`. */
 export async function startDeviceApprovalResponder({
+  // The network to meet on. Pairing uses one named by the phrase
+  // (pairingNetworkId); the shared default carries no pairing any more.
+  networkId = null,
   logger = {},
   onRequest = () => {},
   onAdopt = null,
@@ -293,7 +297,7 @@ export async function startDeviceApprovalResponder({
   // this machine's mesh. The link itself is the capability.
   onShareClone = null,
 } = {}) {
-  const node = await createNode(nodeFactory, keyPair);
+  const node = await createNode(nodeFactory, keyPair, networkId);
   const statusLines = new Map();
   const offerRequestId = keyPair?.pub
     ? createHash('sha256').update('gitpigeon:offer-id:v1\0').update(String(keyPair.pub)).digest('hex').slice(0, 32)
