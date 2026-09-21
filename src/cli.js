@@ -1472,6 +1472,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     try {
       lanApprovals = await startLanApprovalService(machineIndex, {
         logger: log,
+        accepting: () => pairingWindowOpen(root),
         onDeviceRequest: (request) => {
           log.info(`Approval requested by ${request.deviceName} on the local LAN`);
         },

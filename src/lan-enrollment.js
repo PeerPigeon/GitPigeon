@@ -115,6 +115,13 @@ export async function startLanApprovalService(indexSession, {
   logger = {},
   requestBucketMs = REQUEST_BUCKET_MS,
   onDeviceRequest = () => {},
+  // Whether this machine is being paired right now. A multicast group is
+  // whoever shares the Wi-Fi: in a cafe that is strangers, and anything they
+  // sent was taken, remembered and written into this fleet's index. Outside
+  // a pairing window a datagram is dropped unread.
+  accepting = null,
+  // Overridable so a test can listen somewhere the real service is not.
+  port = LAN_MULTICAST_PORT,
 } = {}) {
   const indexId = indexSession?.index?.indexId;
   const storage = indexSession?.node?.storage;
@@ -130,10 +137,16 @@ export async function startLanApprovalService(indexSession, {
   const publishedBuckets = new Set();
   let drained = true;
 
-  await bind(socket, LAN_MULTICAST_PORT);
+  await bind(socket, port);
   socket.addMembership(LAN_MULTICAST_ADDRESS);
   socket.setMulticastTTL(1);
   socket.on('message', (data, remote) => {
+    Promise.resolve(accepting ? accepting() : true).then((open) => {
+      if (!open || closed) return;
+      receive(data, remote);
+    }).catch(() => {});
+  });
+  const receive = (data, remote) => {
     const request = validateDeviceEnrollmentRequest(decodeMessage(data));
     if (!request || remote.address === '0.0.0.0') return;
     const existing = requests.get(request.requestId);
@@ -153,7 +166,7 @@ export async function startLanApprovalService(indexSession, {
     if (!existing) {
       Promise.resolve(onDeviceRequest(request)).catch((error) => logger.error?.(error));
     }
-  });
+  };
   socket.on('error', (error) => logger.error?.(error));
 
   const tick = async () => {
@@ -220,6 +233,8 @@ export async function startLanApprovalService(indexSession, {
   const timer = setInterval(() => { tick().catch((error) => logger.error?.(error)); }, 750);
   tick().catch((error) => logger.error?.(error));
   return {
+    port: socket.address().port,
+    pending: () => [...requests.values()].map((record) => record.request),
     async close() {
       if (closed) return;
       closed = true;
