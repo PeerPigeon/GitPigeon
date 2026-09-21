@@ -743,7 +743,7 @@ export function publisherDirectoryValue(
   peerId = null,
   deviceName = null,
   pairingPublicKey = null,
-  { storageRole = null, disk = null } = {},
+  { storageRole = null, disk = null, pairingSealingKey = null } = {},
 ) {
   return {
     ...directoryValue(index, entries, now, serviceInstanceId),
@@ -758,6 +758,11 @@ export function publisherDirectoryValue(
     // show the code beside the machine, so a person can match what the CLI
     // prints without a pairing request being in flight.
     ...(pairingPublicKey ? { pairingPublicKey: String(pairingPublicKey).slice(0, 200) } : {}),
+    // The key a paired browser seals a relayed terminal frame to. Browsers
+    // used to learn it from this machine's PUBLIC announcement; a watcher no
+    // longer announces itself to strangers, so the key travels here, inside
+    // the encrypted index, where only this fleet's members can read it.
+    ...(pairingSealingKey ? { pairingSealingKey: String(pairingSealingKey).slice(0, 200) } : {}),
     publisherId: index.publisherId,
     // Which build this machine runs, so browsers can show it beside the
     // machine instead of leaving versions a mystery.
@@ -879,7 +884,9 @@ async function connectMachineDirectory(index, logger = {}, {
 } = {}) {
   await installNativeWebRTC();
   await installNativeStorage(root);
-  const pairingPublicKey = (await loadPairingKeyPair(root).catch(() => null))?.pub ?? null;
+  const pairingKeys = await loadPairingKeyPair(root).catch(() => null);
+  const pairingPublicKey = pairingKeys?.pub ?? null;
+  const pairingSealingKey = pairingKeys?.epub ?? null;
   const { PeerPigeonNode } = await import('peerpigeon');
   const prefix = `gitpigeon/index/v1/${index.indexId}/`;
   const repositoryPrefix = 'gitpigeon/v1/';
@@ -1160,7 +1167,7 @@ async function connectMachineDirectory(index, logger = {}, {
         node.getClientId(),
         deviceHostName(),
         pairingPublicKey,
-        { storageRole, disk: await currentDisk() },
+        { storageRole, disk: await currentDisk(), pairingSealingKey },
       );
       const fingerprint = JSON.stringify(value.pigeons);
       const directoryChanged = fingerprint !== lastDirectoryFingerprint;
@@ -1391,6 +1398,7 @@ async function connectMachineDirectory(index, logger = {}, {
             node.getClientId(),
             deviceHostName(),
             pairingPublicKey,
+            { pairingSealingKey },
           ));
         }
       } catch (error) {
