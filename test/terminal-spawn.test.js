@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { chmod, stat } from 'node:fs/promises';
-import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';

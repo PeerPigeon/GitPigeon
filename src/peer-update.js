@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
@@ -158,7 +158,7 @@ export function startPeerUpdates({
         return;
       }
       if (Date.now() - job.lastChunkAt > FETCH_RETRY_MS) {
-        requestChunk().catch(() => {});
+        requestChunk().catch((error) => logger.debug?.(`Peer update re-request: ${error?.message ?? error}`));
       }
     }, FETCH_RETRY_MS);
     fetching.retryTimer.unref?.();

@@ -77,6 +77,8 @@ async function repositorySnapshotHint(entry, serviceInstanceId, machineIndexId) 
       browserInstanceIds: [],
     };
   } catch {
+    // No state file or manifest yet, or one this build cannot read: the
+    // repository has no snapshot to offer, which is what null means here.
     return null;
   }
 }
@@ -536,6 +538,7 @@ export function liveDirectoryKey(indexId, bucket) {
 export async function announceNewBuild({ root, storage, fleetKey, indexId, logger = {}, version = GITPIGEON_VERSION, now = Date.now() }) {
   const file = path.join(root, 'last-build.json');
   let previous = null;
+  // No record yet, or one this build cannot read, means this build is new here.
   try { previous = String(JSON.parse(await readFile(file, 'utf8')).version ?? '') || null; } catch { previous = null; }
   if (previous === version) return 0;
   await mkdir(root, { recursive: true });
@@ -1207,7 +1210,7 @@ async function connectMachineDirectory(index, logger = {}, {
   };
   node.on('peerConnected', (peerId) => {
     logger.debug?.(`[${roomLabel}] peer connected: ${peerId}`);
-    setTimeout(() => considerFleetUpdate('connected').catch(() => {}), 3_000).unref?.();
+    setTimeout(() => considerFleetUpdate('connected').catch((error) => logger.debug?.(`Fleet update check: ${error?.message ?? error}`)), 3_000).unref?.();
     // A service that reconciled while it had no peers anchored its version
     // chain on nothing: every publish afterwards carried a version below the
     // cluster's and was rejected as stale — the watcher ran, published every
@@ -1265,7 +1268,7 @@ async function connectMachineDirectory(index, logger = {}, {
     storageRole = next;
     if (changed) logger.info?.(`Storage role for this machine: ${storageRole}`);
     try { await onStorageRole?.(storageRole, { archiveOnline }); } catch (error) { logger.warn?.(`Storage role change failed: ${error?.message ?? error}`); }
-    publish().catch(() => {});
+    publish().catch((error) => logger.error?.(error));
   };
   let diskSample = { at: 0, value: null };
   const currentDisk = async () => {
@@ -1309,16 +1312,16 @@ async function connectMachineDirectory(index, logger = {}, {
     if (event.key === rosterKey || publisherSubscriptions.has(event.key)) {
       scheduleRemoteRepositorySync();
     }
-    if (event.key === fleetKey) considerFleetUpdate('policy changed').catch(() => {});
-    if (event.key === rolesKey) considerStorageRoles().catch(() => {});
+    if (event.key === fleetKey) considerFleetUpdate('policy changed').catch((error) => logger.debug?.(`Fleet update check: ${error?.message ?? error}`));
+    if (event.key === rolesKey) considerStorageRoles().catch((error) => logger.debug?.(`Storage role check: ${error?.message ?? error}`));
   });
   ready = true;
   // The record may already be here, or arrive with the first peer.
-  considerFleetUpdate('start').catch(() => {});
+  considerFleetUpdate('start').catch((error) => logger.debug?.(`Fleet update check: ${error?.message ?? error}`));
   announceNewBuild({ root, storage: node.storage, fleetKey, indexId: index.indexId, logger })
     .then((flagged) => { if (flagged) fleetHandledRequestedAt = flagged; })
     .catch((error) => logger.debug?.(`Fleet update flag: ${error?.message ?? error}`));
-  considerStorageRoles().catch(() => {});
+  considerStorageRoles().catch((error) => logger.debug?.(`Storage role check: ${error?.message ?? error}`));
   const pruneRecords = async () => {
     if (closed || !node.storage) return;
     try {
@@ -1328,8 +1331,9 @@ async function connectMachineDirectory(index, logger = {}, {
       logger.debug?.(`Index record prune failed: ${error?.message ?? error}`);
     }
   };
-  pruneRecords().catch(() => {});
-  const pruneTimer = setInterval(() => { pruneRecords().catch(() => {}); }, RECORD_PRUNE_INTERVAL_MS);
+  // pruneRecords reports its own failures; nothing is left for these to catch.
+  pruneRecords().catch(() => { /* reported inside */ });
+  const pruneTimer = setInterval(() => { pruneRecords().catch(() => { /* reported inside */ }); }, RECORD_PRUNE_INTERVAL_MS);
   pruneTimer.unref?.();
   if (node.getConnectedPeers().length > 0) {
     publish({ reconcile: true }).catch((error) => logger.error?.(error));
