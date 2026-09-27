@@ -163,19 +163,27 @@ export async function lanIdentity({
 }
 
 /**
- * The room name for a LAN. The gateway's MAC is included when known: without
- * it two different homes on 192.168.1.0/24 would name the same room, meet, and
- * then reject each other on pinning — correct, but noisy and pointless.
+ * The room name for a LAN: its subnet and gateway, and nothing else.
+ *
+ * The gateway's MAC used to be hashed in as well, to tell two homes on
+ * 192.168.1.0/24 apart. It cannot be: an ARP entry is a cache, and whether it
+ * is populated on one machine at the moment it starts has nothing to do with
+ * which network it is on. Two machines on one LAN would compute two different
+ * rooms and never meet — a coin flip dressed up as a distinguisher, and the
+ * reason a fleet on one Wi-Fi could sit there announcing itself to nobody.
+ *
+ * Losing it costs nothing that matters. The room's name admits no one: it is
+ * derivable by every device on the LAN anyway, and membership is a pinned key
+ * (fleet-peers.js). Two homes that happen to name the same room see each
+ * other's announcements and recognise nothing in them.
  */
 export function lanRoomId(identity) {
   if (!identity?.subnet || !identity?.gateway) return null;
   const digest = createHash('sha256')
-    .update('gitpigeon-lan-room/1\0')
+    .update('gitpigeon-lan-room/2\0')
     .update(String(identity.subnet))
     .update('\0')
     .update(String(identity.gateway))
-    .update('\0')
-    .update(String(identity.hardwareAddress ?? ''))
     .digest('hex');
   return `${LAN_ROOM_PREFIX}-${digest.slice(0, 40)}`;
 }

@@ -89,18 +89,19 @@ test('two machines on one LAN name the same room, and a different LAN is a diffe
   });
   const here = await lan('? (192.168.50.1) at cc:28:aa:60:33:f8 on en0 ifscope [ethernet]');
   const alsoHere = await lan('? (192.168.50.1) at CC:28:AA:60:33:F8 on en1 ifscope [ethernet]');
-  const otherHome = await lan('? (192.168.50.1) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]');
   assert.equal(here.hardwareAddress, 'cc:28:aa:60:33:f8');
   assert.equal(lanRoomId(here), lanRoomId(alsoHere));
-  assert.notEqual(lanRoomId(here), lanRoomId(otherHome));
   assert.match(lanRoomId(here), /^gitpigeon-lan-v1-[0-9a-f]{40}$/);
 
   // The room name never contains the LAN it describes.
   const room = lanRoomId(here);
   assert.doesNotMatch(room, /192\.168|cc:28/);
 
-  // ARP unavailable: still a room, from gateway and subnet alone, so a
-  // firewalled machine is not excluded from its own fleet.
+  // ARP is a CACHE. Whether the gateway happens to be in it when a machine
+  // starts says nothing about which network that machine is on, so it cannot
+  // name the room: with the MAC hashed in, one machine that had the entry and
+  // one that did not computed two different rooms on one LAN and announced
+  // themselves to nobody, forever.
   const noArp = await lanIdentity({
     runCommand: async (command) => {
       if (command === 'route') return { stdout: 'gateway: 192.168.50.1\ninterface: en0\n' };
@@ -110,6 +111,20 @@ test('two machines on one LAN name the same room, and a different LAN is a diffe
     platform: 'darwin',
   });
   assert.equal(noArp.hardwareAddress, null);
-  assert.match(lanRoomId(noArp), /^gitpigeon-lan-v1-[0-9a-f]{40}$/);
-  assert.notEqual(lanRoomId(noArp), lanRoomId(here));
+  assert.equal(lanRoomId(noArp), lanRoomId(here), 'one LAN is one room, ARP entry or not');
+
+  // A different LAN is a different room, which is what the subnet and gateway
+  // are for. Two homes that do share both see each other's announcements and
+  // recognise nothing in them: the room admits nobody, a pinned key does.
+  const elsewhere = await lanIdentity({
+    runCommand: async (command) => {
+      if (command === 'route') return { stdout: 'gateway: 10.0.0.1\ninterface: en0\n' };
+      throw new Error('arp: not permitted');
+    },
+    interfaces: {
+      en0: [{ family: 'IPv4', internal: false, address: '10.0.0.42', netmask: '255.255.255.0' }],
+    },
+    platform: 'darwin',
+  });
+  assert.notEqual(lanRoomId(elsewhere), lanRoomId(here));
 });
