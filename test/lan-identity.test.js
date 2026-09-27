@@ -97,11 +97,15 @@ test('two machines on one LAN name the same room, and a different LAN is a diffe
   const room = lanRoomId(here);
   assert.doesNotMatch(room, /192\.168|cc:28/);
 
-  // ARP is a CACHE. Whether the gateway happens to be in it when a machine
-  // starts says nothing about which network that machine is on, so it cannot
-  // name the room: with the MAC hashed in, one machine that had the entry and
-  // one that did not computed two different rooms on one LAN and announced
-  // themselves to nobody, forever.
+  // THE case this exists for: a coffee shop on 192.168.50.0/24 behind a .1
+  // gateway, which is the same shape of address as the house. Only the
+  // gateway itself tells them apart, so only the gateway can name the room.
+  const coffeeShop = await lan('? (192.168.50.1) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]');
+  assert.notEqual(lanRoomId(here), lanRoomId(coffeeShop),
+    'a different network is a different room, however its addresses are shaped');
+
+  // A gateway that cannot be identified gets NO room. No room is safe; a room
+  // shared with every 192.168.1.1 on earth is not.
   const noArp = await lanIdentity({
     runCommand: async (command) => {
       if (command === 'route') return { stdout: 'gateway: 192.168.50.1\ninterface: en0\n' };
@@ -111,20 +115,28 @@ test('two machines on one LAN name the same room, and a different LAN is a diffe
     platform: 'darwin',
   });
   assert.equal(noArp.hardwareAddress, null);
-  assert.equal(lanRoomId(noArp), lanRoomId(here), 'one LAN is one room, ARP entry or not');
+  assert.equal(lanRoomId(noArp), null);
+});
 
-  // A different LAN is a different room, which is what the subnet and gateway
-  // are for. Two homes that do share both see each other's announcements and
-  // recognise nothing in them: the room admits nobody, a pinned key does.
-  const elsewhere = await lanIdentity({
-    runCommand: async (command) => {
-      if (command === 'route') return { stdout: 'gateway: 10.0.0.1\ninterface: en0\n' };
-      throw new Error('arp: not permitted');
+test('the gateway is asked for its address before the cache holding it is read', async () => {
+  // Reading the ARP cache cold missed often enough that two machines on one
+  // LAN disagreed about which LAN they were on. A machine that simply had not
+  // spoken to its gateway yet is not on a different network, and sending it a
+  // packet resolves the address at the link layer whether or not anything
+  // answers.
+  const calls = [];
+  const identity = await lanIdentity({
+    runCommand: async (command, args) => {
+      calls.push(command);
+      if (command === 'route') return { stdout: 'gateway: 192.168.50.1\ninterface: en0\n' };
+      if (command === 'ping') return { stdout: '1 packets transmitted, 1 received\n' };
+      if (command === 'arp') return { stdout: '? (192.168.50.1) at cc:28:aa:60:33:f8 on en0 ifscope [ethernet]' };
+      throw new Error(`unexpected ${command} ${args?.join(' ')}`);
     },
-    interfaces: {
-      en0: [{ family: 'IPv4', internal: false, address: '10.0.0.42', netmask: '255.255.255.0' }],
-    },
+    interfaces: INTERFACES,
     platform: 'darwin',
   });
-  assert.notEqual(lanRoomId(elsewhere), lanRoomId(here));
+  assert.equal(identity.hardwareAddress, 'cc:28:aa:60:33:f8');
+  assert.ok(calls.indexOf('ping') < calls.indexOf('arp'), 'the gateway is asked before the cache is read');
+  assert.match(lanRoomId(identity), /^gitpigeon-lan-v1-[0-9a-f]{40}$/);
 });

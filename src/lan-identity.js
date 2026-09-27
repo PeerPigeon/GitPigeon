@@ -155,6 +155,15 @@ export async function lanIdentity({
   if (!route?.gateway) return null;
   const subnet = subnetFor(route.gateway, interfaces);
   if (!subnet) return null;
+  // Ask the gateway for its address before reading the cache that holds it.
+  // Sending it a packet resolves the address at the link layer whether or not
+  // anything answers, so a machine that simply had not spoken to its gateway
+  // yet stops looking like a machine on a different network. Read cold, this
+  // missed often enough that two machines on one LAN disagreed about which
+  // LAN they were on.
+  await firstOutput(runCommand, platform === 'win32'
+    ? [['ping', ['-n', '1', '-w', '1000', route.gateway]]]
+    : [['ping', ['-c', '1', '-t', '1', route.gateway]], ['ping', ['-c', '1', '-W', '1', route.gateway]]]);
   const arpOutput = await firstOutput(runCommand, platform === 'win32'
     ? [['arp', ['-a']]]
     : [['arp', ['-n', route.gateway]], ['ip', ['neigh', 'show', route.gateway]]]);
@@ -163,27 +172,28 @@ export async function lanIdentity({
 }
 
 /**
- * The room name for a LAN: its subnet and gateway, and nothing else.
+ * The room name for a LAN: its subnet, its gateway, and that gateway's
+ * hardware address — which is what actually names one network rather than a
+ * shape of address that half the world uses.
  *
- * The gateway's MAC used to be hashed in as well, to tell two homes on
- * 192.168.1.0/24 apart. It cannot be: an ARP entry is a cache, and whether it
- * is populated on one machine at the moment it starts has nothing to do with
- * which network it is on. Two machines on one LAN would compute two different
- * rooms and never meet — a coin flip dressed up as a distinguisher, and the
- * reason a fleet on one Wi-Fi could sit there announcing itself to nobody.
- *
- * Losing it costs nothing that matters. The room's name admits no one: it is
- * derivable by every device on the LAN anyway, and membership is a pinned key
- * (fleet-peers.js). Two homes that happen to name the same room see each
- * other's announcements and recognise nothing in them.
+ * The MAC was briefly dropped because reading it from the ARP cache could
+ * MISS, and two machines on one LAN then computed two different rooms and
+ * never met. That was the right bug and the wrong fix: subnet and gateway
+ * alone are 192.168.1.0/24 via .1 — a home, an office and every coffee shop
+ * on the street naming the same room. A cache miss is not a different
+ * network, so the miss is cured at the source (see lanIdentity, which sends
+ * the gateway a packet first), and a LAN whose gateway still cannot be
+ * identified gets no room at all. No room is safe; the wrong room is not.
  */
 export function lanRoomId(identity) {
-  if (!identity?.subnet || !identity?.gateway) return null;
+  if (!identity?.subnet || !identity?.gateway || !identity?.hardwareAddress) return null;
   const digest = createHash('sha256')
-    .update('gitpigeon-lan-room/2\0')
+    .update('gitpigeon-lan-room/3\0')
     .update(String(identity.subnet))
     .update('\0')
     .update(String(identity.gateway))
+    .update('\0')
+    .update(String(identity.hardwareAddress))
     .digest('hex');
   return `${LAN_ROOM_PREFIX}-${digest.slice(0, 40)}`;
 }
