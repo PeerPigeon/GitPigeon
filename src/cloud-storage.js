@@ -396,6 +396,30 @@ export async function cloudSyncedRoots({
  * Walk every cloud-synced folder on this machine and exclude each tooling
  * directory found. Idempotent; safe to run on a timer.
  */
+/**
+ * The cloud roots that actually hold something this machine watches.
+ *
+ * GitPigeon swept and recursively watched EVERY cloud root on the machine —
+ * a whole iCloud Drive — hunting for node_modules to exclude. Walking a cloud
+ * provider's tree is not a free read: it makes the provider enumerate, and
+ * materialise what it has evicted. On a machine whose watched repositories
+ * were every one of them local, fileproviderd sat at 180% of a CPU for files
+ * that were none of GitPigeon's business, starving the event loop that keeps
+ * this watcher's connections alive.
+ *
+ * Excluding tooling artifacts is a service to repositories this machine
+ * watches. A cloud root holding none of them is somebody's private folder,
+ * and GitPigeon has no reason to be inside it.
+ */
+export function cloudRootsHolding(roots, repositories) {
+  const watched = (repositories ?? []).map((value) => path.resolve(String(value ?? ''))).filter(Boolean);
+  return (roots ?? []).filter((entry) => {
+    const root = path.resolve(String(entry?.root ?? ''));
+    if (!root) return false;
+    return watched.some((repository) => repository === root || repository.startsWith(`${root}${path.sep}`));
+  });
+}
+
 export async function sweepCloudStorage({
   log = null,
   roots = null,

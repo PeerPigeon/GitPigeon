@@ -11,6 +11,7 @@ import {
   DROPBOX_IGNORE_XATTR_LINUX,
   FILE_PROVIDER_DOMAIN_XATTR,
   FILE_PROVIDER_IGNORE_XATTR,
+  cloudRootsHolding,
   cloudSyncedRoots,
   detectCloudStorage,
   excludeDirectoryFromCloudSync,
@@ -417,4 +418,36 @@ test('a node_modules appearing anywhere under a synced folder is excluded within
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('only a cloud folder holding a watched repository is swept or watched', () => {
+  const icloud = { root: '/Users/me/Library/Mobile Documents/com~apple~CloudDocs', provider: 'icloud', markers: ['.nosync'] };
+  const dropbox = { root: '/Users/me/Dropbox', provider: 'dropbox', markers: ['ignore'] };
+  const roots = [icloud, dropbox];
+
+  // The case that cost a machine two cores: every watched repository local,
+  // and GitPigeon walking a whole iCloud Drive anyway. Walking a cloud tree
+  // makes the provider enumerate and materialise, and the event loop paying
+  // for it is the one keeping this watcher's connections alive.
+  assert.deepEqual(cloudRootsHolding(roots, ['/Users/me/Documents/GitPigeon/app']), []);
+  assert.deepEqual(cloudRootsHolding(roots, []), []);
+
+  // A repository that really is inside a cloud folder still gets the service:
+  // its node_modules are excluded from sync, which is what this is for.
+  assert.deepEqual(
+    cloudRootsHolding(roots, ['/Users/me/Dropbox/work/app', '/Users/me/Documents/local']).map((entry) => entry.provider),
+    ['dropbox'],
+  );
+  assert.deepEqual(
+    cloudRootsHolding(roots, [`${icloud.root}/notes/site`]).map((entry) => entry.provider),
+    ['icloud'],
+  );
+
+  // A path that merely starts with the same characters is not inside it.
+  assert.deepEqual(cloudRootsHolding([dropbox], ['/Users/me/Dropbox-old/app']), []);
+  // The root itself counts as held.
+  assert.deepEqual(cloudRootsHolding([dropbox], ['/Users/me/Dropbox']).map((entry) => entry.provider), ['dropbox']);
+  // Nothing to compare against is not an invitation to sweep everything.
+  assert.deepEqual(cloudRootsHolding(null, ['/Users/me/Dropbox/app']), []);
+  assert.deepEqual(cloudRootsHolding(roots, null), []);
 });

@@ -1,5 +1,5 @@
 import { shouldScanRepository } from './repository-change.js';
-import { CloudRootsWatcher, CloudSyncGuard, sweepCloudStorage } from './cloud-storage.js';
+import { CloudRootsWatcher, CloudSyncGuard, cloudRootsHolding, cloudSyncedRoots, sweepCloudStorage } from './cloud-storage.js';
 import { watch as watchFilesystem } from "node:fs";
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
@@ -1521,10 +1521,18 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     vanishedTimer.unref?.();
     await control.ready();
     log.info(`GitPigeon service is watching ${sessions.size} ${sessions.size === 1 ? 'repository' : 'repositories'} as PID ${process.pid}`);
-    // Every cloud-synced folder on this machine, not only watched clones: an
-    // unmanaged project's node_modules in iCloud keeps fileproviderd pinned
-    // just the same. Once soon after start, then on a slow clock.
-    const cloudSweep = () => sweepCloudStorage({ log }).catch((error) => log.debug?.(`Cloud storage sweep: ${error.message}`));
+    // Only cloud folders that hold something this machine watches. Sweeping
+    // every cloud root — a whole iCloud Drive — made the file provider
+    // enumerate and materialise a tree GitPigeon has no business in, and on
+    // this machine every watched repository was local anyway: pure cost, paid
+    // by the event loop that keeps the mesh alive. See cloudRootsHolding.
+    const watchedRoots = async () => cloudRootsHolding(
+      await cloudSyncedRoots(),
+      (await listMachinePigeons({ root, activeOnly: false })).map((entry) => entry.repository),
+    );
+    const cloudSweep = () => watchedRoots()
+      .then((roots) => (roots.length ? sweepCloudStorage({ log, roots }) : null))
+      .catch((error) => log.debug?.(`Cloud storage sweep: ${error.message}`));
     cloudSweepTimer = setTimeout(() => {
       cloudSweep();
       cloudSweepTimer = setInterval(cloudSweep, CLOUD_SWEEP_INTERVAL_MS);
@@ -1533,9 +1541,13 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     cloudSweepTimer.unref?.();
     // And live: a node_modules appearing anywhere in a synced folder is
     // excluded within a second, not at the next sweep.
-    cloudRootsWatcher = new CloudRootsWatcher({ log });
-    cloudRootsWatcher.start()
-      .then((roots) => { if (roots.length) log.info(`Watching ${roots.map((entry) => entry.root).join(', ')} to keep tooling artifacts out of cloud sync`); })
+    watchedRoots()
+      .then((roots) => {
+        if (!roots.length || stopping) return null;
+        cloudRootsWatcher = new CloudRootsWatcher({ log, roots });
+        return cloudRootsWatcher.start()
+          .then((started) => { if (started.length) log.info(`Watching ${started.map((entry) => entry.root).join(', ')} to keep tooling artifacts out of cloud sync`); });
+      })
       .catch((error) => log.debug?.(`Cloud storage watcher: ${error.message}`));
     if (IS_STANDALONE) {
       // Machines installed before the shim chased current.json keep a stale
