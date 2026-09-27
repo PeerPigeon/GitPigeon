@@ -628,6 +628,59 @@ export const PUBLISH_HEARTBEAT_MS = 20_000;
 /** How long after an unanswered ask for a never-held record the next ask waits; doubles per miss. */
 export const MISSING_RECORD_ASK_MIN_MS = 30_000;
 export const MISSING_RECORD_ASK_MAX_MS = 10 * 60_000;
+/**
+ * How often a HELD record that has gone stale is asked for again. A publisher
+ * beats every 10s and browsers call it offline at 45s, so this re-asks inside
+ * that window: a machine that is up and publishing is never reported as gone
+ * merely because the push path to it is down.
+ */
+export const STALE_RECORD_ASK_MS = 20_000;
+
+/** When a record states it was written, or null when it does not say. */
+export function recordStatedAt(record) {
+  const stated = Date.parse(String(record?.value?.updatedAt ?? ''));
+  return Number.isFinite(stated) ? stated : null;
+}
+
+/**
+ * Whether to ask the room for a record, and what the next back-off is.
+ *
+ * Three cases, and the middle one is the one that was missing: a record this
+ * machine has never held (ask, backing off so a record nobody holds is not a
+ * broadcast every few seconds), a held record that has stopped moving (ask on
+ * a steady beat — the machine behind it is expected to be there), and a held
+ * record that is current (ask nothing).
+ */
+export function askPlanFor({
+  held = null,
+  staleAfterMs = null,
+  askedAt = 0,
+  wait = MISSING_RECORD_ASK_MIN_MS,
+  now = Date.now(),
+} = {}) {
+  const statedAt = recordStatedAt(held);
+  const stale = Boolean(held) && staleAfterMs !== null
+    && (statedAt === null || now - statedAt > staleAfterMs);
+  if (held && !stale) return { ask: false, wait, reason: 'current' };
+  const due = stale ? STALE_RECORD_ASK_MS : wait;
+  if (now - askedAt < due) return { ask: false, wait, reason: stale ? 'stale-waiting' : 'missing-waiting' };
+  return {
+    ask: true,
+    wait: stale ? MISSING_RECORD_ASK_MIN_MS : Math.min(wait * 2, MISSING_RECORD_ASK_MAX_MS),
+    reason: stale ? 'stale' : 'missing',
+  };
+}
+
+/** The newer of what is held and what the room answered; never a step back. */
+export function newerRecord(held, asked) {
+  if (!asked) return held ?? null;
+  if (!held) return asked;
+  const heldAt = recordStatedAt(held);
+  const askedAt = recordStatedAt(asked);
+  if (askedAt === null) return held;
+  if (heldAt !== null && askedAt <= heldAt) return held;
+  return asked;
+}
 // Stale index records are pruned on start and then this often. Device-request
 // buckets are 5 s wide and read for 15 s; a superseded snapshot head is history
 // nothing reads. Left alone they were 3,808 and 1,054 records — 3 MB of a
@@ -1026,13 +1079,21 @@ async function connectMachineDirectory(index, logger = {}, {
   // machine knew of and how many of their records opened. Null until a pass
   // has run, so "not measured yet" is never reported as zero.
   let lastSyncReadable = null;
-  const heldOrRetrieved = async (key) => {
+  const heldOrRetrieved = async (key, { staleAfterMs = null } = {}) => {
     const held = await node.storage.get('public', key);
-    if (held) return held;
+    // A held copy that has stopped moving is the case this machine was blind
+    // to. Nothing is pushed to a peer that has never asked for a key, and a
+    // peer holding a stale copy never asked again — so when the push path to
+    // one machine breaks (a link that will not renegotiate, a restart on both
+    // ends), its record freezes here at the last value and every browser reads
+    // that machine as offline while it is running and publishing. Asking is
+    // the one path measured to work regardless: it answered with a 12-second
+    // old record on a link that had pushed nothing at all.
     const entry = missingAskedAt.get(key) ?? { at: 0, wait: MISSING_RECORD_ASK_MIN_MS };
-    if (Date.now() - entry.at < entry.wait) return null;
-    missingAskedAt.set(key, { at: Date.now(), wait: Math.min(entry.wait * 2, MISSING_RECORD_ASK_MAX_MS) });
-    return await node.storage.retrieve('public', key, { timeoutMs: 2_000 });
+    const plan = askPlanFor({ held, staleAfterMs, askedAt: entry.at, wait: entry.wait });
+    if (!plan.ask) return held ?? null;
+    missingAskedAt.set(key, { at: Date.now(), wait: plan.wait });
+    return newerRecord(held, await node.storage.retrieve('public', key, { timeoutMs: 2_000 }));
   };
   const syncRemoteRepositories = () => {
     const operation = remoteQueue.then(async () => {
@@ -1057,7 +1118,9 @@ async function connectMachineDirectory(index, logger = {}, {
         if (!publisherSubscriptions.has(key)) {
           publisherSubscriptions.set(key, node.storage.subscribeKey("public", key));
         }
-        const record = await heldOrRetrieved(key);
+        // A publisher record IS the liveness signal, so a stale one is asked
+        // for again rather than believed.
+        const record = await heldOrRetrieved(key, { staleAfterMs: INDEX_STALE_MS });
         const value = record?.value;
         if (value?.protocol !== INDEX_PROTOCOL || value.kind !== "publisher-directory"
           || value.indexId !== index.indexId || value.publisherId !== publisherId

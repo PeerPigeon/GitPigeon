@@ -457,6 +457,50 @@ test('storage roles are read from the fleet record, ignoring anything malformed'
   assert.equal(parseStorageRoles(null, indexId).size, 0);
 });
 
+test('a record that has stopped moving is asked for again, not believed', async () => {
+  const { askPlanFor, newerRecord, INDEX_STALE_MS, MISSING_RECORD_ASK_MIN_MS, MISSING_RECORD_ASK_MAX_MS, STALE_RECORD_ASK_MS } =
+    await import('../src/machine-index.js');
+  const now = Date.parse('2026-09-27T16:00:00.000Z');
+  const record = (secondsAgo) => ({ value: { updatedAt: new Date(now - secondsAgo * 1000).toISOString() } });
+
+  // Held and current: nothing to ask.
+  assert.equal(askPlanFor({ held: record(5), staleAfterMs: INDEX_STALE_MS, now }).ask, false);
+
+  // Held and stopped: this is the case that was missing. Nothing is pushed to
+  // a peer that never asked for a key, and a peer holding a stale copy never
+  // asked again — so a machine that is up and publishing read as offline for
+  // as long as the push path to it stayed down.
+  const stale = askPlanFor({ held: record(600), staleAfterMs: INDEX_STALE_MS, now });
+  assert.equal(stale.ask, true);
+  assert.equal(stale.reason, 'stale');
+  // And on a steady beat afterwards, well inside the 45s a browser waits
+  // before calling a watcher offline.
+  assert.ok(STALE_RECORD_ASK_MS < INDEX_STALE_MS, 'the beat must fit inside the window it defends');
+  assert.equal(askPlanFor({ held: record(600), staleAfterMs: INDEX_STALE_MS, askedAt: now - 5_000, wait: MISSING_RECORD_ASK_MIN_MS, now }).ask, false);
+  assert.equal(askPlanFor({ held: record(600), staleAfterMs: INDEX_STALE_MS, askedAt: now - (STALE_RECORD_ASK_MS + 1_000), wait: MISSING_RECORD_ASK_MIN_MS, now }).ask, true);
+
+  // A record with no stated time is not evidence of anything current.
+  assert.equal(askPlanFor({ held: { value: {} }, staleAfterMs: INDEX_STALE_MS, now }).ask, true);
+  // Without a staleness bound the old rule stands: held is held.
+  assert.equal(askPlanFor({ held: record(600), now }).ask, false);
+
+  // Never held: the doubling back-off, so a record nobody holds is not a
+  // broadcast every few seconds.
+  const missing = askPlanFor({ held: null, askedAt: 0, wait: MISSING_RECORD_ASK_MIN_MS, now });
+  assert.equal(missing.ask, true);
+  assert.equal(missing.wait, MISSING_RECORD_ASK_MIN_MS * 2);
+  assert.equal(askPlanFor({ held: null, askedAt: now - 1_000, wait: MISSING_RECORD_ASK_MIN_MS, now }).ask, false);
+  assert.equal(askPlanFor({ held: null, askedAt: 0, wait: MISSING_RECORD_ASK_MAX_MS, now }).wait, MISSING_RECORD_ASK_MAX_MS);
+
+  // An answer never steps backwards from what is already held.
+  assert.equal(newerRecord(record(10), record(600)).value.updatedAt, record(10).value.updatedAt);
+  assert.equal(newerRecord(record(600), record(10)).value.updatedAt, record(10).value.updatedAt);
+  assert.equal(newerRecord(record(10), null).value.updatedAt, record(10).value.updatedAt);
+  assert.equal(newerRecord(null, record(10)).value.updatedAt, record(10).value.updatedAt);
+  assert.equal(newerRecord(record(10), { value: {} }).value.updatedAt, record(10).value.updatedAt);
+  assert.equal(newerRecord(null, null), null);
+});
+
 test('machines already in this index are pinned from the records on disk, secret or no secret', async (t) => {
   const { pinPublishersOnDisk, INDEX_PROTOCOL } = await import('../src/machine-index.js');
   const { listFleetPeers } = await import('../src/fleet-peers.js');
