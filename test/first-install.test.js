@@ -6,13 +6,20 @@ test('a first install leaves something listening rather than a deadline', async 
   const source = await import('node:fs/promises')
     .then(({ readFile }) => readFile(new URL('../src/cli.js', import.meta.url), 'utf8'));
   const command = /async function commandInstall\([\s\S]*?\n\}/.exec(source)?.[0] ?? '';
+  const offer = /async function offerPairingHere\([\s\S]*?\n\}/.exec(source)?.[0] ?? '';
   assert.ok(command, 'commandInstall should be present');
+  assert.ok(offer, 'offerPairingHere should be present');
 
   // Installing two machines and opening a browser a minute later answered
   // nothing, because pairing was only offered while this command was in the
   // foreground. The service listens instead, with no deadline.
-  assert.match(command, /startWatchService\(\{ root, verbose \}\)/);
-  assert.match(command, /keep offering/);
+  assert.match(offer, /startWatchService\(\{ root, verbose \}\)/);
+  assert.match(offer, /keep offering/);
+  // EVERY install path starts the service. The install that wrote a new binary
+  // and then waited for an approval nobody could send left the OLD watcher
+  // process running, so the machine kept answering as the build it replaced.
+  assert.match(command, /startWatchService\(\{ root: machineIndexRoot\(\), verbose \}\)[\s\S]*startWatchService\(\{ root: machineIndexRoot\(\), verbose \}\)/);
+  assert.match(command, /await offerPairingHere\(machineIndexRoot\(\), verbose\)/);
   assert.doesNotMatch(command, /grantToWaitingBrowser/);
 
   // It may instead be joining a setup that already exists, which only an
@@ -52,9 +59,34 @@ test('the watcher keeps offering to pair with no deadline', async () => {
 test('joining an existing index is still possible on purpose', async () => {
   const source = await readFile(new URL('../src/cli.js', import.meta.url), 'utf8');
   const command = /async function commandInstall\([\s\S]*?\n\}/.exec(source)?.[0] ?? '';
-  // --enroll forces the join path even on a fresh machine.
+  // --enroll still forces pairing on a machine that is already paired.
   assert.match(command, /const enroll = takeFlag\(args, '--enroll'\)/);
-  assert.match(command, /await commandEnroll\(\[\], verbose\)/);
+  assert.match(command, /installPairingPlan\(\{ existing, enroll, noEnroll \}\)/);
+  // Joining happens by having this machine's phrase typed into a dashboard
+  // that holds the index. Nothing here waits to be authorized over the mesh:
+  // a dashboard only shows a machine whose request proves a phrase, and a
+  // request made here carries none, so that wait could never end.
+  assert.match(command, /await offerPairingHere\(machineIndexRoot\(\), verbose\)/);
+  assert.doesNotMatch(source, /Looking for an approved GitPigeon browser/);
+  assert.doesNotMatch(source, /already-approved GitPigeon browser/);
+});
+
+test('a machine with repositories that never finished pairing offers its phrase instead of hanging', async () => {
+  const { installPairingPlan } = await import('../src/cli.js');
+  // What the exposure rotation leaves behind: repositories intact, pairing
+  // cleared. This fell between "already paired" and "unconfigured" and went to
+  // a mesh wait no dashboard can answer — the install printed "Authorize this
+  // machine in an already-approved browser" and hung there.
+  assert.equal(installPairingPlan({ existing: { pairingComplete: false, entries: [{}, {}] } }), 'offer');
+  // A first install, with no state at all or a half-finished one.
+  assert.equal(installPairingPlan({ existing: null }), 'offer');
+  assert.equal(installPairingPlan({ existing: { pairingComplete: false, entries: [] } }), 'offer');
+  // Already paired: show the code to compare, do not reopen a window.
+  assert.equal(installPairingPlan({ existing: { pairingComplete: true, entries: [{}] } }), 'code');
+  // Explicitly asked for, even when paired; explicitly refused, even when not.
+  assert.equal(installPairingPlan({ existing: { pairingComplete: true, entries: [{}] }, enroll: true }), 'offer');
+  assert.equal(installPairingPlan({ existing: { pairingComplete: false, entries: [] }, noEnroll: true }), 'quiet');
+  assert.throws(() => installPairingPlan({ enroll: true, noEnroll: true }), /cannot be combined/);
 });
 
 test('init registers a repository without enrolling a browser', async () => {
@@ -95,8 +127,14 @@ test('install prints the code the browser should be showing', async () => {
   assert.doesNotMatch(reporter, /startDeviceApprovalResponder/);
   assert.doesNotMatch(reporter, /while \(/);
 
-  const branches = command.split('reportPairingCode(').length - 1;
-  assert.ok(branches >= 3, `every install path should report a code, found ${branches}`);
+  // Every install path that pairs reports a code: the already-paired branch
+  // here, and the offer the other branches delegate to.
+  const offer = /async function offerPairingHere\([\s\S]*?\n\}/.exec(source)?.[0] ?? '';
+  assert.ok(offer, 'offerPairingHere should be present');
+  assert.match(command, /await reportPairingCode\(\)/);
+  assert.match(offer, /await reportPairingCode\(root\)/);
+  const paths = `${command}${offer}`.split('reportPairingCode(').length - 1;
+  assert.ok(paths >= 2, `every install path that pairs should report a code, found ${paths}`);
 });
 
 test('init in a folder inside another repository makes it its own repository', async () => {

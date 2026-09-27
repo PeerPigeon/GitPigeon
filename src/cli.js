@@ -53,7 +53,7 @@ import {
 } from './device-grants.js';
 import { startDeviceApprovalResponder } from './device-approval-mesh.js';
 import { PAIRING_WINDOW_MS, closePairingWindow, loadPairingKeyPair, localPairingCode, openPairingPhrase, openPairingWindow, pairingAnswerFor, pairingMacFor, pairingNetworkId, pairingWindowOpen, verifyPairingMac, verifyPairingProof } from './pairing-identity.js';
-import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
+import { startLanApprovalService } from './lan-enrollment.js';
 import { startLanFleetConvergence } from './lan-fleet.js';
 import { ensureServiceWatchdog, inspectCommandOnPath, installNativeIntegration, refreshNativeCommandShim, removeServiceWatchdog } from './native-install.js';
 import { ControlServer } from './control-server.js';
@@ -1798,34 +1798,60 @@ async function runDashboardPairing(pairing, verbose = false, {
   console.log(`Securely paired browser ${result.browserId.slice(0, 16)}…; the permanent index secret was never placed in the URL.`);
 }
 
+/**
+ * Which pairing this install should do.
+ *
+ * A machine with repositories that has never completed a pairing used to be
+ * neither case here: not "already paired", not "unconfigured" (it has
+ * repositories), so it fell through to waiting for an already-approved browser
+ * to authorize it on the mesh. Nothing can answer that. A dashboard shows a
+ * machine only when its request proves a phrase the person typed, and a request
+ * made here carries no phrase — so the install printed "Authorize this machine
+ * in an already-approved browser" and hung until it timed out.
+ *
+ * The exposure rotation puts every previously paired machine into exactly that
+ * state: it replaces the secret, clears pairingComplete, and leaves the
+ * repositories alone. So the deadlock was waiting for the whole fleet.
+ *
+ * A machine that needs pairing offers its phrase, which is the only thing a
+ * current dashboard answers.
+ */
+export function installPairingPlan({ existing = null, enroll = false, noEnroll = false } = {}) {
+  if (enroll && noEnroll) throw new Error('--enroll and --no-enroll cannot be combined');
+  if (noEnroll) return 'quiet';
+  if (enroll) return 'offer';
+  // Paired already: the person installing still needs the code to compare, and
+  // this machine still pairs further browsers.
+  if (existing?.pairingComplete) return 'code';
+  return 'offer';
+}
+
+/**
+ * Offer to pair this machine and return. The running service keeps offering
+ * with no deadline, and adopts an index when a dashboard holding one proves
+ * this machine's phrase, so there is nothing to wait for here.
+ */
+async function offerPairingHere(root, verbose) {
+  await startWatchService({ root, verbose });
+  console.log('\nThis machine is ready to pair and will keep offering.');
+  const { phrase } = await reportPairingCode(root);
+  const dashboard = process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/';
+  console.log(`\nApprove it at ${dashboard} once the code above matches.`);
+  console.log('To add it to a setup that already exists, type the phrase into a dashboard');
+  console.log('that already holds that index, under "Add a machine to this index".');
+  // Opened HERE, so the phrase rides along in the fragment: it never reaches
+  // the server, the page strips it from the address bar at once, and the
+  // person at this machine has nothing to type.
+  openDashboard(`${dashboard}#pair=${encodeURIComponent(phrase)}`);
+}
+
 async function commandEnroll(args, verbose) {
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
-  const root = machineIndexRoot();
-  const identity = await loadOrCreateNativeDeviceIdentity({ root });
-  console.log('Looking for an approved GitPigeon browser on the PeerPigeon mesh…');
-  const { request, grant } = await requestLanDeviceApproval(identity, {
-    logger: logger(verbose),
-    onRequest: (value) => {
-      console.log(`Authorize “${value.deviceName}” in an already-approved GitPigeon browser.`);
-    },
-  });
-  if (grant.requestId !== request.requestId || !grant.index) {
-    throw new Error('The approved device grant did not contain a GitPigeon index capability');
-  }
-  await stopWatchService(root);
-  const index = await adoptMachineIndexCapability(grant.index, { root });
-  const added = await materializeGrantedRepositories(grant.repositories, { root });
-  const pairing = await claimDashboardPairing({ root, force: true });
-  await startWatchService({ root, verbose });
-  await Promise.all(added.map(({ repository }) => (
-    waitForWatchServiceRepository(root, repository.root)
-  )));
-  await runDashboardPairing(pairing, verbose, {
-    automatic: true,
-    nativeDevicePublicKey: identity.publicKey,
-  });
-  if (added.length) console.log("Added " + added.length + " shared " + (added.length === 1 ? "repository" : "repositories") + " to the persistent native index.");
-  console.log(`This device is now approved for GitPigeon index ${index.indexId.slice(0, 10)}.`);
+  // Joining an index is done by having this machine's phrase typed into a
+  // dashboard that holds it — never by asking the mesh to be authorized, which
+  // no dashboard has answered since a machine stopped being visible to
+  // strangers. This offers the phrase instead of waiting for nobody.
+  await offerPairingHere(machineIndexRoot(), verbose);
 }
 
 /**
@@ -1860,43 +1886,20 @@ async function commandInstall(args, verbose) {
   try { existing = await loadMachineIndex({ create: false }); } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
-  if (noEnroll || (!enroll && existing?.pairingComplete)) {
+  const plan = installPairingPlan({ existing, enroll, noEnroll });
+  if (plan === 'quiet') {
     if (existing) await startWatchService({ root: machineIndexRoot(), verbose });
+    return;
+  }
+  if (plan === 'code') {
     // An already-paired machine still pairs new browsers, and the person
     // installing still needs the code to compare. Returning silently here left
     // them with nothing on screen at all.
-    if (!noEnroll) await reportPairingCode();
+    await startWatchService({ root: machineIndexRoot(), verbose });
+    await reportPairingCode();
     return;
   }
-  // A machine that has never paired a browser and has no repositories is the
-  // first device, not one joining somebody else's — whether or not a state file
-  // happens to exist. Sending it to enroll deadlocked a new user: it waited for
-  // an already-approved browser, while the only browser open was waiting for
-  // this machine. Here it owns the index and approves the browser instead.
-  //
-  // Keying this on the absence of a file was not enough: an abandoned or
-  // half-finished setup leaves one behind, and that machine is still
-  // unconfigured.
-  const unconfigured = !existing
-    || (!existing.pairingComplete && (existing.entries?.length ?? 0) === 0);
-  if (!enroll && unconfigured) {
-    const root = machineIndexRoot();
-    // The service offers pairing for as long as it runs, and adopts an index if
-    // an approved browser elsewhere hands it one, so this command has nothing
-    // to wait for. It used to hold the terminal while it announced itself.
-    await startWatchService({ root, verbose });
-    console.log('\nThis machine is ready to pair and will keep offering.');
-    const { phrase } = await reportPairingCode(root);
-    const dashboard = process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/';
-    console.log(`\nApprove it at ${dashboard} once the code above matches.`);
-    // Opened HERE, so the phrase rides along in the fragment: it never reaches
-    // the server, the page strips it from the address bar at once, and the
-    // person at this machine has nothing to type.
-    openDashboard(`${dashboard}#pair=${encodeURIComponent(phrase)}`);
-    return;
-  }
-  await commandEnroll([], verbose);
-  await reportPairingCode();
+  await offerPairingHere(machineIndexRoot(), verbose);
 }
 
 async function commandPairDashboard(args, verbose) {
