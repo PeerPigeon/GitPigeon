@@ -13,11 +13,37 @@ export class FakeNode extends EventEmitter {
     this.peerId = peerId;
     this.direct = [];
     this.broadcasts = [];
+    this.plain = [];
     this.connected = [];
+    this.started = false;
+    this.deliverTo = new Set();
   }
 
   getClientId() { return this.peerId; }
   getConnectedPeers() { return [...this.connected]; }
+
+  /** Lifecycle, for the services that own their own node. */
+  async start() { this.started = true; }
+  async destroy() { this.started = false; }
+
+  /**
+   * A plain room broadcast — no channel envelope. Used by the services that
+   * carry their own protocol object rather than a repository channel frame
+   * (the pairing mesh, LAN fleet convergence).
+   */
+  broadcast(value) {
+    this.plain.push(value);
+    for (const listener of this.deliverTo) {
+      listener.emit('message', { local: false, fromPeerId: this.peerId, data: value });
+    }
+    return `plain-${this.plain.length}`;
+  }
+
+  /** Everything this node broadcasts also reaches `node`, as the room would. */
+  wireTo(node) {
+    this.deliverTo.add(node);
+    node.deliverTo.add(this);
+  }
 
   async sendEncryptedDirect(peerId, plaintext) {
     this.direct.push({ peerId, frame: JSON.parse(plaintext) });

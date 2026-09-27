@@ -167,7 +167,12 @@ export function createMeshPairingRequest({
   };
 }
 
-function decode(value) {
+/**
+ * One mesh payload, as an object. A peer can hand over a parsed object or the
+ * JSON it arrived as, and anything unparseable is not a payload — null says so,
+ * which every caller here treats as "not for me" rather than as a failure.
+ */
+export function decodeMeshPayload(value) {
   if (typeof value === 'object' && value !== null) return value;
   if (typeof value !== 'string' || value.length > 200_000) return null;
   try { return JSON.parse(value); } catch { return null; }
@@ -181,7 +186,7 @@ async function sealTo(epub, payload) {
 async function openSealed(cipher, node) {
   const { decryptMessageWithMeta } = await import('unsea');
   const opened = await decryptMessageWithMeta(cipher, node.getKeyPair().epriv);
-  const value = decode(opened);
+  const value = decodeMeshPayload(opened);
   return value && typeof value === 'object' ? value : null;
 }
 
@@ -208,7 +213,7 @@ export async function startDeviceApprovalRequester(request, {
 
   const receive = (message) => {
     if (closed) return;
-    const value = decode(message.data);
+    const value = decodeMeshPayload(message.data);
     if (!value || value.protocol !== MESH_PAIRING_PROTOCOL) return;
     if (value.requestId !== valid.requestId) return;
     if (value.kind === 'grant' && message?.encrypted && !message.local) {
@@ -310,7 +315,7 @@ export async function startDeviceApprovalResponder({
 
   const receive = (message) => {
     if (closed || message?.local || !message?.fromPeerId) return;
-    const value = decode(message.data);
+    const value = decodeMeshPayload(message.data);
     // The only thing that means the capability was actually taken.
     if (value?.protocol === MESH_PAIRING_PROTOCOL && value.kind === 'accepted') {
       const acked = requests.get(String(value.requestId ?? ''));

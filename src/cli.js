@@ -54,6 +54,7 @@ import {
 import { startDeviceApprovalResponder } from './device-approval-mesh.js';
 import { PAIRING_WINDOW_MS, closePairingWindow, loadPairingKeyPair, localPairingCode, openPairingPhrase, openPairingWindow, pairingAnswerFor, pairingMacFor, pairingNetworkId, pairingWindowOpen, verifyPairingMac, verifyPairingProof } from './pairing-identity.js';
 import { requestLanDeviceApproval, startLanApprovalService } from './lan-enrollment.js';
+import { startLanFleetConvergence } from './lan-fleet.js';
 import { ensureServiceWatchdog, inspectCommandOnPath, installNativeIntegration, refreshNativeCommandShim, removeServiceWatchdog } from './native-install.js';
 import { ControlServer } from './control-server.js';
 import { RepositorySynchronizer } from './protocol.js';
@@ -982,7 +983,12 @@ async function startPairingService(root, log, { indexDiagnostics = null, onTermi
       const phraseProof = await pairingAnswerFor(root, request);
       log.info?.(`${request.deviceName} proved the pairing phrase; answering.`);
       const { confirmed } = await responder.approve(request.requestId, {
-        index: { indexId: index.indexId, secret: index.secret, publisherId: index.publisherId },
+        index: {
+          indexId: index.indexId,
+          secret: index.secret,
+          publisherId: index.publisherId,
+          ...(index.secretSetAt ? { secretSetAt: index.secretSetAt } : {}),
+        },
         nativeDevicePublicKey: identity.publicKey,
         deviceName: deviceHostName(),
         repositories: [],
@@ -1048,6 +1054,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
   let control;
   let machineIndex;
   let lanApprovals;
+  let lanFleet;
   let reconciliationTimer;
   let vanishedTimer = null;
   let meshStateTimer = null;
@@ -1483,6 +1490,27 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       // repository watcher and all already-approved devices must keep working.
       log.warn(`LAN device approval is unavailable: ${error.message}`);
     }
+    try {
+      // Machines already paired with this one re-converge on a shared LAN with
+      // no phrase and no browser. Nothing new is admitted: the room is the LAN,
+      // and membership is a key pinned while the two were in one readable index.
+      lanFleet = await startLanFleetConvergence({
+        root,
+        keyPair: await loadPairingKeyPair(root),
+        deviceName: deviceHostName(),
+        logger: log,
+        localIndex: () => loadMachineIndex({ root }),
+        onAdopt: async (capability) => {
+          await adoptMachineIndexCapability(capability, { root });
+          // Same rule as the mesh adopt path: never orchestrate our own
+          // replacement from inside the process being replaced.
+          spawnDetachedServiceRestart(root);
+        },
+      });
+      if (lanFleet.room) log.debug(`LAN fleet convergence is ready in ${lanFleet.room.slice(0, 28)}…`);
+    } catch (error) {
+      log.warn(`LAN fleet convergence is unavailable: ${error.message}`);
+    }
     indexWatcher = watchFilesystem(root, (_event, filename) => {
       if (String(filename ?? "") === "index.json") scheduleReconcile();
     });
@@ -1582,6 +1610,7 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     controlServer?.stop();
     if (pairingService) await pairingService.close();
     if (lanApprovals) await lanApprovals.close();
+    if (lanFleet) await lanFleet.close();
     if (terminalHistory) await terminalHistory.close();
     if (machineIndex) await machineIndex.close();
   }
@@ -2142,6 +2171,9 @@ async function commandPair(args, verbose) {
           indexId: index.indexId,
           secret: index.secret,
           publisherId: index.publisherId,
+          // Travels with the secret so every holder states one minting time
+          // for it; see adoptMachineIndexCapability.
+          ...(index.secretSetAt ? { secretSetAt: index.secretSetAt } : {}),
         },
         nativeDevicePublicKey: identity.publicKey,
         deviceName: deviceHostName(),
@@ -2781,6 +2813,68 @@ export async function reportCommandOnPath({
   return found;
 }
 
+/**
+ * Whether anything out there can read this machine, and what to do when the
+ * answer is no.
+ *
+ * A machine whose index secret was replaced — every machine replaces it once,
+ * on its first start of 0.13.145+ (see rotateForExposureOnce) — keeps meeting
+ * every browser and machine that still holds the old one, because a rotation
+ * changes the secret and keeps the index id, and the index id is the signaling
+ * session. Those peers connect and then decrypt nothing of each other's: one
+ * layer down, a sync envelope that does not open is dropped without an event.
+ * So a dashboard sees peers come and go while no record ever arrives, reads
+ * that as no watcher at all, and offers the installer instead — with both
+ * sides connected the whole time, and nothing on either saying why.
+ *
+ * Connected peers and no readable records is that state, and this is the only
+ * place it is stated.
+ */
+export function reportIndexReachability({ index, service, lanRoom = null, pinnedPeers = null, print = console.log }) {
+  if (!index) return null;
+  print(`Index:       ${index.indexId.slice(0, 10)} (publisher ${index.publisherId.slice(0, 10)})`);
+  const mesh = service?.running ? service.mesh ?? {} : null;
+  const peers = Number(mesh?.indexPeers ?? 0);
+  // `readablePublishers` is absent on a service that has not completed a
+  // remote-sync pass yet, and absent entirely from an older build's state
+  // file: not measured is not the same as zero, and must not be read as the
+  // fault below.
+  const readable = mesh && Object.hasOwn(mesh, 'readablePublishers') ? Number(mesh.readablePublishers) : null;
+  if (!service?.running) print('Watcher:     not running — start it with `git pigeon start`');
+  else {
+    print(`Watcher:     running as PID ${service.pid}`
+      + ` — ${peers} peer${peers === 1 ? '' : 's'} connected`
+      + (readable === null ? '' : `, ${readable} other machine${readable === 1 ? '' : 's'} readable`));
+  }
+  const unreadable = peers > 0 && readable === 0;
+  print(`Pairing:     ${index.pairingComplete ? 'paired' : 'no browser has paired on this machine\'s current index secret'}`);
+  // Two machines on one LAN must print the SAME room for convergence to be
+  // possible at all, so the room is shown rather than merely used.
+  if (lanRoom !== null || pinnedPeers !== null) {
+    print(`LAN:         ${lanRoom ? lanRoom : 'no nameable LAN — this machine converges with nobody here'}`
+      + (pinnedPeers === null ? '' : `, ${pinnedPeers} paired machine${pinnedPeers === 1 ? '' : 's'} pinned`));
+  }
+  if (!unreadable) return { peers, readable, unreadable, lanRoom, pinnedPeers };
+  print('             Peers are connected and none of them can be read, so this');
+  print('             machine and they hold different index secrets. A dashboard');
+  print('             shows this as a watcher that flaps and then offers the');
+  print('             installer.');
+  if (lanRoom && pinnedPeers > 0) {
+    print('             Machines pinned here re-converge by themselves on this LAN');
+    print('             once they are all running a build that does so; until then,');
+    print('             or for a machine that is not pinned: run `git pigeon pair`');
+    print('             here and type the phrase it prints at gitpigeon.dev — or, to');
+    print('             keep an existing index, into a dashboard already paired with');
+    print('             another machine, under "Add a machine to this index".');
+  } else {
+    print('             Pair again to fix it: run `git pigeon pair` here, then type');
+    print('             the phrase it prints at gitpigeon.dev — or, to keep an');
+    print('             existing index, type it into a dashboard already paired with');
+    print('             another machine, under "Add a machine to this index".');
+  }
+  return { peers, readable, unreadable, lanRoom, pinnedPeers };
+}
+
 async function commandUpdate(args, verbose) {
   const local = takeFlag(args, '--local');
   if (args.length) throw new Error(`Unexpected argument: ${args[0]}`);
@@ -3199,6 +3293,16 @@ async function commandDoctor(args, cwd) {
   console.log(`Repository:  ${repository.root}`);
   console.log(`Build:       ${GITPIGEON_VERSION}`);
   console.log(`Pairing code: ${await localPairingCode(machineIndexRoot()).catch(() => 'unavailable')}`);
+  // Read, never create: `doctor` must not mint an index on a machine that has
+  // none, or it would report the one it just made as this machine's.
+  const { currentLanRoomId } = await import('./lan-identity.js');
+  const { listFleetPeers } = await import('./fleet-peers.js');
+  reportIndexReachability({
+    index: await loadMachineIndex({ root: machineIndexRoot(), create: false }).catch(() => null),
+    service: await watchServiceStatus(machineIndexRoot()).catch(() => ({ running: false })),
+    lanRoom: await currentLanRoomId().catch(() => null),
+    pinnedPeers: await listFleetPeers({ root: machineIndexRoot() }).then((peers) => peers.length).catch(() => null),
+  });
   const found = await reportCommandOnPath();
   if (found?.path && !found.frozen) console.log(`Command:     ${found.path}`);
 }

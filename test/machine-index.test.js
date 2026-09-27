@@ -457,6 +457,50 @@ test('storage roles are read from the fleet record, ignoring anything malformed'
   assert.equal(parseStorageRoles(null, indexId).size, 0);
 });
 
+test('machines already in this index are pinned from the records on disk, secret or no secret', async (t) => {
+  const { pinPublishersOnDisk, INDEX_PROTOCOL } = await import('../src/machine-index.js');
+  const { listFleetPeers } = await import('../src/fleet-peers.js');
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-pin-disk-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const indexId = 'f00ab7ea24fe377da70fc7148bfdd047';
+  const record = (publisherId, value) => ({ key: publisherDirectoryKey(indexId, publisherId), value });
+  const storage = {
+    list: async () => [
+      // A machine from before sealing keys travelled in the index: pinned by
+      // its signing key alone, which is what it has.
+      record('a'.repeat(32), {
+        protocol: INDEX_PROTOCOL,
+        kind: 'publisher-directory',
+        deviceName: 'Dans-MacBook-Air.local',
+        build: '0.13.143',
+        pairingPublicKey: 'pub-air',
+      }),
+      record('b'.repeat(32), {
+        protocol: INDEX_PROTOCOL,
+        kind: 'publisher-directory',
+        deviceName: 'Daniels-MacBook-Pro.local',
+        build: '0.13.153',
+        pairingPublicKey: 'pub-pro',
+        pairingSealingKey: 'epub-pro',
+      }),
+      // Not a machine: no pairing key to pin.
+      record('c'.repeat(32), { protocol: INDEX_PROTOCOL, kind: 'publisher-directory', deviceName: 'No keys' }),
+      // Another index's record, and a record that is not a directory at all.
+      { key: publisherDirectoryKey('9'.repeat(32), 'd'.repeat(32)), value: { protocol: INDEX_PROTOCOL, kind: 'publisher-directory', pairingPublicKey: 'pub-elsewhere' } },
+      { key: `gitpigeon/index/v1/${indexId}/publishers`, value: { protocol: INDEX_PROTOCOL, kind: 'publisher-roster' } },
+    ],
+  };
+
+  assert.equal(await pinPublishersOnDisk({ root, storage, indexId }), 2);
+  const pinned = (await listFleetPeers({ root })).map((peer) => [peer.publicKey, peer.sealingKey]);
+  assert.deepEqual(pinned.sort(), [['pub-air', null], ['pub-pro', 'epub-pro']]);
+
+  // Running again is the same two machines, not four.
+  assert.equal(await pinPublishersOnDisk({ root, storage, indexId }), 2);
+  assert.equal((await listFleetPeers({ root })).length, 2);
+  assert.equal(await pinPublishersOnDisk({ root, storage: null, indexId }), 0);
+});
+
 test('a watcher that comes up on a newer build asks the fleet to check, once', async (t) => {
   const { announceNewBuild, fleetUpdateKey, INDEX_PROTOCOL } = await import('../src/machine-index.js');
   const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-new-build-'));

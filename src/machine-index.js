@@ -14,6 +14,7 @@ import { deviceHostName } from './device-name.js';
 import { loadPairingKeyPair } from './pairing-identity.js';
 import { installNativeStorage } from './native-storage.js';
 import { mergeShareDeclarations, preferredShare } from './share-precedence.js';
+import { pinFleetPeer } from './fleet-peers.js';
 import { installNativeWebRTC } from './webrtc.js';
 
 export const INDEX_PROTOCOL = 'gitpigeon-index/1';
@@ -167,6 +168,15 @@ function validateState(value) {
     ...(typeof value.exposureRotation === 'string' && value.exposureRotation.length <= 80
       ? { exposureRotation: value.exposureRotation }
       : {}),
+    // When THIS secret was minted, by whoever minted it. It travels with the
+    // capability, so every machine holding one secret states the same time for
+    // it — that is what makes two machines comparing their indexes reach the
+    // same answer instead of each believing its own copy is the newer one.
+    // Passed through here for the same reason as exposureRotation: dropped, it
+    // would be rewritten on every load.
+    ...(Number.isFinite(Date.parse(String(value.secretSetAt ?? '')))
+      ? { secretSetAt: new Date(Date.parse(String(value.secretSetAt))).toISOString() }
+      : {}),
     entries,
     // Stated removals survive restarts, or a browser cache outlives them.
     removed: Array.isArray(value.removed)
@@ -214,6 +224,7 @@ function freshState() {
     publisherId: randomBytes(16).toString('hex'),
     pairingComplete: false,
     pairingMode: 'secure',
+    secretSetAt: new Date().toISOString(),
     // Minted by a build that never hands it to strangers: nothing to rotate.
     exposureRotation: EXPOSURE_ROTATION,
     entries: [],
@@ -313,6 +324,12 @@ export async function adoptMachineIndexCapability(capability, { root = machineIn
     }
     value.indexId = indexId;
     value.secret = secret;
+    // The minting time comes WITH the secret. Stamping the adoption instead
+    // would make this machine's copy of one shared secret look newer than the
+    // original everywhere else, and two machines comparing indexes would then
+    // each hand the other its own — a swap with no fixed point.
+    const stated = Date.parse(String(capability?.secretSetAt ?? ''));
+    value.secretSetAt = new Date(Number.isFinite(stated) ? stated : Date.now()).toISOString();
     value.pairingMode = 'secure';
     value.pairingComplete = false;
     await writeState(root, value);
@@ -619,6 +636,46 @@ export const RECORD_PRUNE_INTERVAL_MS = 60 * 60_000;
 export const DEVICE_REQUEST_MAX_AGE_MS = 60 * 60_000;
 const DEVICE_REQUEST_BUCKET_MS = 5_000;
 
+/**
+ * Pin every machine this index already holds a publisher record for.
+ *
+ * Pinning normally happens as records are read (see syncRemoteRepositories),
+ * which is no help to a machine that has ALREADY gone unreadable: nothing new
+ * will ever be read from it. The records on disk were written by machines that
+ * held this index's secret when they wrote them, so they say the same thing,
+ * and they survive the secret changing. Returns how many machines are pinned.
+ */
+export async function pinPublishersOnDisk({ root, storage, indexId, selfPublicKey = null, logger = {} }) {
+  if (!storage || !indexId) return 0;
+  const records = await storage.list('public');
+  const wanted = new RegExp(`^gitpigeon/index/v1/${indexId}/publisher/[a-f0-9]{32}$`);
+  let pinned = 0;
+  for (const record of records) {
+    if (!wanted.test(String(record.key ?? ''))) continue;
+    const value = record.value;
+    if (value?.protocol !== INDEX_PROTOCOL || value.kind !== 'publisher-directory') continue;
+    if (!value.pairingPublicKey) continue;
+    // This machine's own record is not a peer. Pinning it is inert — the LAN
+    // room skips this key — but a machine listed among the ones it has met is
+    // wrong wherever that list is read.
+    if (selfPublicKey && String(value.pairingPublicKey) === String(selfPublicKey)) continue;
+    try {
+      await pinFleetPeer({
+        root,
+        publicKey: String(value.pairingPublicKey),
+        // Records written before 0.13.150 carry no sealing key. The machine
+        // supplies it on the LAN room, signed by the key pinned here.
+        sealingKey: value.pairingSealingKey ? String(value.pairingSealingKey) : null,
+        deviceName: value.deviceName ? String(value.deviceName) : null,
+      });
+      pinned += 1;
+    } catch (error) {
+      logger.debug?.(`Could not pin ${String(value.deviceName ?? 'a machine')}: ${error.message}`);
+    }
+  }
+  return pinned;
+}
+
 export async function pruneStaleIndexRecords(storage, now = Date.now()) {
   const records = await storage.list('public');
   const currentHeads = new Map();
@@ -801,10 +858,11 @@ export async function claimDashboardPairing({
  * entry from a roster hides it without taking anything away. Every remaining
  * peer must pair again afterwards.
  */
-export async function rotateMachineIndexSecret({ root = machineIndexRoot() } = {}) {
+export async function rotateMachineIndexSecret({ root = machineIndexRoot(), now = Date.now() } = {}) {
   return await withLock(root, async () => {
     const value = await readState(root);
     value.secret = randomBytes(32).toString('base64url');
+    value.secretSetAt = new Date(now).toISOString();
     value.pairingMode = 'secure';
     value.pairingComplete = false;
     await writeState(root, value);
@@ -820,12 +878,13 @@ export async function rotateMachineIndexSecret({ root = machineIndexRoot() } = {
  * first start of a fixed build replaces it, once. Every browser pairs again
  * and every machine rejoins — through the phrase, this time.
  */
-export async function rotateForExposureOnce({ root = machineIndexRoot() } = {}) {
+export async function rotateForExposureOnce({ root = machineIndexRoot(), now = Date.now() } = {}) {
   return await withLock(root, async () => {
     let value;
     try { value = await readState(root); } catch { return false; }
     if (!value?.secret || value.exposureRotation === EXPOSURE_ROTATION) return false;
     value.secret = randomBytes(32).toString('base64url');
+    value.secretSetAt = new Date(now).toISOString();
     value.pairingMode = 'secure';
     value.pairingComplete = false;
     value.exposureRotation = EXPOSURE_ROTATION;
@@ -963,6 +1022,10 @@ async function connectMachineDirectory(index, logger = {}, {
   // only for a record this machine has never held, with a doubling back-off
   // so a record nobody holds is not a broadcast every few seconds.
   const missingAskedAt = new Map();
+  // The last completed remote-sync pass: how many other publishers this
+  // machine knew of and how many of their records opened. Null until a pass
+  // has run, so "not measured yet" is never reported as zero.
+  let lastSyncReadable = null;
   const heldOrRetrieved = async (key) => {
     const held = await node.storage.get('public', key);
     if (held) return held;
@@ -1000,6 +1063,19 @@ async function connectMachineDirectory(index, logger = {}, {
           || value.indexId !== index.indexId || value.publisherId !== publisherId
           || !Array.isArray(value.pigeons)) continue;
         readableRecords += 1;
+        // Being in one readable index IS the pairing: only this fleet's
+        // members can read this record, and it states the machine's pairing
+        // keys. Pinning them here is what lets these two machines find each
+        // other again on a shared LAN after a secret changes and the index
+        // stops being readable — by which time it is too late to learn them.
+        if (value.pairingPublicKey) {
+          await pinFleetPeer({
+            root,
+            publicKey: String(value.pairingPublicKey),
+            sealingKey: value.pairingSealingKey ? String(value.pairingSealingKey) : null,
+            deviceName: value.deviceName ? String(value.deviceName) : null,
+          }).catch((error) => logger.debug?.(`Pinning ${publisherId.slice(0, 10)}: ${error.message}`));
+        }
         if (value.storageRole === 'archive') {
           const seenAt = Date.parse(String(value.updatedAt ?? '')) || 0;
           if (seenAt) archiveSeenAt.set(publisherId, seenAt);
@@ -1044,6 +1120,14 @@ async function connectMachineDirectory(index, logger = {}, {
           remoteTombstones.set(String(item.repositoryId), Math.max(known, removedAt));
         }
       }
+      // How much of what the room said this machine could actually READ. A
+      // peer whose secret does not match this one is dropped in silence one
+      // layer down (PeerPigeon decrypts the sync envelope, gets null, and
+      // returns), so "nobody is there" and "everybody is there and none of it
+      // opens" look identical from here. They are not: connected peers with
+      // nothing readable is a secret mismatch — a rotation the other side has
+      // not paired through — and it is the one state nothing else reports.
+      lastSyncReadable = { readablePublishers: readableRecords, knownPublishers: publisherIds.length - 1 };
       // Unwatching must win fleet-wide. Machines used to re-materialize a
       // repository some other machine had just removed, and hand it straight
       // back — removal could never converge. A tombstone beats any entry or
@@ -1322,6 +1406,14 @@ async function connectMachineDirectory(index, logger = {}, {
     .then((flagged) => { if (flagged) fleetHandledRequestedAt = flagged; })
     .catch((error) => logger.debug?.(`Fleet update flag: ${error?.message ?? error}`));
   considerStorageRoles().catch((error) => logger.debug?.(`Storage role check: ${error?.message ?? error}`));
+  // Machines this one held a record for BEFORE it could no longer read them.
+  // A record only ever arrived here from a machine that held this index's
+  // secret at the time, so it is the same membership evidence as a readable
+  // record — and it is the only evidence left once a secret changes, which is
+  // exactly when it is needed. Without this, two machines that went unreadable
+  // to each other before anything pinned them could never re-converge.
+  pinPublishersOnDisk({ root, storage: node.storage, indexId: index.indexId, selfPublicKey: pairingPublicKey, logger })
+    .catch((error) => logger.debug?.(`Pinning known machines: ${error?.message ?? error}`));
   const pruneRecords = async () => {
     if (closed || !node.storage) return;
     try {
@@ -1365,6 +1457,7 @@ async function connectMachineDirectory(index, logger = {}, {
         ...(selfSeenVersion !== null ? { selfSeenVersion: String(selfSeenVersion).slice(0, 40) } : {}),
         ...(selfSeenName !== null ? { selfSeenName: String(selfSeenName).slice(0, 60) } : {}),
         ...(rosterSeenVersion !== null ? { rosterSeenVersion: String(rosterSeenVersion).slice(0, 40) } : {}),
+        ...(lastSyncReadable ?? {}),
         storageRole,
         archiveOnline: archiveOnline(),
       };

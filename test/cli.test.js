@@ -283,6 +283,67 @@ test('update, install and doctor say when the git-pigeon on PATH is a frozen cop
   assert.deepEqual(lines, []);
 });
 
+test('doctor says when peers are connected and none of them can be read', async () => {
+  const { reportIndexReachability } = await import('../src/cli.js');
+  const index = { indexId: 'f00ab7ea24fe377da70fc7148bfdd047', publisherId: 'db80c692a60feba7e1b88c672d456eb1', pairingComplete: false };
+  const lines = [];
+  const print = (value) => lines.push(String(value));
+
+  // The state this reports on: a rotation left this machine and its peers on
+  // different secrets, so they connect and decrypt nothing of each other's.
+  const dark = reportIndexReachability({
+    index,
+    service: { running: true, pid: 47214, mesh: { indexPeers: 2, readablePublishers: 0 } },
+    print,
+  });
+  assert.equal(dark.unreadable, true);
+  assert.match(lines.join('\n'), /2 peers connected, 0 other machines readable/);
+  assert.match(lines.join('\n'), /different index secrets/);
+  assert.match(lines.join('\n'), /git pigeon pair/);
+
+  // A healthy fleet says nothing alarming, and neither does a machine whose
+  // peers it can read even though no browser has paired here yet.
+  lines.length = 0;
+  const healthy = reportIndexReachability({
+    index: { ...index, pairingComplete: true },
+    service: { running: true, pid: 47214, mesh: { indexPeers: 2, readablePublishers: 3 } },
+    print,
+  });
+  assert.equal(healthy.unreadable, false);
+  assert.doesNotMatch(lines.join('\n'), /different index secrets/);
+  assert.match(lines.join('\n'), /Pairing:\s+paired/);
+
+  // Not measured is not zero: a service that has not completed a sync pass,
+  // and an older build's state file, must not be reported as the fault.
+  lines.length = 0;
+  const unmeasured = reportIndexReachability({
+    index,
+    service: { running: true, pid: 47214, mesh: { indexPeers: 2 } },
+    print,
+  });
+  assert.equal(unmeasured.unreadable, false);
+  assert.match(lines.join('\n'), /2 peers connected$/m);
+  assert.doesNotMatch(lines.join('\n'), /readable/);
+
+  // Alone on the room is not the fault either: no peers, nothing to read.
+  lines.length = 0;
+  const alone = reportIndexReachability({
+    index,
+    service: { running: true, pid: 47214, mesh: { indexPeers: 0, readablePublishers: 0 } },
+    print,
+  });
+  assert.equal(alone.unreadable, false);
+  assert.doesNotMatch(lines.join('\n'), /different index secrets/);
+
+  lines.length = 0;
+  assert.equal(reportIndexReachability({ index: null, service: { running: false }, print }), null);
+  assert.deepEqual(lines, []);
+
+  lines.length = 0;
+  reportIndexReachability({ index, service: { running: false }, print });
+  assert.match(lines.join('\n'), /Watcher:\s+not running/);
+});
+
 test('start drops a registration whose clone vanished from disk, without tombstoning the repository', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-start-vanished-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
