@@ -636,6 +636,18 @@ export const MISSING_RECORD_ASK_MAX_MS = 10 * 60_000;
  */
 export const STALE_RECORD_ASK_MS = 20_000;
 
+/**
+ * How long a mesh error still describes this machine. A dial that stalls while
+ * a peer restarts is news for a moment and history after that.
+ */
+export const INDEX_ERROR_FRESH_MS = 60_000;
+
+/** The last mesh error, if it is recent enough to still be a fact. */
+export function currentIndexError(error, now = Date.now()) {
+  if (!error?.message) return null;
+  return now - (error.at ?? 0) <= INDEX_ERROR_FRESH_MS ? error.message : null;
+}
+
 /** When a record states it was written, or null when it does not say. */
 export function recordStatedAt(record) {
   const stated = Date.parse(String(record?.value?.updatedAt ?? ''));
@@ -1038,7 +1050,17 @@ async function connectMachineDirectory(index, logger = {}, {
   node.mesh.on('peer:discovered', (peerId) => logger.debug?.(`[${roomLabel}] discovered ${String(peerId).slice(0, 12)}`));
   // PeerPigeon and FreeRTC own signaling recovery. A GitPigeon-side recovery
   // call can interrupt their in-flight cross-relay negotiation.
-  node.on('error', (error) => { lastIndexError = String(error?.message ?? error).slice(0, 300); });
+  // What went wrong LATELY, not ever. This was set on every error and never
+  // cleared, so one stalled dial — a peer restarting, a machine going to sleep
+  // — was reported as this machine's state for as long as the watcher ran.
+  // `git pigeon status`, `doctor` and every diagnostic carried that fossil
+  // while the mesh was healthy, and it is the first thing anyone reads when
+  // asking what is wrong. A connection that succeeds says the last failure is
+  // over; so does enough time passing.
+  node.on('error', (error) => {
+    lastIndexError = { message: String(error?.message ?? error).slice(0, 300), at: Date.now() };
+  });
+  node.on('peerConnected', () => { lastIndexError = null; });
   node.on('error', (error) => {
     if (/^Negotiation stalled\b/.test(String(error?.message ?? error ?? ''))) {
       logger.debug?.(error?.message ?? error);
@@ -1515,7 +1537,7 @@ async function connectMachineDirectory(index, logger = {}, {
       return {
         indexPeers: node.getConnectedPeers().length,
         publishedAgoMs: lastPublishedAt === null ? null : Date.now() - lastPublishedAt,
-        ...(lastIndexError ? { indexError: lastIndexError } : {}),
+        ...(currentIndexError(lastIndexError) ? { indexError: currentIndexError(lastIndexError) } : {}),
         ...(selfPutVersion !== null ? { selfPutVersion: String(selfPutVersion).slice(0, 40) } : {}),
         ...(selfSeenVersion !== null ? { selfSeenVersion: String(selfSeenVersion).slice(0, 40) } : {}),
         ...(selfSeenName !== null ? { selfSeenName: String(selfSeenName).slice(0, 60) } : {}),

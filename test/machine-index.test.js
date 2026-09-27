@@ -457,6 +457,25 @@ test('storage roles are read from the fleet record, ignoring anything malformed'
   assert.equal(parseStorageRoles(null, indexId).size, 0);
 });
 
+test('a mesh error describes this machine only while it is recent', async () => {
+  const { currentIndexError, INDEX_ERROR_FRESH_MS } = await import('../src/machine-index.js');
+  const now = Date.parse('2026-09-27T22:43:00.000Z');
+  const stall = { message: 'Negotiation stalled (signaling=have-local-offer) with 795d5329ac57', at: now - 5_000 };
+
+  // Fresh: a dial really is failing right now.
+  assert.equal(currentIndexError(stall, now), stall.message);
+
+  // Stale: one stalled dial — a peer restarting, a machine going to sleep —
+  // was kept as this machine's state for as long as the watcher ran. Every
+  // diagnostic reported that fossil while the mesh was healthy, and it is the
+  // first line anyone reads when asking what is wrong.
+  assert.equal(currentIndexError({ ...stall, at: now - (INDEX_ERROR_FRESH_MS + 1_000) }, now), null);
+  assert.equal(currentIndexError(null, now), null);
+  assert.equal(currentIndexError({ message: '' }, now), null);
+  // No time recorded at all is not evidence of anything current.
+  assert.equal(currentIndexError({ message: stall.message }, now), null);
+});
+
 test('a record that has stopped moving is asked for again, not believed', async () => {
   const { askPlanFor, newerRecord, INDEX_STALE_MS, MISSING_RECORD_ASK_MIN_MS, MISSING_RECORD_ASK_MAX_MS, STALE_RECORD_ASK_MS } =
     await import('../src/machine-index.js');
