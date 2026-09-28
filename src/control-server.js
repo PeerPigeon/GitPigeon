@@ -82,7 +82,15 @@ export class ControlServer {
       const { openPairingWindow, localPairingCode } = await import('./pairing-identity.js');
       const { until, phrase } = await openPairingWindow(this.root);
       this.logger.warn?.('A paired browser opened pairing on this machine; it accepts one machine or browser that proves the phrase.');
-      return { phrase, until, code: await localPairingCode(this.root), deviceName: (await import('./device-name.js')).deviceHostName() };
+      // `pairingCode`, not `code`: a reply's `code` is the machine-readable
+      // reason for a REFUSAL, and putting six digits there would have read as
+      // one.
+      return {
+        phrase,
+        until,
+        pairingCode: await localPairingCode(this.root),
+        deviceName: (await import('./device-name.js')).deviceHostName(),
+      };
     }
     if (frame.kind === 'close-pairing-window') {
       const { closePairingWindow } = await import('./pairing-identity.js');

@@ -57,6 +57,52 @@ test('a paired peer can remove one repository and the rest stay', async (t) => {
   assert.deepEqual(remaining.map((entry) => entry.repositoryId), ['repo-beta-00001']);
 });
 
+test('a browser can put this machine into pairing mode, and is told what it is showing', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'gitpigeon-control-pairing-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { pairingWindowOpen, localPairingCode } = await import('../src/pairing-identity.js');
+
+  const node = new FakeNode();
+  const server = new ControlServer({ node, indexId, root });
+  server.start();
+  t.after(() => server.stop());
+
+  // Waiting for the answer, not for a stopwatch: this handler loads a module
+  // on first use, which under a loaded machine takes longer than any delay
+  // worth hard-coding.
+  const answerTo = async (requestId) => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const frame = node.directFrames(CONTROL_CHANNEL).find((value) => value.requestId === requestId);
+      if (frame) return frame;
+      await settle();
+    }
+    throw new Error(`no answer to ${requestId}`);
+  };
+
+  assert.equal(await pairingWindowOpen(root), false);
+  node.receive('browser', indexId, CONTROL_CHANNEL, { kind: 'open-pairing-window', requestId: 'p1' }, 'direct');
+
+  const opened = await answerTo('p1');
+  assert.equal(opened.ok, true, opened.message ?? 'the machine answered');
+  assert.equal(await pairingWindowOpen(root), true);
+  // The phrase, so it can be shown where someone is joining from, and the
+  // machine's own code, so a person can check this is the machine they meant.
+  assert.match(String(opened.phrase).replace(/-/g, ''), /^[A-Z0-9]{12,}$/);
+  assert.equal(opened.pairingCode, await localPairingCode(root));
+  assert.ok(opened.deviceName, 'the reply says which machine answered');
+  // NOT `code`: a reply's `code` is the machine-readable reason for a
+  // refusal, and six digits there would read as one.
+  assert.equal(opened.code, undefined);
+
+  // A browser opening a window grants it nothing it did not have — it already
+  // holds the index secret — so this is a convenience, and it is reversible.
+  node.receive('browser', indexId, CONTROL_CHANNEL, { kind: 'close-pairing-window', requestId: 'p2' }, 'direct');
+  const shut = await answerTo('p2');
+  assert.equal(shut.ok, true);
+  assert.equal(shut.closed, true);
+  assert.equal(await pairingWindowOpen(root), false);
+});
+
 test('rotating the index secret is what actually revokes access', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'gitpigeon-control-rotate-'));
   t.after(() => rm(root, { recursive: true, force: true }));
