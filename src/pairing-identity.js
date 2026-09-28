@@ -135,11 +135,25 @@ export function pairingNetworkId(phrase) {
 }
 
 /** The open window's phrase, or null when pairing is closed. */
+/**
+ * Whether a window's own record says it is open. One rule, read from one
+ * place: six callers each parsed the expiry themselves, and a window honoured
+ * by some of them and refused by others is a machine that answers half a
+ * pairing.
+ */
+export function windowIsOpen(state, now = Date.now()) {
+  if (!state) return false;
+  // A first-use window has no deadline. It shuts when the machine joins a
+  // fleet, which is the thing it was waiting for.
+  if (state.untilPaired === true) return true;
+  const until = Date.parse(String(state.until ?? ''));
+  return Number.isFinite(until) && until > now && until - now <= PAIRING_WINDOW_MS + 1_000;
+}
+
 export async function openPairingPhrase(root, now = Date.now()) {
   try {
     const state = JSON.parse(await readFile(path.join(root, WINDOW_FILE), 'utf8'));
-    const until = Date.parse(String(state?.until ?? ''));
-    if (!Number.isFinite(until) || until <= now || until - now > PAIRING_WINDOW_MS + 1_000) return null;
+    if (!windowIsOpen(state, now)) return null;
     return typeof state.phrase === 'string' && normalizePairingPhrase(state.phrase).length >= 12 ? state.phrase : null;
   } catch {
     return null;
@@ -168,8 +182,7 @@ export function pairingMac(purpose, phrase, { requestId, epub }) {
 export async function pairingMacFor(root, purpose, request, now = Date.now()) {
   try {
     const state = JSON.parse(await readFile(path.join(root, WINDOW_FILE), 'utf8'));
-    const until = Date.parse(String(state?.until ?? ''));
-    if (!Number.isFinite(until) || until <= now || typeof state.phrase !== 'string') return null;
+    if (!windowIsOpen(state, now) || typeof state.phrase !== 'string') return null;
     return pairingMac(purpose, state.phrase, request);
   } catch {
     return null;
@@ -184,8 +197,7 @@ export async function verifyPairingMac(root, purpose, { requestId, epub, proof }
   const file = path.join(root, WINDOW_FILE);
   let state;
   try { state = JSON.parse(await readFile(file, 'utf8')); } catch { return false; }
-  const until = Date.parse(String(state?.until ?? ''));
-  if (!Number.isFinite(until) || until <= now || until - now > PAIRING_WINDOW_MS + 1_000) return false;
+  if (!windowIsOpen(state, now)) return false;
   if (typeof state.phrase !== 'string' || normalizePairingPhrase(state.phrase).length < 12) return false;
   if (!epub || !requestId || !/^[0-9a-f]{64}$/.test(String(proof ?? ''))) return false;
   const expected = Buffer.from(pairingMac(purpose, state.phrase, { requestId, epub }), 'hex');
@@ -217,20 +229,31 @@ export function pairingAnswer(phrase, { requestId, epub }) {
 export async function pairingAnswerFor(root, request, now = Date.now()) {
   try {
     const state = JSON.parse(await readFile(path.join(root, WINDOW_FILE), 'utf8'));
-    const until = Date.parse(String(state?.until ?? ''));
-    if (!Number.isFinite(until) || until <= now || typeof state.phrase !== 'string') return null;
+    if (!windowIsOpen(state, now) || typeof state.phrase !== 'string') return null;
     return pairingAnswer(state.phrase, request);
   } catch {
     return null;
   }
 }
 
-export async function openPairingWindow(root, { ms = PAIRING_WINDOW_MS, now = Date.now() } = {}) {
+/**
+ * Open a pairing window.
+ *
+ * `untilPaired` is a machine's FIRST use: it has joined no fleet and has
+ * nothing on it, and it stays findable until it actually joins one. Ten
+ * minutes is the wrong deadline there — a new machine that nobody got to in
+ * time went silent and could only be found again by someone who knew to run a
+ * command on it. It is not a weaker window: a phrase still has to be proved
+ * before anything is handed over or taken in, and it shuts the moment the
+ * machine is paired.
+ */
+export async function openPairingWindow(root, { ms = PAIRING_WINDOW_MS, now = Date.now(), untilPaired = false } = {}) {
   await mkdir(root, { recursive: true });
   const until = new Date(now + ms).toISOString();
   const phrase = createPairingPhrase();
-  await writeFile(path.join(root, WINDOW_FILE), `${JSON.stringify({ until, phrase, failures: 0 })}\n`, { mode: 0o600 });
-  return { until, phrase };
+  const state = untilPaired ? { untilPaired: true, phrase, failures: 0 } : { until, phrase, failures: 0 };
+  await writeFile(path.join(root, WINDOW_FILE), `${JSON.stringify(state)}\n`, { mode: 0o600 });
+  return { until: untilPaired ? null : until, phrase, untilPaired };
 }
 
 /**
@@ -242,8 +265,7 @@ export async function verifyPairingProof(root, { requestId, epub, proof }, now =
   const file = path.join(root, WINDOW_FILE);
   let state;
   try { state = JSON.parse(await readFile(file, 'utf8')); } catch { return false; }
-  const until = Date.parse(String(state?.until ?? ''));
-  if (!Number.isFinite(until) || until <= now || until - now > PAIRING_WINDOW_MS + 1_000) return false;
+  if (!windowIsOpen(state, now)) return false;
   if (typeof state.phrase !== 'string' || normalizePairingPhrase(state.phrase).length < 12) return false;
   if (!epub || !requestId || !/^[0-9a-f]{64}$/.test(String(proof ?? ''))) return false;
   const expected = Buffer.from(pairingProof(state.phrase, { requestId, epub }), 'hex');
@@ -265,8 +287,7 @@ export async function closePairingWindow(root) {
 
 export async function pairingWindowOpen(root, now = Date.now()) {
   try {
-    const until = Date.parse(String(JSON.parse(await readFile(path.join(root, WINDOW_FILE), 'utf8')).until ?? ''));
-    return Number.isFinite(until) && until > now && until - now <= PAIRING_WINDOW_MS + 1_000;
+    return windowIsOpen(JSON.parse(await readFile(path.join(root, WINDOW_FILE), 'utf8')), now);
   } catch {
     return false;
   }

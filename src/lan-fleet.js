@@ -84,6 +84,11 @@ export async function startLanFleetConvergence({
   localIndex,
   onAdopt,
   logger = {},
+  // Whether this machine is in pairing mode. A machine says it is looking for
+  // a fleet only while it is, and the answer is read fresh each time: pairing
+  // mode is opened and shut while the watcher runs.
+  seekingFleet = async () => false,
+  onSeekingMachine = null,
   roomId = null,
   detectRoom = currentLanRoomId,
   nodeFactory = null,
@@ -135,6 +140,11 @@ export async function startLanFleetConvergence({
         statedAt,
       }), keyPair.priv),
       ...(deviceName ? { deviceName: String(deviceName).slice(0, 120) } : {}),
+      // A machine in pairing mode says so, so the fleet on this LAN can show
+      // it to the person instead of them having to know it is there. It is a
+      // statement of availability and nothing more: what it takes to actually
+      // join is unchanged, and no key travels with this.
+      ...(await seekingFleet() ? { seeking: true } : {}),
       ...facts,
     });
   };
@@ -176,6 +186,18 @@ export async function startLanFleetConvergence({
     // two were in one readable index.
     const peer = (await listFleetPeers({ root }))
       .find((candidate) => lanFingerprint('key', candidate.publicKey) === heardFingerprint) ?? null;
+    // A machine nobody here has met, saying it is looking for a fleet. It is
+    // reported so a person can be shown it — "there is a new machine on this
+    // network" — and nothing else happens: being on the LAN is not a reason
+    // to hand anything over, and this announcement carries no key to hand it
+    // over with. Taking it in is a person confirming the code it is showing.
+    if (!peer && value.seeking === true && onSeekingMachine) {
+      await onSeekingMachine({
+        keyFingerprint: heardFingerprint,
+        deviceName: value.deviceName ? String(value.deviceName).slice(0, 120) : null,
+        statedAt: String(value.statedAt ?? ''),
+      });
+    }
     if (!peer) {
       // Not a machine this one has been in an index with. It is on the LAN,
       // which is not a credential, so it is nothing to us.

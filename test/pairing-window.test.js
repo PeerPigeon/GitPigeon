@@ -44,6 +44,36 @@ test('the index capability leaves a machine only while someone at it has opened 
   assert.equal(await pairingWindowOpen(root, now), false);
 });
 
+test('a machine on its first use stays findable until it joins a fleet, and still admits nobody without the phrase', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gitpigeon-first-use-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const { phrase, until, untilPaired } = await openPairingWindow(root, { untilPaired: true });
+  assert.equal(untilPaired, true);
+  assert.equal(until, null, 'a first use has no deadline to state');
+
+  // A new machine nobody has got to yet used to go quiet after ten minutes,
+  // and could then only be found by someone who knew to run a command on it.
+  const wellPast = Date.now() + PAIRING_WINDOW_MS * 10;
+  assert.equal(await pairingWindowOpen(root, wellPast), true);
+
+  // Being findable is not being open: what it takes to join is unchanged.
+  const request = { requestId: 'f'.repeat(32), epub: 'a-browser-key' };
+  assert.equal(await verifyPairingProof(root, { ...request, proof: pairingProof('WRONG-PHRASE', request) }, wellPast), false);
+  assert.equal(await verifyPairingProof(root, { ...request, proof: pairingProof(phrase, request) }, wellPast), true);
+
+  // And it shuts when the machine joins one, which is what it was waiting for.
+  await closePairingWindow(root);
+  assert.equal(await pairingWindowOpen(root, wellPast), false);
+
+  // A window opened deliberately — by hand or from the dashboard — still
+  // expires, because somebody decided to open it and will not remember to
+  // shut it.
+  await openPairingWindow(root);
+  assert.equal(await pairingWindowOpen(root), true);
+  assert.equal(await pairingWindowOpen(root, Date.now() + PAIRING_WINDOW_MS + 2_000), false);
+});
+
 test('an open window is not enough: the request must prove the phrase, bound to its own key', async (t) => {
   const root = await scratch(t);
   const now = 1_800_000_000_000;

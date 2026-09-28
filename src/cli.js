@@ -1500,6 +1500,10 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
         deviceName: deviceHostName(),
         logger: log,
         localIndex: () => loadMachineIndex({ root }),
+        seekingFleet: () => pairingWindowOpen(root),
+        onSeekingMachine: ({ deviceName, keyFingerprint }) => {
+          log.info(`${deviceName ?? keyFingerprint.slice(0, 12)} is on this network in pairing mode. Approve it at gitpigeon.dev if the code it shows matches.`);
+        },
         onAdopt: async (capability) => {
           await adoptMachineIndexCapability(capability, { root });
           // Same rule as the mesh adopt path: never orchestrate our own
@@ -1843,10 +1847,10 @@ export function installPairingPlan({ existing = null, enroll = false, noEnroll =
  * with no deadline, and adopts an index when a dashboard holding one proves
  * this machine's phrase, so there is nothing to wait for here.
  */
-async function offerPairingHere(root, verbose) {
+async function offerPairingHere(root, verbose, { untilPaired = false } = {}) {
   await startWatchService({ root, verbose });
   console.log('\nThis machine is ready to pair and will keep offering.');
-  const { phrase } = await reportPairingCode(root);
+  const { phrase } = await reportPairingCode(root, { untilPaired });
   const dashboard = process.env.GITPIGEON_DASHBOARD_URL ?? 'https://gitpigeon.dev/';
   console.log(`\nApprove it at ${dashboard} once the code above matches.`);
   console.log('To add it to a setup that already exists, type the phrase into a dashboard');
@@ -1874,13 +1878,18 @@ async function commandEnroll(args, verbose) {
  * terminal with nothing on screen. The watcher owns its own code now, so this
  * reads it off disk and prints it immediately.
  */
-async function reportPairingCode(root = machineIndexRoot()) {
+async function reportPairingCode(root = machineIndexRoot(), { untilPaired = false } = {}) {
   const code = await localPairingCode(root);
-  const { phrase } = await openPairingWindow(root);
+  const { phrase } = await openPairingWindow(root, { untilPaired });
   console.log(`\n  This machine's pairing code: ${code}`);
   console.log(`  Pairing phrase:              ${phrase}`);
   console.log('  Enter the phrase at gitpigeon.dev; approve this machine only if it shows the same code.');
-  console.log(`  The phrase works once, for the next ${Math.round(PAIRING_WINDOW_MS / 60_000)} minutes. Never send it with a link to this machine.`);
+  console.log(untilPaired
+    // A machine's first use: it stays findable until it actually joins a
+    // fleet. A ten-minute deadline on a machine nobody has got to yet just
+    // makes it disappear.
+    ? '  It works once, and this machine stays in pairing mode until it joins. Never send it with a link to this machine.'
+    : `  The phrase works once, for the next ${Math.round(PAIRING_WINDOW_MS / 60_000)} minutes. Never send it with a link to this machine.`);
   return { code, phrase };
 }
 
@@ -1911,7 +1920,12 @@ async function commandInstall(args, verbose) {
     await reportPairingCode();
     return;
   }
-  await offerPairingHere(machineIndexRoot(), verbose);
+  // A machine that has joined no fleet is on its first use: it stays in
+  // pairing mode until it joins one, rather than going quiet on a deadline
+  // nobody was watching.
+  await offerPairingHere(machineIndexRoot(), verbose, {
+    untilPaired: !existing?.pairingComplete && !(existing?.entries?.length),
+  });
 }
 
 async function commandPairDashboard(args, verbose) {

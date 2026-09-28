@@ -70,6 +70,26 @@ export class ControlServer {
       this.logger.info?.(`Removed ${path.basename(entry.repository)} from the Pigeon index`);
       return { removed, name: entry.name };
     }
+    if (frame.kind === 'open-pairing-window') {
+      // Pairing mode, set from the dashboard. A browser reaching this channel
+      // already holds the index secret — every repository, the control
+      // channel and a terminal on every machine — so opening a window grants
+      // it nothing it does not have, and saves walking to the machine to type
+      // a command. What the window then admits is unchanged: a phrase, proved.
+      //
+      // Deliberate, so it is the timed window, not the open-ended one a
+      // machine's first use gets.
+      const { openPairingWindow, localPairingCode } = await import('./pairing-identity.js');
+      const { until, phrase } = await openPairingWindow(this.root);
+      this.logger.warn?.('A paired browser opened pairing on this machine; it accepts one machine or browser that proves the phrase.');
+      return { phrase, until, code: await localPairingCode(this.root), deviceName: (await import('./device-name.js')).deviceHostName() };
+    }
+    if (frame.kind === 'close-pairing-window') {
+      const { closePairingWindow } = await import('./pairing-identity.js');
+      await closePairingWindow(this.root);
+      this.logger.info?.('A paired browser closed pairing on this machine.');
+      return { closed: true };
+    }
     if (frame.kind === 'rotate-index') {
       // Real revocation. Every paired peer loses access until it pairs again,
       // because the capability they hold is this secret.

@@ -19,7 +19,7 @@ test('a first install leaves something listening rather than a deadline', async 
   // and then waited for an approval nobody could send left the OLD watcher
   // process running, so the machine kept answering as the build it replaced.
   assert.match(command, /startWatchService\(\{ root: machineIndexRoot\(\), verbose \}\)[\s\S]*startWatchService\(\{ root: machineIndexRoot\(\), verbose \}\)/);
-  assert.match(command, /await offerPairingHere\(machineIndexRoot\(\), verbose\)/);
+  assert.match(command, /await offerPairingHere\(machineIndexRoot\(\), verbose/);
   assert.doesNotMatch(command, /grantToWaitingBrowser/);
 
   // It may instead be joining a setup that already exists, which only an
@@ -66,7 +66,7 @@ test('joining an existing index is still possible on purpose', async () => {
   // that holds the index. Nothing here waits to be authorized over the mesh:
   // a dashboard only shows a machine whose request proves a phrase, and a
   // request made here carries none, so that wait could never end.
-  assert.match(command, /await offerPairingHere\(machineIndexRoot\(\), verbose\)/);
+  assert.match(command, /await offerPairingHere\(machineIndexRoot\(\), verbose/);
   assert.doesNotMatch(source, /Looking for an approved GitPigeon browser/);
   assert.doesNotMatch(source, /already-approved GitPigeon browser/);
 });
@@ -132,7 +132,7 @@ test('install prints the code the browser should be showing', async () => {
   const offer = /async function offerPairingHere\([\s\S]*?\n\}/.exec(source)?.[0] ?? '';
   assert.ok(offer, 'offerPairingHere should be present');
   assert.match(command, /await reportPairingCode\(\)/);
-  assert.match(offer, /await reportPairingCode\(root\)/);
+  assert.match(offer, /await reportPairingCode\(root/);
   const paths = `${command}${offer}`.split('reportPairingCode(').length - 1;
   assert.ok(paths >= 2, `every install path that pairs should report a code, found ${paths}`);
 });
