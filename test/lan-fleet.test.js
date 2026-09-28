@@ -120,7 +120,7 @@ test('two paired machines on one LAN converge on the index a browser is paired w
   }
 });
 
-test('a machine pinned before sealing keys existed still converges, on its own signature', async (t) => {
+test('a machine pinned without a sealing key is handed nothing, and nothing is published to fix that', async (t) => {
   const indexId = 'f00ab7ea24fe377da70fc7148bfdd047';
   const pro = await machine(t, {
     name: 'pro',
@@ -152,36 +152,31 @@ test('a machine pinned before sealing keys existed still converges, on its own s
   pro.node.emit('peerConnected', 'air-peer');
   await new Promise((resolve) => setTimeout(resolve, 200));
 
-  assert.equal(air.adopted.length, 1, 'the handover was sealed to a key the pinned signing key vouched for');
-  assert.equal(air.adopted[0].secret, 'VvDQvHKC-pro-secret-value-0000000000');
-  // And the pin is complete afterwards, so the next one needs no signature.
-  assert.equal((await fleetPeer(air.keyPair.pub, { root: pro.root })).sealingKey, air.keyPair.epub);
+  // Nothing is handed over. A handover is sealed only to a key this machine
+  // already holds from the encrypted index; it briefly accepted one the
+  // announcement carried, signed by the pinned key — which meant publishing
+  // that sealing key in the clear on a room every device on the LAN can join,
+  // and the sealing key is half of what opens a relayed terminal frame. That
+  // is why it was moved inside the index in the first place.
+  assert.equal(air.adopted.length, 0, 'no secret travels on the strength of something announced over the air');
+  assert.equal(pro.node.plain.some((value) => value.kind === 'sealed'), false);
 
-  // A sealing key nobody signed for is not usable: same announcement, no
-  // signature, and the Pro hands over nothing.
-  const quiet = await machine(t, {
-    name: 'quiet',
-    index: indexState({ indexId, secret: 'quiet-secret-0000000000000000000000', pairingComplete: true, entries: 1 }),
-  });
-  const other = await keys();
-  await pinFleetPeer({ root: quiet.root, publicKey: other.pub, sealingKey: null, deviceName: 'Unsigned' });
-  quiet.node.emit('message', {
-    local: false,
-    fromPeerId: 'unsigned-peer',
-    data: {
-      protocol: 'gitpigeon-lan-fleet/1',
-      kind: 'here',
-      publicKey: other.pub,
-      sealingKey: other.epub,
-      statedAt: new Date().toISOString(),
-      indexId,
-      secretFingerprint: secretFingerprint('someone-elses-secret'),
-      pairingComplete: false,
-      entries: 1,
-    },
-  });
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.equal(quiet.node.plain.some((value) => value.kind === 'sealed'), false);
+  // And the announcements name keys without carrying them.
+  const announcements = [...pro.node.plain, ...air.node.plain].filter((value) => value.kind === 'here');
+  assert.ok(announcements.length > 0);
+  for (const value of announcements) {
+    assert.equal(value.sealingKey, undefined, 'no sealing key on the wire');
+    assert.equal(value.publicKey, undefined, 'no signing key on the wire');
+    assert.match(String(value.keyFingerprint), /^[0-9a-f]{32}$/);
+    // Nor the index it belongs to, which names the room its members meet in.
+    assert.notEqual(value.indexId, indexId);
+    assert.match(String(value.indexId), /^[0-9a-f]{32}$/);
+  }
+
+  // Pairing once re-pins it with the key from the index, and then it converges
+  // on its own — that path is covered by the test above.
+  await pinFleetPeer({ root: pro.root, publicKey: air.keyPair.pub, sealingKey: air.keyPair.epub, deviceName: 'Air' });
+  assert.equal((await fleetPeer(air.keyPair.pub, { root: pro.root })).sealingKey, air.keyPair.epub);
 });
 
 test('an unpinned machine on the LAN is heard and given nothing', async (t) => {

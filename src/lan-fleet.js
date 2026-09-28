@@ -1,6 +1,7 @@
 import { currentLanRoomId } from './lan-identity.js';
 import { decodeMeshPayload } from './device-approval-mesh.js';
-import { fleetPeer, pinFleetPeer } from './fleet-peers.js';
+import { createHash } from 'node:crypto';
+import { fleetPeer, listFleetPeers } from './fleet-peers.js';
 import { preferredFleetIndex, secretFingerprint, shouldOfferIndexToPeer } from './fleet-convergence.js';
 import { installNativeWebRTC } from './webrtc.js';
 
@@ -20,25 +21,40 @@ export function capabilityStatement({ indexId, secretFingerprint: fingerprint, r
 }
 
 /**
- * What an announcement is signed over, the sealing key included.
+ * A one-way name for a key or an index, so an announcement identifies what it
+ * is about without handing it over.
  *
- * A machine pinned from a record written before sealing keys travelled in the
- * index — every machine paired before 0.13.150 — is pinned by its signing key
- * alone, and there is nothing on disk to seal a handover to. Its own signature
- * over its sealing key supplies the missing half from the key that IS pinned,
- * so those machines re-converge too instead of needing a phrase forever.
+ * An announcement goes out on a room every device on the LAN can join. It
+ * used to carry this machine's signing key and its SEALING key in the clear —
+ * and the sealing key is half of what opens a relayed terminal frame, which
+ * is exactly why it was moved inside the encrypted index in the first place.
+ * The pairing code a person compares is derived from the signing key. Neither
+ * belongs on an open wire in a coffee shop.
+ *
+ * A peer that has been paired already holds both keys, from the index, so a
+ * fingerprint is all it needs to recognise who is speaking; it then checks
+ * the signature against the key it pinned. A stranger learns a hash.
  */
-export function announcementStatement({ publicKey, sealingKey, indexId, secretFingerprint: fingerprint, statedAt }) {
-  return `gitpigeon-lan-here/1\0${publicKey}\0${sealingKey}\0${indexId}\0${fingerprint}\0${statedAt}`;
+export function lanFingerprint(label, value) {
+  return createHash('sha256').update(`gitpigeon-lan-${label}/1\0`).update(String(value ?? '')).digest('hex').slice(0, 32);
+}
+
+/** What an announcement is signed over. It names, and hands over nothing. */
+export function announcementStatement({ keyFingerprint, indexFingerprint, secretFingerprint: fingerprint, statedAt }) {
+  return `gitpigeon-lan-here/2\0${keyFingerprint}\0${indexFingerprint}\0${fingerprint}\0${statedAt}`;
 }
 
 // An announcement older than this says nothing current about a machine.
 const ANNOUNCEMENT_FRESH_MS = 5 * 60_000;
 
-/** The state of one index, as the convergence rule compares them. */
+/**
+ * The state of one index, as the convergence rule compares them. The index is
+ * named by a fingerprint: the rule only ever tests two of these for equality,
+ * and the value travels on an open LAN room.
+ */
 function indexFacts(index) {
   return {
-    indexId: index.indexId,
+    indexId: lanFingerprint('index', index.indexId),
     secretFingerprint: secretFingerprint(index.secret),
     secretSetAt: index.secretSetAt ?? null,
     pairingComplete: Boolean(index.pairingComplete),
@@ -103,25 +119,23 @@ export async function startLanFleetConvergence({
     const index = await localIndex();
     const facts = indexFacts(index);
     const statedAt = new Date(now()).toISOString();
+    const keyFingerprint = lanFingerprint('key', keyPair.pub);
     const { signMessage } = await import('unsea');
     node.broadcast({
       protocol: LAN_FLEET_PROTOCOL,
       kind: 'here',
-      publicKey: keyPair.pub,
-      sealingKey: keyPair.epub,
+      keyFingerprint,
       statedAt,
-      // Signed by the key a peer pinned, over the sealing key as well: that is
-      // what lets a peer pinned before sealing keys existed complete its pin.
+      // Signed by the key a peer pinned. It proves who is speaking to someone
+      // who already holds that key, and tells a stranger nothing.
       signature: await signMessage(announcementStatement({
-        publicKey: keyPair.pub,
-        sealingKey: keyPair.epub,
-        indexId: facts.indexId,
+        keyFingerprint,
+        indexFingerprint: facts.indexId,
         secretFingerprint: facts.secretFingerprint,
         statedAt,
       }), keyPair.priv),
       ...(deviceName ? { deviceName: String(deviceName).slice(0, 120) } : {}),
       ...facts,
-      publisherId: index.publisherId,
     });
   };
 
@@ -155,15 +169,19 @@ export async function startLanFleetConvergence({
   };
 
   const heard = async (value) => {
-    const publicKey = String(value.publicKey ?? '');
-    if (!publicKey || publicKey === keyPair.pub) return;
-    const peer = await fleetPeer(publicKey, { root });
+    const heardFingerprint = String(value.keyFingerprint ?? '');
+    if (!heardFingerprint || heardFingerprint === lanFingerprint('key', keyPair.pub)) return;
+    // Only a machine already paired with this one can be recognised: the
+    // announcement names a key, and the key itself is held here from when the
+    // two were in one readable index.
+    const peer = (await listFleetPeers({ root }))
+      .find((candidate) => lanFingerprint('key', candidate.publicKey) === heardFingerprint) ?? null;
     if (!peer) {
       // Not a machine this one has been in an index with. It is on the LAN,
       // which is not a credential, so it is nothing to us.
-      if (!unpinnedSeen.has(publicKey)) {
-        unpinnedSeen.add(publicKey);
-        logger.debug?.(`Ignoring an unpinned machine on the LAN room (${publicKey.slice(0, 12)}).`);
+      if (!unpinnedSeen.has(heardFingerprint)) {
+        unpinnedSeen.add(heardFingerprint);
+        logger.debug?.(`Ignoring an unpinned machine on the LAN room (${heardFingerprint.slice(0, 12)}).`);
       }
       return;
     }
@@ -175,46 +193,32 @@ export async function startLanFleetConvergence({
       entries: Number(value.entries) || 0,
       deviceName: value.deviceName ? String(value.deviceName).slice(0, 120) : null,
     };
-    if (!shouldOfferIndexToPeer(indexFacts(await localIndex()), remote)) return;
-    if (now() - (offeredAt.get(publicKey) ?? 0) < OFFER_COOLDOWN_MS) return;
-    // Where the handover can be sealed. The pinned key when there is one;
-    // otherwise the one this announcement signed for itself, which only the
-    // holder of the pinned signing key could have produced.
-    const sealTo = peer.sealingKey ?? await selfSignedSealingKey(peer, value);
-    if (!sealTo) {
-      logger.debug?.(`${remote.deviceName ?? publicKey.slice(0, 12)} is on a different secret, but stated no sealing key this machine can trust.`);
-      return;
-    }
-    await offerTo(peer, remote, sealTo);
-  };
-
-  /**
-   * The sealing key an announcement states, accepted only when the pinned
-   * signing key signed for it and the statement is current.
-   */
-  const selfSignedSealingKey = async (peer, value) => {
-    const sealingKey = String(value.sealingKey ?? '');
+    // The announcement must be current and signed by the key pinned here.
     const statedAt = String(value.statedAt ?? '');
     const age = now() - (Date.parse(statedAt) || 0);
-    if (!sealingKey || !value.signature || !(age >= -ANNOUNCEMENT_FRESH_MS && age <= ANNOUNCEMENT_FRESH_MS)) return null;
+    if (!(age >= -ANNOUNCEMENT_FRESH_MS && age <= ANNOUNCEMENT_FRESH_MS)) return;
     const { verifyMessage } = await import('unsea');
-    const valid = await verifyMessage(announcementStatement({
-      publicKey: peer.publicKey,
-      sealingKey,
-      indexId: String(value.indexId ?? ''),
-      secretFingerprint: String(value.secretFingerprint ?? ''),
+    const spoken = await verifyMessage(announcementStatement({
+      keyFingerprint: heardFingerprint,
+      indexFingerprint: remote.indexId,
+      secretFingerprint: remote.secretFingerprint,
       statedAt,
-    }), String(value.signature), peer.publicKey).catch(() => false);
-    if (!valid) return null;
-    // Complete the pin, so the next handover needs no signature check and a
-    // machine pinned from a record written before 0.13.150 is fully known.
-    await pinFleetPeer({
-      root,
-      publicKey: peer.publicKey,
-      sealingKey,
-      deviceName: value.deviceName ? String(value.deviceName) : peer.deviceName,
-    }).catch((error) => logger.debug?.(`Completing the pin for ${peer.publicKey.slice(0, 12)}: ${error.message}`));
-    return sealingKey;
+    }), String(value.signature ?? ''), peer.publicKey).catch(() => false);
+    if (!spoken) {
+      logger.debug?.(`An announcement naming ${peer.deviceName ?? heardFingerprint.slice(0, 12)} was not signed by the key pinned for it.`);
+      return;
+    }
+    if (!shouldOfferIndexToPeer(indexFacts(await localIndex()), remote)) return;
+    if (now() - (offeredAt.get(peer.publicKey) ?? 0) < OFFER_COOLDOWN_MS) return;
+    // Sealed only to the key this machine already holds for that peer, from
+    // the encrypted index. A machine pinned before sealing keys travelled
+    // there has none, and pairs once by phrase rather than being handed a
+    // secret on the strength of something announced over the air.
+    if (!peer.sealingKey) {
+      logger.debug?.(`${remote.deviceName ?? peer.deviceName ?? 'A paired machine'} is on a different index secret, but this machine holds no sealing key for it. Pair it once and it re-converges after that.`);
+      return;
+    }
+    await offerTo(peer, remote, peer.sealingKey);
   };
 
   const sealed = async (cipher) => {
@@ -253,7 +257,9 @@ export async function startLanFleetConvergence({
     }
     const mine = indexFacts(await localIndex());
     const theirs = {
-      indexId: String(capability.indexId ?? ''),
+      // Fingerprinted to match how this machine names its own index; the rule
+      // compares these for equality and nothing else.
+      indexId: lanFingerprint('index', capability.indexId),
       secretFingerprint: fingerprint,
       secretSetAt: capability.secretSetAt ?? null,
       // A handover is only sent by a machine that decided it wins, and states
