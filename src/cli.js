@@ -33,6 +33,7 @@ import {
   claimDashboardPairing,
   completeDashboardPairing,
   connectMachineIndexService,
+  LAN_SEEKING_STALE_MS,
   markShareEnded,
   listMachinePigeons,
   loadMachineIndex,
@@ -55,6 +56,7 @@ import { startDeviceApprovalResponder } from './device-approval-mesh.js';
 import { PAIRING_WINDOW_MS, closePairingWindow, loadPairingKeyPair, localPairingCode, openPairingPhrase, openPairingWindow, pairingAnswerFor, pairingMacFor, pairingNetworkId, pairingWindowOpen, verifyPairingMac, verifyPairingProof } from './pairing-identity.js';
 import { startLanApprovalService } from './lan-enrollment.js';
 import { startLanFleetConvergence } from './lan-fleet.js';
+import { currentLanRoomId } from './lan-identity.js';
 import { ensureServiceWatchdog, inspectCommandOnPath, installNativeIntegration, refreshNativeCommandShim, removeServiceWatchdog } from './native-install.js';
 import { ControlServer } from './control-server.js';
 import { RepositorySynchronizer } from './protocol.js';
@@ -1210,6 +1212,11 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
     machineIndex = await connectMachineIndexService(log, {
       root,
       serviceInstanceId,
+      // The name this machine's own network produces. Published in its record
+      // so a browser — which is handed an mDNS-obfuscated candidate and can
+      // never see a subnet or a gateway — can still tell which machines are
+      // together on one network.
+      lanId: await currentLanRoomId().catch(() => null),
       // The clone directory's volume is the disk the dashboard reports for
       // this machine; on an archive it is often not the boot volume.
       diskDirectory: await cloneDirectory({ root }).catch(() => null),
@@ -1490,6 +1497,24 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       // repository watcher and all already-approved devices must keep working.
       log.warn(`LAN device approval is unavailable: ${error.message}`);
     }
+    // Machines seen in pairing mode on this network, by key fingerprint. A
+    // sighting expires, so a machine that is switched off or paired elsewhere
+    // stops being offered rather than lingering in the dashboard forever.
+    const seenOnLan = new Map();
+    const publishLanSeeking = async () => {
+      const now = Date.now();
+      for (const [key, seen] of seenOnLan) {
+        if (now - seen.seenAt > LAN_SEEKING_STALE_MS) seenOnLan.delete(key);
+      }
+      // reportLanSeeking reports its own failure through this logger; the
+      // caller has nothing further to do with it.
+      await machineIndex.reportLanSeeking([...seenOnLan.values()])
+        .catch((error) => log.debug?.(`Reporting machines on this network: ${error.message}`));
+    };
+    const lanSeekingTimer = setInterval(() => {
+      publishLanSeeking().catch((error) => log.debug?.(`Reporting machines on this network: ${error.message}`));
+    }, LAN_SEEKING_STALE_MS / 3);
+    lanSeekingTimer.unref?.();
     try {
       // Machines already paired with this one re-converge on a shared LAN with
       // no phrase and no browser. Nothing new is admitted: the room is the LAN,
@@ -1501,8 +1526,15 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
         logger: log,
         localIndex: () => loadMachineIndex({ root }),
         seekingFleet: () => pairingWindowOpen(root),
-        onSeekingMachine: ({ deviceName, keyFingerprint }) => {
-          log.info(`${deviceName ?? keyFingerprint.slice(0, 12)} is on this network in pairing mode. Approve it at gitpigeon.dev if the code it shows matches.`);
+        // A machine on this network asking to join one. The dashboard cannot
+        // see a LAN, so this machine writes what it saw into the encrypted
+        // index and the dashboard reads it there. Nothing is admitted by being
+        // seen: joining is still the code on its screen, confirmed.
+        onSeekingMachine: async ({ deviceName, keyFingerprint }) => {
+          const known = seenOnLan.get(keyFingerprint);
+          seenOnLan.set(keyFingerprint, { keyFingerprint, deviceName, seenAt: Date.now() });
+          if (!known) log.info(`${deviceName ?? keyFingerprint.slice(0, 12)} is on this network in pairing mode; it is offered in the dashboard.`);
+          await publishLanSeeking();
         },
         onAdopt: async (capability) => {
           await adoptMachineIndexCapability(capability, { root });
@@ -3324,7 +3356,6 @@ async function commandDoctor(args, cwd) {
   console.log(`Pairing code: ${await localPairingCode(machineIndexRoot()).catch(() => 'unavailable')}`);
   // Read, never create: `doctor` must not mint an index on a machine that has
   // none, or it would report the one it just made as this machine's.
-  const { currentLanRoomId } = await import('./lan-identity.js');
   const { listFleetPeers } = await import('./fleet-peers.js');
   reportIndexReachability({
     index: await loadMachineIndex({ root: machineIndexRoot(), create: false }).catch(() => null),

@@ -612,6 +612,48 @@ export function indexPublishersKey(indexId) {
   return `gitpigeon/index/v1/${indexId}/publishers`;
 }
 
+/**
+ * Where a watcher reports the machines it can see in pairing mode on its own
+ * network. A browser has no way to look: a page is handed an mDNS-obfuscated
+ * host candidate, so it never learns a subnet, a gateway or an ARP table, and
+ * the only network fact it can reach for is the public address it shares with
+ * everyone behind the same NAT — a coffee shop, or half an ISP under CGNAT.
+ * So the machines that CAN see the network do the looking and write down what
+ * they found, here, inside the encrypted index where only the fleet reads it.
+ */
+export function lanSeekingKey(indexId, publisherId) {
+  if (!PUBLISHER_ID.test(String(publisherId))) throw new Error('Invalid GitPigeon publisher ID');
+  return `gitpigeon/index/v1/${indexId}/lan-seeking/${publisherId}`;
+}
+
+/** How long a sighting stands for. A machine that stops announcing is gone. */
+export const LAN_SEEKING_STALE_MS = 90_000;
+
+/**
+ * What a watcher reports about its network: which machines are on it asking
+ * to join a fleet. Names and key fingerprints only — the announcement they
+ * were seen in carries nothing else, and nothing here admits anybody.
+ */
+export function lanSeekingValue(index, lanId, machines, now = Date.now()) {
+  return {
+    protocol: INDEX_PROTOCOL,
+    kind: 'lan-seeking',
+    indexId: index.indexId,
+    publisherId: index.publisherId,
+    ...(lanId ? { lanId: String(lanId).slice(0, 64) } : {}),
+    updatedAt: new Date(now).toISOString(),
+    machines: (machines ?? [])
+      .filter((machine) => /^[0-9a-f]{32}$/.test(String(machine?.keyFingerprint ?? '')))
+      .filter((machine) => now - (machine.seenAt ?? 0) <= LAN_SEEKING_STALE_MS)
+      .slice(0, 32)
+      .map((machine) => ({
+        keyFingerprint: String(machine.keyFingerprint),
+        ...(machine.deviceName ? { deviceName: String(machine.deviceName).slice(0, 120) } : {}),
+        seenAt: new Date(machine.seenAt ?? now).toISOString(),
+      })),
+  };
+}
+
 export function publisherDirectoryKey(indexId, publisherId) {
   if (!PUBLISHER_ID.test(String(publisherId))) throw new Error('Invalid GitPigeon publisher ID');
   return `gitpigeon/index/v1/${indexId}/publisher/${publisherId}`;
@@ -868,7 +910,7 @@ export function publisherDirectoryValue(
   peerId = null,
   deviceName = null,
   pairingPublicKey = null,
-  { storageRole = null, disk = null, pairingSealingKey = null } = {},
+  { storageRole = null, disk = null, pairingSealingKey = null, lanId = null } = {},
 ) {
   return {
     ...directoryValue(index, entries, now, serviceInstanceId),
@@ -888,6 +930,13 @@ export function publisherDirectoryValue(
     // longer announces itself to strangers, so the key travels here, inside
     // the encrypted index, where only this fleet's members can read it.
     ...(pairingSealingKey ? { pairingSealingKey: String(pairingSealingKey).slice(0, 200) } : {}),
+    // Which network this machine is on, as a name only its own LAN produces.
+    // A browser cannot work this out for itself — a page is given an
+    // mDNS-obfuscated host candidate, so it never sees a subnet, a gateway or
+    // an ARP table — but it does not have to: the machines that can see their
+    // network say so here, inside the encrypted index, and every member reads
+    // which of them share one.
+    ...(lanId ? { lanId: String(lanId).slice(0, 64) } : {}),
     publisherId: index.publisherId,
     // Which build this machine runs, so browsers can show it beside the
     // machine instead of leaving versions a mystery.
@@ -1008,6 +1057,10 @@ async function connectMachineDirectory(index, logger = {}, {
   // The directory whose volume is reported as this machine's disk; the
   // clone directory, which on an archive is often not the boot volume.
   diskDirectory = null,
+  // This machine's network, named the way every machine on it names it. The
+  // machines that can see a network put the fact here so the browsers that
+  // cannot can still read it.
+  lanId = null,
 } = {}) {
   await installNativeWebRTC();
   await installNativeStorage(root);
@@ -1339,7 +1392,7 @@ async function connectMachineDirectory(index, logger = {}, {
         node.getClientId(),
         deviceHostName(),
         pairingPublicKey,
-        { storageRole, disk: await currentDisk(), pairingSealingKey },
+        { storageRole, disk: await currentDisk(), pairingSealingKey, lanId },
       );
       const fingerprint = JSON.stringify(value.pigeons);
       const directoryChanged = fingerprint !== lastDirectoryFingerprint;
@@ -1527,6 +1580,20 @@ async function connectMachineDirectory(index, logger = {}, {
   return {
     index,
     node,
+    /**
+     * Report the machines seen in pairing mode on this machine's network, so
+     * the fleet's browsers can show them. Writing an empty list is how a
+     * sighting is withdrawn once the machine stops announcing.
+     */
+    async reportLanSeeking(machines) {
+      if (closed || !node.storage) return false;
+      await node.storage.put(
+        'public',
+        lanSeekingKey(index.indexId, index.publisherId),
+        lanSeekingValue(index, lanId, machines),
+      );
+      return true;
+    },
     /**
      * What this machine's index half is doing, stated by the machine itself.
      * Carried on pairing announcements so a machine whose index node cannot

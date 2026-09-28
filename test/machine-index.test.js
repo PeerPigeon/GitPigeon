@@ -457,6 +457,40 @@ test('storage roles are read from the fleet record, ignoring anything malformed'
   assert.equal(parseStorageRoles(null, indexId).size, 0);
 });
 
+test('a watcher writes down the machines on its network, because a browser cannot look', async () => {
+  const { lanSeekingKey, lanSeekingValue, LAN_SEEKING_STALE_MS, INDEX_PROTOCOL } = await import('../src/machine-index.js');
+  const index = { indexId: 'f'.repeat(32), publisherId: 'a'.repeat(32) };
+  const now = Date.parse('2026-09-28T05:00:00.000Z');
+  const lanId = 'gitpigeon-lan-v1-35f62d0021902a334abf99ea48c5746c7bb285b3';
+
+  assert.equal(lanSeekingKey(index.indexId, index.publisherId), `gitpigeon/index/v1/${index.indexId}/lan-seeking/${index.publisherId}`);
+  assert.throws(() => lanSeekingKey(index.indexId, 'not-a-publisher'), /Invalid GitPigeon publisher ID/);
+
+  const value = lanSeekingValue(index, lanId, [
+    { keyFingerprint: 'b'.repeat(32), deviceName: 'Dans-MacBook-Air.local', seenAt: now - 5_000 },
+    // Stopped announcing: switched off, or paired elsewhere. It is not on
+    // offer any more — a sighting is not a record of having once existed.
+    { keyFingerprint: 'c'.repeat(32), deviceName: 'Gone', seenAt: now - (LAN_SEEKING_STALE_MS + 1_000) },
+    // Not a key fingerprint at all.
+    { keyFingerprint: 'nonsense', deviceName: 'Bogus', seenAt: now },
+  ], now);
+
+  assert.equal(value.protocol, INDEX_PROTOCOL);
+  assert.equal(value.kind, 'lan-seeking');
+  assert.equal(value.lanId, lanId);
+  assert.deepEqual(value.machines.map((machine) => machine.deviceName), ['Dans-MacBook-Air.local']);
+  assert.equal(value.machines[0].keyFingerprint, 'b'.repeat(32));
+
+  // Names and fingerprints only. Whatever was seen, nothing that admits it
+  // travels here: joining is still the code on its screen, confirmed.
+  const written = JSON.stringify(value);
+  assert.doesNotMatch(written, /secret|epub|sealingKey|publicKey/i);
+
+  // An empty list is how a sighting is withdrawn.
+  assert.deepEqual(lanSeekingValue(index, lanId, [], now).machines, []);
+  assert.deepEqual(lanSeekingValue(index, null, null, now).machines, []);
+});
+
 test('a mesh error describes this machine only while it is recent', async () => {
   const { currentIndexError, INDEX_ERROR_FRESH_MS } = await import('../src/machine-index.js');
   const now = Date.parse('2026-09-27T22:43:00.000Z');
