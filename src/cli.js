@@ -1217,6 +1217,9 @@ async function runWatchService({ root, token, pollMs, verbose = false }) {
       // never see a subnet or a gateway — can still tell which machines are
       // together on one network.
       lanId: await currentLanRoomId().catch(() => null),
+      // Read at each publish, so a machine whose shell has just broken says so
+      // within a heartbeat rather than leaving a dashboard to time out.
+      terminalHealth: () => terminalServer?.health() ?? null,
       // The clone directory's volume is the disk the dashboard reports for
       // this machine; on an archive it is often not the boot volume.
       diskDirectory: await cloneDirectory({ root }).catch(() => null),

@@ -74,6 +74,42 @@ function browserFrame(kind, sequence, fields = {}) {
   };
 }
 
+test('a machine says whether its shell works, so Online and a blank terminal cannot both stand', async (t) => {
+  const { TerminalServer } = await import('../src/terminal-server.js');
+  const node = new FakeNode();
+  const serviceInstanceId = 'c'.repeat(32);
+  const server = new TerminalServer({
+    node,
+    serviceInstanceId,
+    deviceName: 'broken-machine',
+    // A machine whose shell cannot start: the PTY assets are missing, the
+    // helper is not executable, whatever it is. The machine still publishes
+    // its record every ten seconds, so without this it reads as Online
+    // everywhere while every terminal opened on it stays blank.
+    spawnPty: async () => { throw new Error('spawn-helper is not executable'); },
+  });
+  server.start();
+  t.after(() => server.stop());
+
+  assert.deepEqual(server.health(), { sessions: 0, opened: 0 }, 'nothing claimed before anything is tried');
+
+  node.receive('browser', deviceTerminalRoom(serviceInstanceId), TERMINAL_CHANNEL, {
+    kind: 'open', sessionId: 'd'.repeat(32), serviceInstanceId, sequence: 0, cols: 80, rows: 24,
+    devices: [{ name: 'broken-machine' }],
+  }, 'direct');
+  await settle();
+
+  // The asker is told now...
+  const [reply] = node.directFrames(TERMINAL_CHANNEL);
+  assert.equal(reply.kind, 'error');
+  assert.match(reply.message, /spawn-helper is not executable/);
+  // ...and the machine carries the reason, for a dashboard that never asked.
+  const health = server.health();
+  assert.equal(health.sessions, 0);
+  assert.equal(health.opened, 0);
+  assert.match(health.error, /Could not open the watcher shell: spawn-helper is not executable/);
+});
+
 test('terminal frames from another repository or service instance are ignored', async (t) => {
   const node = new FakeNode();
   const server = new TerminalServer({

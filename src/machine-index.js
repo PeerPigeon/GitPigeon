@@ -910,7 +910,7 @@ export function publisherDirectoryValue(
   peerId = null,
   deviceName = null,
   pairingPublicKey = null,
-  { storageRole = null, disk = null, pairingSealingKey = null, lanId = null } = {},
+  { storageRole = null, disk = null, pairingSealingKey = null, lanId = null, terminal = null } = {},
 ) {
   return {
     ...directoryValue(index, entries, now, serviceInstanceId),
@@ -937,6 +937,12 @@ export function publisherDirectoryValue(
     // network say so here, inside the encrypted index, and every member reads
     // which of them share one.
     ...(lanId ? { lanId: String(lanId).slice(0, 64) } : {}),
+    // Whether this machine can actually serve a shell. A record is published
+    // every ten seconds whatever the terminal is doing, so a machine whose
+    // shell is broken read as Online everywhere while every terminal opened
+    // on it stayed blank — two claims in one dashboard that cannot both be
+    // true. The machine knows which; this is where it says so.
+    ...(terminal ? { terminal } : {}),
     publisherId: index.publisherId,
     // Which build this machine runs, so browsers can show it beside the
     // machine instead of leaving versions a mystery.
@@ -1061,6 +1067,8 @@ async function connectMachineDirectory(index, logger = {}, {
   // machines that can see a network put the fact here so the browsers that
   // cannot can still read it.
   lanId = null,
+  // What this machine's shell can actually do, read fresh at each publish.
+  terminalHealth = null,
 } = {}) {
   await installNativeWebRTC();
   await installNativeStorage(root);
@@ -1392,7 +1400,7 @@ async function connectMachineDirectory(index, logger = {}, {
         node.getClientId(),
         deviceHostName(),
         pairingPublicKey,
-        { storageRole, disk: await currentDisk(), pairingSealingKey, lanId },
+        { storageRole, disk: await currentDisk(), pairingSealingKey, lanId, terminal: terminalHealth?.() ?? null },
       );
       const fingerprint = JSON.stringify(value.pigeons);
       const directoryChanged = fingerprint !== lastDirectoryFingerprint;

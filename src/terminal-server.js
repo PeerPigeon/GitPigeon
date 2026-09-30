@@ -434,6 +434,10 @@ export class TerminalServer {
     this.subscriptions = new Map();
     this.started = false;
     this.sweepTimer = null;
+    // What this machine's shell has actually managed to do, for its record.
+    this.opened = 0;
+    this.lastOpenedAt = null;
+    this.lastOpenError = null;
     for (const repository of repositories) this.addRepository(repository);
   }
 
@@ -530,6 +534,27 @@ export class TerminalServer {
 
   activeSessionCount() {
     return this.sessions.size;
+  }
+
+  /**
+   * Whether this machine can actually serve a shell, and why not when it
+   * cannot.
+   *
+   * A machine publishes its record every ten seconds whatever its terminal is
+   * doing, so a watcher whose shell is broken reads as "Online" everywhere
+   * while every terminal opened on it stays blank — two claims in one
+   * dashboard that cannot both be true, and the person is left to decide
+   * which. The machine knows the answer; it just never said it. Published in
+   * its record so the dashboard can state it instead of timing out and
+   * guessing.
+   */
+  health() {
+    return {
+      sessions: this.sessions.size,
+      opened: this.opened,
+      ...(this.lastOpenError ? { error: String(this.lastOpenError).slice(0, 200) } : {}),
+      ...(this.lastOpenedAt ? { lastOpenedAt: new Date(this.lastOpenedAt).toISOString() } : {}),
+    };
   }
 
   async #receive(peerId, frame, room) {
@@ -663,7 +688,12 @@ export class TerminalServer {
         },
       });
     } catch (error) {
-      await this.#send(address, 'error', 0, { message: `Could not open the watcher shell: ${error.message}` });
+      // Answered AND remembered: the asker is told now, and the machine
+      // carries the reason in its record so a dashboard that never asked can
+      // still say why this machine's terminal is not usable.
+      this.lastOpenError = `Could not open the watcher shell: ${error.message}`;
+      this.logger.warn?.(this.lastOpenError);
+      await this.#send(address, 'error', 0, { message: this.lastOpenError });
       return;
     }
     const session = {
@@ -690,6 +720,9 @@ export class TerminalServer {
       closed: false,
     };
     this.sessions.set(id, session);
+    this.opened += 1;
+    this.lastOpenedAt = Date.now();
+    this.lastOpenError = null;
     session.disposables.push(terminal.onData((data) => {
       const visible = this.#captureHistory(session, data);
       if (visible) this.#gateOutput(session, visible);
