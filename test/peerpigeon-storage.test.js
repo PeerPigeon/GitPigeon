@@ -114,7 +114,11 @@ test('restarted publisher reconciles a newer PeerPigeon record before updating i
   await wait();
   assert.equal((await browser.get('public', key))?.value.watcherCount, 0);
 
-  const reconciled = await restarted.retrieve('public', key, { timeoutMs: 1_000 });
+  // retrieve() answers at once from the copy held here and applies a newer answer a moment later
+  // (as machine-index.js does: retrieve, wait, then read what settled).
+  await restarted.retrieve('public', key, { timeoutMs: 1_000 });
+  await wait();
+  const reconciled = await restarted.get('public', key);
   assert.equal(reconciled?.value.revision, 4);
   await restarted.put('public', key, { watcherCount: 1, revision: 5 });
   await wait();
