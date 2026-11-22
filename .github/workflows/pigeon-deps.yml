@@ -1,0 +1,46 @@
+# Keeps this app on the newest Pigeon libraries (PeerPigeon, freertc, unsea, PigeonIdP, PigeonFS):
+# every hour, their main branches' newest commits are pinned here, the app is built and tested, and the
+# change is pushed only when both pass. Nothing is pushed on weekdays 7:30am-3:30pm Chicago time
+# (a run by hand still pushes). Deploying stays as it is.
+name: Pigeon dependencies
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pigeon-deps
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Newest Pigeon commits
+        id: deps
+        run: node .github/pigeon-deps.mjs
+      - name: Install
+        if: steps.deps.outputs.changed == 'true'
+        run: npm install --no-audit --no-fund
+      - name: Build
+        if: steps.deps.outputs.changed == 'true'
+        run: true
+      - name: Test
+        if: steps.deps.outputs.changed == 'true'
+        run: node --test --test-skip-pattern="watcher terminal opens one bounded PTY"
+      - name: Commit and push
+        if: steps.deps.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "Pigeon dependencies: ${{ steps.deps.outputs.summary }}"
+          git pull --rebase origin ${{ github.ref_name }} && git push origin HEAD:${{ github.ref_name }}
